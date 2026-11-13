@@ -1,0 +1,13 @@
+{
+  "repo": "https://github.com/quadrismegistus/malignment",
+  "source": "https://github.com/quadrismegistus/malignment/commit/dee4fc993a134a2faf2662d0b316ed9486748476",
+  "check_sha256": "3586d4520fae577592529b440ec33bf34cde9d0f3711cc8b85f8b9509dc7a5bd",
+  "before": {
+    "commit": "645f1015e210296579e7f40684260caa01152f61",
+    "exit": 1
+  },
+  "after": {
+    "commit": "dee4fc993a134a2faf2662d0b316ed9486748476",
+    "exit": 0
+  }
+}

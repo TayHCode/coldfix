@@ -1,0 +1,10 @@
+/.coldfix/
+/.worktrees/
+/exports/
+__pycache__/
+*.pyc
+/.coldimage/
+/.coldrecall/
+/.measure/
+/.coldrelease/
+/.scratch/

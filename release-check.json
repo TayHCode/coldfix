@@ -1,0 +1,2702 @@
+{
+ "exclude": [
+  ".coldlocker",
+  ".cursor",
+  ".fleet",
+  ".githooks",
+  ".github/workflows",
+  "briefs",
+  "docs",
+  "evals",
+  "scripts",
+  "systemd",
+  "AGENTS.md",
+  "STATE.md",
+  "coldbox.toml",
+  "stats_page.py",
+  "tests/test_check_delivery.py",
+  "tests/test_coldpass_trial.py",
+  "tests/test_fleet_verify.py",
+  "tests/test_export_screen.py",
+  "tests/test_learning_service.py",
+  "tests/test_mirror_lessons.py",
+  "tests/test_recall_eval.py",
+  "tests/test_recall_quality.py",
+  "tests/test_registered_lessons.py",
+  "tests/test_repository_records.py",
+  "tests/test_review_eval.py",
+  "tests/test_stats_page.py",
+  "tests/test_sync_lessons_copies.py",
+  "tests/test_agentlocker_import.py",
+  "tests/test_workflow_runners.py"
+ ],
+ "quickstart": [
+  {
+   "file": "README.md",
+   "line": 57,
+   "argv": [
+    "python3",
+    "-m",
+    "pip",
+    "install",
+    "."
+   ]
+  },
+  {
+   "file": "README.md",
+   "line": 58,
+   "argv": [
+    "coldfix",
+    "--help"
+   ]
+  }
+ ],
+ "checks": [
+  {
+   "role": "tests",
+   "argv": [
+    "python3",
+    "-m",
+    "unittest",
+    "discover",
+    "-s",
+    "tests"
+   ]
+  }
+ ],
+ "approvals": [
+  {
+   "scope": "history",
+   "kind": "home-path",
+   "path": "CONTRIBUTING.md",
+   "fingerprint": "3dd8359733ba6664",
+   "reason": "Synthetic placeholder path in a test fixture or in contributor guidance."
+  },
+  {
+   "scope": "history",
+   "kind": "ipv4",
+   "path": "CONTRIBUTING.md",
+   "fingerprint": "37fcff24bf62035b",
+   "reason": "Loopback, documentation or synthetic private-range address used by a test or a local-only check; not a host address."
+  },
+  {
+   "scope": "history",
+   "kind": "ipv6",
+   "path": "coldfix.py",
+   "fingerprint": "eff8e7ca506627fe",
+   "reason": "Loopback or documentation address, or a regex that matches one; not a host address."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "oss_replay.py",
+   "fingerprint": "de0582c01941b5c6",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/repo_checkout.py",
+   "fingerprint": "cc6d96611cffa9f0",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_activations.py",
+   "fingerprint": "852e7b941ea20521",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_ci_actions_replay.py",
+   "fingerprint": "cc6d96611cffa9f0",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_ci_fix_learning.py",
+   "fingerprint": "cc6d96611cffa9f0",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_ci_fix_learning.py",
+   "fingerprint": "faa8612be131931b",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_ci_vm_executor.py",
+   "fingerprint": "cc6d96611cffa9f0",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_ci_workflow_replay.py",
+   "fingerprint": "cc6d96611cffa9f0",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_cli.py",
+   "fingerprint": "243c59b25ecbaf1c",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_cli.py",
+   "fingerprint": "66c7301b9ede0df3",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_cli.py",
+   "fingerprint": "779886d9d8fca870",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_cli.py",
+   "fingerprint": "c679afbfece266f5",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "home-path",
+   "path": "tests/test_cli.py",
+   "fingerprint": "67a166d2c72af6bb",
+   "reason": "Synthetic placeholder path in a test fixture or in contributor guidance."
+  },
+  {
+   "scope": "history",
+   "kind": "home-path",
+   "path": "tests/test_cli.py",
+   "fingerprint": "82b830c332b60b45",
+   "reason": "Synthetic placeholder path in a test fixture or in contributor guidance."
+  },
+  {
+   "scope": "history",
+   "kind": "internal-host",
+   "path": "tests/test_cli.py",
+   "fingerprint": "6fe039a3c056fe99",
+   "reason": "Synthetic hostname, or a token the host heuristic misreads, in a test fixture."
+  },
+  {
+   "scope": "history",
+   "kind": "internal-host",
+   "path": "tests/test_cli.py",
+   "fingerprint": "876ebc5232a423f6",
+   "reason": "Synthetic hostname, or a token the host heuristic misreads, in a test fixture."
+  },
+  {
+   "scope": "history",
+   "kind": "internal-host",
+   "path": "tests/test_cli.py",
+   "fingerprint": "e2272da1cafbf08e",
+   "reason": "Synthetic hostname, or a token the host heuristic misreads, in a test fixture."
+  },
+  {
+   "scope": "history",
+   "kind": "ipv4",
+   "path": "tests/test_cli.py",
+   "fingerprint": "12ca17b49af22894",
+   "reason": "Loopback, documentation or synthetic private-range address used by a test or a local-only check; not a host address."
+  },
+  {
+   "scope": "history",
+   "kind": "ipv4",
+   "path": "tests/test_cli.py",
+   "fingerprint": "4b3307c5eb5dafcf",
+   "reason": "Loopback, documentation or synthetic private-range address used by a test or a local-only check; not a host address."
+  },
+  {
+   "scope": "history",
+   "kind": "ipv6",
+   "path": "tests/test_cli.py",
+   "fingerprint": "3b93f9a6d45be8fc",
+   "reason": "Loopback or documentation address, or a regex that matches one; not a host address."
+  },
+  {
+   "scope": "history",
+   "kind": "ipv6",
+   "path": "tests/test_cli.py",
+   "fingerprint": "eff8e7ca506627fe",
+   "reason": "Loopback or documentation address, or a regex that matches one; not a host address."
+  },
+  {
+   "scope": "history",
+   "kind": "ipv6",
+   "path": "tests/test_cli.py",
+   "fingerprint": "f1ad3e621f73e90c",
+   "reason": "Loopback or documentation address, or a regex that matches one; not a host address."
+  },
+  {
+   "scope": "history",
+   "kind": "ipv6",
+   "path": "tests/test_cli.py",
+   "fingerprint": "f9fc29c1b2da9a5c",
+   "reason": "Loopback or documentation address, or a regex that matches one; not a host address."
+  },
+  {
+   "scope": "history",
+   "kind": "phone",
+   "path": "tests/test_cli.py",
+   "fingerprint": "37bda3e2f3783239",
+   "reason": "Fictional 555-01xx number used by a privacy-screen test."
+  },
+  {
+   "scope": "history",
+   "kind": "private-repo-url",
+   "path": "tests/test_cli.py",
+   "fingerprint": "f6257e8a15ad48d7",
+   "reason": "Synthetic example repository URL in a test fixture."
+  },
+  {
+   "scope": "history",
+   "kind": "tailnet-host",
+   "path": "tests/test_cli.py",
+   "fingerprint": "c69c66133dc48d8f",
+   "reason": "Synthetic tailnet hostname on an example domain used by a privacy-screen test."
+  },
+  {
+   "scope": "history",
+   "kind": "tailnet-ip",
+   "path": "tests/test_cli.py",
+   "fingerprint": "5a3a109cbe05a4e8",
+   "reason": "Synthetic CGNAT-range address used by a privacy-screen test; not a host address."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_codex_review_source.py",
+   "fingerprint": "715bfed2a3994e36",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_cold_verify_ingest.py",
+   "fingerprint": "2dd93a7cebecc598",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_cold_verify_ingest.py",
+   "fingerprint": "3de132cd98be7bf2",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_cold_verify_ingest.py",
+   "fingerprint": "b38d2f5399f280f9",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_cold_verify_ingest.py",
+   "fingerprint": "c44ea57cc1f1fab1",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_coldrecall.py",
+   "fingerprint": "cc6d96611cffa9f0",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_coldrecall_packet.py",
+   "fingerprint": "acf397c6db848ee1",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_draft.py",
+   "fingerprint": "cc6d96611cffa9f0",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_e2e_dogfood.py",
+   "fingerprint": "cc6d96611cffa9f0",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_failure_ingest.py",
+   "fingerprint": "b838307aa1c7bc01",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "internal-host",
+   "path": "tests/test_github_sources.py",
+   "fingerprint": "96d8bbf360da9561",
+   "reason": "Synthetic hostname, or a token the host heuristic misreads, in a test fixture."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_incident_admission.py",
+   "fingerprint": "8172a023f8733c1c",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_incident_admission.py",
+   "fingerprint": "cc6d96611cffa9f0",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "internal-host",
+   "path": "tests/test_incident_admission.py",
+   "fingerprint": "3dd21638c636d7e6",
+   "reason": "Synthetic hostname, or a token the host heuristic misreads, in a test fixture."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_learn_replay.py",
+   "fingerprint": "cc6d96611cffa9f0",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "ipv4",
+   "path": "tests/test_learn_replay.py",
+   "fingerprint": "12ca17b49af22894",
+   "reason": "Loopback, documentation or synthetic private-range address used by a test or a local-only check; not a host address."
+  },
+  {
+   "scope": "history",
+   "kind": "private-repo-url",
+   "path": "tests/test_learn_replay.py",
+   "fingerprint": "5fd9ec304b609424",
+   "reason": "Synthetic example repository URL in a test fixture."
+  },
+  {
+   "scope": "history",
+   "kind": "assigned-secret",
+   "path": "tests/test_lesson_delivery.py",
+   "fingerprint": "a78ba658c765e054",
+   "reason": "Synthetic canary credential in a privacy-screen test; not a real secret.",
+   "classification": "false-positive",
+   "line": 171,
+   "column": 33,
+   "source_sha256": "e30ae950548c736ae295b15cdd060e5fb8449571567aea047bf8899363af9f71"
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_lesson_delivery.py",
+   "fingerprint": "cc6d96611cffa9f0",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_lesson_loop.py",
+   "fingerprint": "cc6d96611cffa9f0",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_oss_replay.py",
+   "fingerprint": "cc6d96611cffa9f0",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "home-path",
+   "path": "tests/test_oss_replay.py",
+   "fingerprint": "67a166d2c72af6bb",
+   "reason": "Synthetic placeholder path in a test fixture or in contributor guidance."
+  },
+  {
+   "scope": "history",
+   "kind": "home-path",
+   "path": "tests/test_environment_literals.py",
+   "fingerprint": "67a166d2c72af6bb",
+   "reason": "Synthetic placeholder path in a test fixture or in contributor guidance."
+  },
+  {
+   "scope": "history",
+   "kind": "home-path",
+   "path": "tests/test_environment_literals.py",
+   "fingerprint": "26bb965d1da4b51d",
+   "reason": "Synthetic placeholder path in a test fixture or in contributor guidance."
+  },
+  {
+   "scope": "history",
+   "kind": "home-path",
+   "path": "tests/test_environment_literals.py",
+   "fingerprint": "9f05bff1ab1201a0",
+   "reason": "Synthetic placeholder path in a test fixture or in contributor guidance."
+  },
+  {
+   "scope": "history",
+   "kind": "home-path",
+   "path": "tests/test_environment_literals.py",
+   "fingerprint": "3d3786f24963f162",
+   "reason": "Synthetic placeholder path in a test fixture or in contributor guidance."
+  },
+  {
+   "scope": "history",
+   "kind": "home-path",
+   "path": "tests/test_environment_literals.py",
+   "fingerprint": "fbb0d14177b9e7c6",
+   "reason": "Synthetic placeholder path in a test fixture or in contributor guidance."
+  },
+  {
+   "scope": "history",
+   "kind": "home-path",
+   "path": "tests/test_environment_literals.py",
+   "fingerprint": "8a93cd3e6a4fc4b8",
+   "reason": "Synthetic placeholder path in a test fixture or in contributor guidance."
+  },
+  {
+   "scope": "history",
+   "kind": "home-path",
+   "path": "tests/test_environment_literals.py",
+   "fingerprint": "f209461bedb2e1a1",
+   "reason": "Synthetic placeholder path in a test fixture or in contributor guidance."
+  },
+  {
+   "scope": "history",
+   "kind": "home-path",
+   "path": "tests/test_environment_literals.py",
+   "fingerprint": "54131b4b3fea4544",
+   "reason": "Synthetic placeholder path in a test fixture or in contributor guidance."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_settle_codex_lessons.py",
+   "fingerprint": "51b74fd2262cfabb",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_settle_codex_prior_controls.py",
+   "fingerprint": "51b74fd2262cfabb",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_settle_replay_completion.py",
+   "fingerprint": "cc6d96611cffa9f0",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "ipv4",
+   "path": "tests/test_transcript_delivery.py",
+   "fingerprint": "ff61fc2c7fb4e1d3",
+   "reason": "Loopback, documentation or synthetic private-range address used by a test or a local-only check; not a host address."
+  },
+  {
+   "scope": "history",
+   "kind": "ipv4",
+   "path": "tests/test_transcript_mistakes.py",
+   "fingerprint": "12ca17b49af22894",
+   "reason": "Loopback, documentation or synthetic private-range address used by a test or a local-only check; not a host address."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_verify_pairs.py",
+   "fingerprint": "51b74fd2262cfabb",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_worktree_cleanup.py",
+   "fingerprint": "3de132cd98be7bf2",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_worktree_cleanup.py",
+   "fingerprint": "acf397c6db848ee1",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_worktree_cleanup.py",
+   "fingerprint": "eb2f68ae4c3d37cf",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "ipv4",
+   "path": "transcript_mistakes.py",
+   "fingerprint": "12ca17b49af22894",
+   "reason": "Loopback, documentation or synthetic private-range address used by a test or a local-only check; not a host address."
+  },
+  {
+   "scope": "history",
+   "kind": "ipv6",
+   "path": "transcript_mistakes.py",
+   "fingerprint": "eff8e7ca506627fe",
+   "reason": "Loopback or documentation address, or a regex that matches one; not a host address."
+  },
+  {
+   "scope": "tree",
+   "kind": "home-path",
+   "path": "CONTRIBUTING.md",
+   "fingerprint": "3dd8359733ba6664",
+   "reason": "Synthetic placeholder path in a test fixture or in contributor guidance."
+  },
+  {
+   "scope": "tree",
+   "kind": "ipv4",
+   "path": "CONTRIBUTING.md",
+   "fingerprint": "37fcff24bf62035b",
+   "reason": "Loopback, documentation or synthetic private-range address used by a test or a local-only check; not a host address."
+  },
+  {
+   "scope": "tree",
+   "kind": "ipv6",
+   "path": "coldfix.py",
+   "fingerprint": "eff8e7ca506627fe",
+   "reason": "Loopback or documentation address, or a regex that matches one; not a host address."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "oss_replay.py",
+   "fingerprint": "de0582c01941b5c6",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/repo_checkout.py",
+   "fingerprint": "cc6d96611cffa9f0",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_activations.py",
+   "fingerprint": "852e7b941ea20521",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_ci_actions_replay.py",
+   "fingerprint": "cc6d96611cffa9f0",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_ci_fix_learning.py",
+   "fingerprint": "cc6d96611cffa9f0",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_ci_fix_learning.py",
+   "fingerprint": "faa8612be131931b",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_ci_vm_executor.py",
+   "fingerprint": "cc6d96611cffa9f0",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_ci_workflow_replay.py",
+   "fingerprint": "cc6d96611cffa9f0",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_cli.py",
+   "fingerprint": "243c59b25ecbaf1c",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_cli.py",
+   "fingerprint": "66c7301b9ede0df3",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_cli.py",
+   "fingerprint": "779886d9d8fca870",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_cli.py",
+   "fingerprint": "c679afbfece266f5",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "home-path",
+   "path": "tests/test_cli.py",
+   "fingerprint": "67a166d2c72af6bb",
+   "reason": "Synthetic placeholder path in a test fixture or in contributor guidance."
+  },
+  {
+   "scope": "tree",
+   "kind": "home-path",
+   "path": "tests/test_cli.py",
+   "fingerprint": "82b830c332b60b45",
+   "reason": "Synthetic placeholder path in a test fixture or in contributor guidance."
+  },
+  {
+   "scope": "tree",
+   "kind": "internal-host",
+   "path": "tests/test_cli.py",
+   "fingerprint": "6fe039a3c056fe99",
+   "reason": "Synthetic hostname, or a token the host heuristic misreads, in a test fixture."
+  },
+  {
+   "scope": "tree",
+   "kind": "internal-host",
+   "path": "tests/test_cli.py",
+   "fingerprint": "876ebc5232a423f6",
+   "reason": "Synthetic hostname, or a token the host heuristic misreads, in a test fixture."
+  },
+  {
+   "scope": "tree",
+   "kind": "internal-host",
+   "path": "tests/test_cli.py",
+   "fingerprint": "e2272da1cafbf08e",
+   "reason": "Synthetic hostname, or a token the host heuristic misreads, in a test fixture."
+  },
+  {
+   "scope": "tree",
+   "kind": "ipv4",
+   "path": "tests/test_cli.py",
+   "fingerprint": "12ca17b49af22894",
+   "reason": "Loopback, documentation or synthetic private-range address used by a test or a local-only check; not a host address."
+  },
+  {
+   "scope": "tree",
+   "kind": "ipv4",
+   "path": "tests/test_cli.py",
+   "fingerprint": "4b3307c5eb5dafcf",
+   "reason": "Loopback, documentation or synthetic private-range address used by a test or a local-only check; not a host address."
+  },
+  {
+   "scope": "tree",
+   "kind": "ipv6",
+   "path": "tests/test_cli.py",
+   "fingerprint": "3b93f9a6d45be8fc",
+   "reason": "Loopback or documentation address, or a regex that matches one; not a host address."
+  },
+  {
+   "scope": "tree",
+   "kind": "ipv6",
+   "path": "tests/test_cli.py",
+   "fingerprint": "eff8e7ca506627fe",
+   "reason": "Loopback or documentation address, or a regex that matches one; not a host address."
+  },
+  {
+   "scope": "tree",
+   "kind": "ipv6",
+   "path": "tests/test_cli.py",
+   "fingerprint": "f1ad3e621f73e90c",
+   "reason": "Loopback or documentation address, or a regex that matches one; not a host address."
+  },
+  {
+   "scope": "tree",
+   "kind": "ipv6",
+   "path": "tests/test_cli.py",
+   "fingerprint": "f9fc29c1b2da9a5c",
+   "reason": "Loopback or documentation address, or a regex that matches one; not a host address."
+  },
+  {
+   "scope": "tree",
+   "kind": "phone",
+   "path": "tests/test_cli.py",
+   "fingerprint": "37bda3e2f3783239",
+   "reason": "Fictional 555-01xx number used by a privacy-screen test."
+  },
+  {
+   "scope": "tree",
+   "kind": "private-repo-url",
+   "path": "tests/test_cli.py",
+   "fingerprint": "f6257e8a15ad48d7",
+   "reason": "Synthetic example repository URL in a test fixture."
+  },
+  {
+   "scope": "tree",
+   "kind": "tailnet-host",
+   "path": "tests/test_cli.py",
+   "fingerprint": "c69c66133dc48d8f",
+   "reason": "Synthetic tailnet hostname on an example domain used by a privacy-screen test."
+  },
+  {
+   "scope": "tree",
+   "kind": "tailnet-ip",
+   "path": "tests/test_cli.py",
+   "fingerprint": "5a3a109cbe05a4e8",
+   "reason": "Synthetic CGNAT-range address used by a privacy-screen test; not a host address."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_codex_review_source.py",
+   "fingerprint": "715bfed2a3994e36",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_cold_verify_ingest.py",
+   "fingerprint": "2dd93a7cebecc598",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_cold_verify_ingest.py",
+   "fingerprint": "3de132cd98be7bf2",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_cold_verify_ingest.py",
+   "fingerprint": "b38d2f5399f280f9",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_cold_verify_ingest.py",
+   "fingerprint": "c44ea57cc1f1fab1",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_coldrecall.py",
+   "fingerprint": "cc6d96611cffa9f0",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_coldrecall_packet.py",
+   "fingerprint": "acf397c6db848ee1",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_draft.py",
+   "fingerprint": "cc6d96611cffa9f0",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_e2e_dogfood.py",
+   "fingerprint": "cc6d96611cffa9f0",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_failure_ingest.py",
+   "fingerprint": "b838307aa1c7bc01",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "internal-host",
+   "path": "tests/test_github_sources.py",
+   "fingerprint": "96d8bbf360da9561",
+   "reason": "Synthetic hostname, or a token the host heuristic misreads, in a test fixture."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_incident_admission.py",
+   "fingerprint": "8172a023f8733c1c",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_incident_admission.py",
+   "fingerprint": "cc6d96611cffa9f0",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "internal-host",
+   "path": "tests/test_incident_admission.py",
+   "fingerprint": "3dd21638c636d7e6",
+   "reason": "Synthetic hostname, or a token the host heuristic misreads, in a test fixture."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_learn_replay.py",
+   "fingerprint": "cc6d96611cffa9f0",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "ipv4",
+   "path": "tests/test_learn_replay.py",
+   "fingerprint": "12ca17b49af22894",
+   "reason": "Loopback, documentation or synthetic private-range address used by a test or a local-only check; not a host address."
+  },
+  {
+   "scope": "tree",
+   "kind": "private-repo-url",
+   "path": "tests/test_learn_replay.py",
+   "fingerprint": "5fd9ec304b609424",
+   "reason": "Synthetic example repository URL in a test fixture."
+  },
+  {
+   "scope": "tree",
+   "kind": "assigned-secret",
+   "path": "tests/test_lesson_delivery.py",
+   "fingerprint": "a78ba658c765e054",
+   "reason": "Synthetic canary credential in a privacy-screen test; not a real secret.",
+   "classification": "false-positive",
+   "line": 171,
+   "column": 33,
+   "source_sha256": "e30ae950548c736ae295b15cdd060e5fb8449571567aea047bf8899363af9f71"
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_lesson_delivery.py",
+   "fingerprint": "cc6d96611cffa9f0",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_lesson_loop.py",
+   "fingerprint": "cc6d96611cffa9f0",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_oss_replay.py",
+   "fingerprint": "cc6d96611cffa9f0",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "home-path",
+   "path": "tests/test_oss_replay.py",
+   "fingerprint": "67a166d2c72af6bb",
+   "reason": "Synthetic placeholder path in a test fixture or in contributor guidance."
+  },
+  {
+   "scope": "tree",
+   "kind": "home-path",
+   "path": "tests/test_environment_literals.py",
+   "fingerprint": "67a166d2c72af6bb",
+   "reason": "Synthetic placeholder path in a test fixture or in contributor guidance."
+  },
+  {
+   "scope": "tree",
+   "kind": "home-path",
+   "path": "tests/test_environment_literals.py",
+   "fingerprint": "26bb965d1da4b51d",
+   "reason": "Synthetic placeholder path in a test fixture or in contributor guidance."
+  },
+  {
+   "scope": "tree",
+   "kind": "home-path",
+   "path": "tests/test_environment_literals.py",
+   "fingerprint": "9f05bff1ab1201a0",
+   "reason": "Synthetic placeholder path in a test fixture or in contributor guidance."
+  },
+  {
+   "scope": "tree",
+   "kind": "home-path",
+   "path": "tests/test_environment_literals.py",
+   "fingerprint": "3d3786f24963f162",
+   "reason": "Synthetic placeholder path in a test fixture or in contributor guidance."
+  },
+  {
+   "scope": "tree",
+   "kind": "home-path",
+   "path": "tests/test_environment_literals.py",
+   "fingerprint": "fbb0d14177b9e7c6",
+   "reason": "Synthetic placeholder path in a test fixture or in contributor guidance."
+  },
+  {
+   "scope": "tree",
+   "kind": "home-path",
+   "path": "tests/test_environment_literals.py",
+   "fingerprint": "8a93cd3e6a4fc4b8",
+   "reason": "Synthetic placeholder path in a test fixture or in contributor guidance."
+  },
+  {
+   "scope": "tree",
+   "kind": "home-path",
+   "path": "tests/test_environment_literals.py",
+   "fingerprint": "f209461bedb2e1a1",
+   "reason": "Synthetic placeholder path in a test fixture or in contributor guidance."
+  },
+  {
+   "scope": "tree",
+   "kind": "home-path",
+   "path": "tests/test_environment_literals.py",
+   "fingerprint": "54131b4b3fea4544",
+   "reason": "Synthetic placeholder path in a test fixture or in contributor guidance."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_settle_codex_lessons.py",
+   "fingerprint": "51b74fd2262cfabb",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_settle_codex_prior_controls.py",
+   "fingerprint": "51b74fd2262cfabb",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_settle_replay_completion.py",
+   "fingerprint": "cc6d96611cffa9f0",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "ipv4",
+   "path": "tests/test_transcript_delivery.py",
+   "fingerprint": "ff61fc2c7fb4e1d3",
+   "reason": "Loopback, documentation or synthetic private-range address used by a test or a local-only check; not a host address."
+  },
+  {
+   "scope": "tree",
+   "kind": "ipv4",
+   "path": "tests/test_transcript_mistakes.py",
+   "fingerprint": "12ca17b49af22894",
+   "reason": "Loopback, documentation or synthetic private-range address used by a test or a local-only check; not a host address."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_verify_pairs.py",
+   "fingerprint": "51b74fd2262cfabb",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_worktree_cleanup.py",
+   "fingerprint": "3de132cd98be7bf2",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_worktree_cleanup.py",
+   "fingerprint": "acf397c6db848ee1",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_worktree_cleanup.py",
+   "fingerprint": "eb2f68ae4c3d37cf",
+   "reason": "Placeholder identity or address on a reserved example domain, or a git SSH URL, used by a test fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "ipv4",
+   "path": "transcript_mistakes.py",
+   "fingerprint": "12ca17b49af22894",
+   "reason": "Loopback, documentation or synthetic private-range address used by a test or a local-only check; not a host address."
+  },
+  {
+   "scope": "tree",
+   "kind": "ipv6",
+   "path": "transcript_mistakes.py",
+   "fingerprint": "eff8e7ca506627fe",
+   "reason": "Loopback or documentation address, or a regex that matches one; not a host address."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "CONTRIBUTING.md",
+   "fingerprint": "bfabc37432958b06",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "CONTRIBUTING.md",
+   "fingerprint": "bfabc37432958b06",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "LICENSE",
+   "fingerprint": "38a81e87e79631e6",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "LICENSE",
+   "fingerprint": "38a81e87e79631e6",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "README.md",
+   "fingerprint": "0559aadba9e29b9a",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "README.md",
+   "fingerprint": "38a81e87e79631e6",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "README.md",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "README.md",
+   "fingerprint": "0559aadba9e29b9a",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "README.md",
+   "fingerprint": "38a81e87e79631e6",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "README.md",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "README.md",
+   "fingerprint": "31c5543c1734d25c",
+   "reason": "Reserved example.com address in the README demo commit; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "README.md",
+   "fingerprint": "31c5543c1734d25c",
+   "reason": "Reserved example.com address in the README demo commit; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "[path-1516dcd3ab707801]",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "[path-1516dcd3ab707801]",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "check_delivery.py",
+   "fingerprint": "0559aadba9e29b9a",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "check_delivery.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "check_delivery.py",
+   "fingerprint": "0559aadba9e29b9a",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "check_delivery.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "check_delivery.py",
+   "fingerprint": "d7193227eaa3d7ac",
+   "reason": "Bot commit identity for a throwaway clone; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "check_delivery.py",
+   "fingerprint": "d7193227eaa3d7ac",
+   "reason": "Bot commit identity for a throwaway clone; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "ci_batch.py",
+   "fingerprint": "4b1b8aa3608a26da",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "ci_batch.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "ci_batch.py",
+   "fingerprint": "4b1b8aa3608a26da",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "ci_batch.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "ci_fix_learning.py",
+   "fingerprint": "0559aadba9e29b9a",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "ci_fix_learning.py",
+   "fingerprint": "4b1b8aa3608a26da",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "ci_fix_learning.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "ci_fix_learning.py",
+   "fingerprint": "0559aadba9e29b9a",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "ci_fix_learning.py",
+   "fingerprint": "4b1b8aa3608a26da",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "ci_fix_learning.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "ci_vm_executor.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "ci_vm_executor.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "codex_review_source.py",
+   "fingerprint": "0559aadba9e29b9a",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "codex_review_source.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "codex_review_source.py",
+   "fingerprint": "0559aadba9e29b9a",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "codex_review_source.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "coldfix.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "coldfix.py",
+   "fingerprint": "bfabc37432958b06",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "coldfix.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "coldfix.py",
+   "fingerprint": "bfabc37432958b06",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "coldpass_replay.py",
+   "fingerprint": "0559aadba9e29b9a",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "coldpass_replay.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "coldpass_replay.py",
+   "fingerprint": "0559aadba9e29b9a",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "coldpass_replay.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "coldpass_sources.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "coldpass_sources.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "collect_sources.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "collect_sources.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "evidence_join.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "evidence_join.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "failure_ingest.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "failure_ingest.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "github_sources.py",
+   "fingerprint": "0559aadba9e29b9a",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "github_sources.py",
+   "fingerprint": "4b1b8aa3608a26da",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "github_sources.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "github_sources.py",
+   "fingerprint": "0559aadba9e29b9a",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "github_sources.py",
+   "fingerprint": "4b1b8aa3608a26da",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "github_sources.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "learn_collect.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "learn_collect.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "learn_replay.py",
+   "fingerprint": "0559aadba9e29b9a",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "learn_replay.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "learn_replay.py",
+   "fingerprint": "0559aadba9e29b9a",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "learn_replay.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "learn_stall.py",
+   "fingerprint": "0559aadba9e29b9a",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "learn_stall.py",
+   "fingerprint": "0559aadba9e29b9a",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "lesson_delivery.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "lesson_delivery.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "library/README.md",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "library/README.md",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "library/authz-everywhere/rule.md",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "library/authz-everywhere/rule.md",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "library/keep-going/rule.md",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "library/keep-going/rule.md",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "library/model-routing/rule.md",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "library/model-routing/rule.md",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "library/prove-a-process-is-stale/rule.md",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "library/prove-a-process-is-stale/rule.md",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "library/secrets-and-private-data/rule.md",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "library/secrets-and-private-data/rule.md",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "library/state-safety/rule.md",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "library/state-safety/rule.md",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "loop_setup.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "loop_setup.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "oss_replay.py",
+   "fingerprint": "0559aadba9e29b9a",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "oss_replay.py",
+   "fingerprint": "0559aadba9e29b9a",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "public-export.txt",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "public-export.txt",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "replay_repos.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "replay_repos.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "tests/test_ci_batch.py",
+   "fingerprint": "4b1b8aa3608a26da",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "tests/test_ci_batch.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "tests/test_ci_batch.py",
+   "fingerprint": "4b1b8aa3608a26da",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "tests/test_ci_batch.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "tests/test_ci_fix_learning.py",
+   "fingerprint": "4b1b8aa3608a26da",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "tests/test_ci_fix_learning.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "tests/test_ci_fix_learning.py",
+   "fingerprint": "4b1b8aa3608a26da",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "tests/test_ci_fix_learning.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "tests/test_ci_full_history.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "tests/test_ci_full_history.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "tests/test_ci_vm_executor.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "tests/test_ci_vm_executor.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "tests/test_cli.py",
+   "fingerprint": "38a81e87e79631e6",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "tests/test_cli.py",
+   "fingerprint": "4481d1824730e320",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "tests/test_cli.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "tests/test_cli.py",
+   "fingerprint": "5d863e11b18cfab2",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "tests/test_cli.py",
+   "fingerprint": "6007db63e18e532c",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "tests/test_cli.py",
+   "fingerprint": "bfabc37432958b06",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "tests/test_cli.py",
+   "fingerprint": "38a81e87e79631e6",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "tests/test_cli.py",
+   "fingerprint": "4481d1824730e320",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "tests/test_cli.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "tests/test_cli.py",
+   "fingerprint": "5d863e11b18cfab2",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "tests/test_cli.py",
+   "fingerprint": "6007db63e18e532c",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "tests/test_cli.py",
+   "fingerprint": "bfabc37432958b06",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_cli.py",
+   "fingerprint": "4b290d378bfc090b",
+   "reason": "Synthetic test address (reserved or placeholder domain) used by a privacy or git fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_cli.py",
+   "fingerprint": "831f6494ad6be4fc",
+   "reason": "Synthetic test address (reserved or placeholder domain) used by a privacy or git fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_cli.py",
+   "fingerprint": "afb15381f4af9525",
+   "reason": "Synthetic test address (reserved or placeholder domain) used by a privacy or git fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_cli.py",
+   "fingerprint": "cc6d96611cffa9f0",
+   "reason": "Synthetic test address (reserved or placeholder domain) used by a privacy or git fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_cli.py",
+   "fingerprint": "cf1b568c6340ab31",
+   "reason": "Synthetic test address (reserved or placeholder domain) used by a privacy or git fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_cli.py",
+   "fingerprint": "f9e0a3acaf94139a",
+   "reason": "Synthetic test address (reserved or placeholder domain) used by a privacy or git fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_cli.py",
+   "fingerprint": "4b290d378bfc090b",
+   "reason": "Synthetic test address (reserved or placeholder domain) used by a privacy or git fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_cli.py",
+   "fingerprint": "831f6494ad6be4fc",
+   "reason": "Synthetic test address (reserved or placeholder domain) used by a privacy or git fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_cli.py",
+   "fingerprint": "afb15381f4af9525",
+   "reason": "Synthetic test address (reserved or placeholder domain) used by a privacy or git fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_cli.py",
+   "fingerprint": "cc6d96611cffa9f0",
+   "reason": "Synthetic test address (reserved or placeholder domain) used by a privacy or git fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_cli.py",
+   "fingerprint": "cf1b568c6340ab31",
+   "reason": "Synthetic test address (reserved or placeholder domain) used by a privacy or git fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_cli.py",
+   "fingerprint": "f9e0a3acaf94139a",
+   "reason": "Synthetic test address (reserved or placeholder domain) used by a privacy or git fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "internal-host",
+   "path": "tests/test_cli.py",
+   "fingerprint": "0f5aa9d8fdf7cd7e",
+   "reason": "Synthetic internal hostname in a privacy-screen test fixture; not a real host."
+  },
+  {
+   "scope": "history",
+   "kind": "internal-host",
+   "path": "tests/test_cli.py",
+   "fingerprint": "42f2daf70dfb5578",
+   "reason": "Synthetic internal hostname in a privacy-screen test fixture; not a real host."
+  },
+  {
+   "scope": "history",
+   "kind": "internal-host",
+   "path": "tests/test_cli.py",
+   "fingerprint": "6cbbade4f8e4b609",
+   "reason": "Synthetic internal hostname in a privacy-screen test fixture; not a real host."
+  },
+  {
+   "scope": "history",
+   "kind": "internal-host",
+   "path": "tests/test_cli.py",
+   "fingerprint": "7e223555aa629e00",
+   "reason": "Synthetic internal hostname in a privacy-screen test fixture; not a real host."
+  },
+  {
+   "scope": "history",
+   "kind": "internal-host",
+   "path": "tests/test_cli.py",
+   "fingerprint": "879fdcb78de039af",
+   "reason": "Synthetic internal hostname in a privacy-screen test fixture; not a real host."
+  },
+  {
+   "scope": "tree",
+   "kind": "internal-host",
+   "path": "tests/test_cli.py",
+   "fingerprint": "0f5aa9d8fdf7cd7e",
+   "reason": "Synthetic internal hostname in a privacy-screen test fixture; not a real host."
+  },
+  {
+   "scope": "tree",
+   "kind": "internal-host",
+   "path": "tests/test_cli.py",
+   "fingerprint": "42f2daf70dfb5578",
+   "reason": "Synthetic internal hostname in a privacy-screen test fixture; not a real host."
+  },
+  {
+   "scope": "tree",
+   "kind": "internal-host",
+   "path": "tests/test_cli.py",
+   "fingerprint": "6cbbade4f8e4b609",
+   "reason": "Synthetic internal hostname in a privacy-screen test fixture; not a real host."
+  },
+  {
+   "scope": "tree",
+   "kind": "internal-host",
+   "path": "tests/test_cli.py",
+   "fingerprint": "7e223555aa629e00",
+   "reason": "Synthetic internal hostname in a privacy-screen test fixture; not a real host."
+  },
+  {
+   "scope": "tree",
+   "kind": "internal-host",
+   "path": "tests/test_cli.py",
+   "fingerprint": "879fdcb78de039af",
+   "reason": "Synthetic internal hostname in a privacy-screen test fixture; not a real host."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "tests/test_cli_lessons.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "tests/test_cli_lessons.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "tests/test_codex_review_source.py",
+   "fingerprint": "0559aadba9e29b9a",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "tests/test_codex_review_source.py",
+   "fingerprint": "2a59d59e3809f827",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "tests/test_codex_review_source.py",
+   "fingerprint": "4b1b8aa3608a26da",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "tests/test_codex_review_source.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "tests/test_codex_review_source.py",
+   "fingerprint": "0559aadba9e29b9a",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "tests/test_codex_review_source.py",
+   "fingerprint": "2a59d59e3809f827",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "tests/test_codex_review_source.py",
+   "fingerprint": "4b1b8aa3608a26da",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "tests/test_codex_review_source.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "tests/test_coldbox_ingest.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "tests/test_coldbox_ingest.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "tests/test_coldpass_daily.py",
+   "fingerprint": "0559aadba9e29b9a",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "tests/test_coldpass_daily.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "tests/test_coldpass_daily.py",
+   "fingerprint": "0559aadba9e29b9a",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "tests/test_coldpass_daily.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_coldpass_daily.py",
+   "fingerprint": "cc6d96611cffa9f0",
+   "reason": "Synthetic test address (reserved or placeholder domain) used by a privacy or git fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_coldpass_daily.py",
+   "fingerprint": "cc6d96611cffa9f0",
+   "reason": "Synthetic test address (reserved or placeholder domain) used by a privacy or git fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "internal-host",
+   "path": "tests/test_coldpass_daily.py",
+   "fingerprint": "0c5f03d6e69aa044",
+   "reason": "Synthetic internal hostname in a privacy-screen test fixture; not a real host."
+  },
+  {
+   "scope": "history",
+   "kind": "internal-host",
+   "path": "tests/test_coldpass_daily.py",
+   "fingerprint": "8df556d29ffe1712",
+   "reason": "Synthetic internal hostname in a privacy-screen test fixture; not a real host."
+  },
+  {
+   "scope": "tree",
+   "kind": "internal-host",
+   "path": "tests/test_coldpass_daily.py",
+   "fingerprint": "0c5f03d6e69aa044",
+   "reason": "Synthetic internal hostname in a privacy-screen test fixture; not a real host."
+  },
+  {
+   "scope": "tree",
+   "kind": "internal-host",
+   "path": "tests/test_coldpass_daily.py",
+   "fingerprint": "8df556d29ffe1712",
+   "reason": "Synthetic internal hostname in a privacy-screen test fixture; not a real host."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "tests/test_coldpass_inputs.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "tests/test_coldpass_inputs.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_coldpass_inputs.py",
+   "fingerprint": "c679afbfece266f5",
+   "reason": "Synthetic test address (reserved or placeholder domain) used by a privacy or git fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_coldpass_inputs.py",
+   "fingerprint": "c679afbfece266f5",
+   "reason": "Synthetic test address (reserved or placeholder domain) used by a privacy or git fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "tests/test_coldpass_sources.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "tests/test_coldpass_sources.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_coldpass_sources.py",
+   "fingerprint": "c679afbfece266f5",
+   "reason": "Synthetic test address (reserved or placeholder domain) used by a privacy or git fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_coldpass_sources.py",
+   "fingerprint": "c679afbfece266f5",
+   "reason": "Synthetic test address (reserved or placeholder domain) used by a privacy or git fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "tests/test_collect_sources.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "tests/test_collect_sources.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "tests/test_environment_literals.py",
+   "fingerprint": "2938354af5a9f3e5",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "tests/test_environment_literals.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "tests/test_environment_literals.py",
+   "fingerprint": "bfabc37432958b06",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "tests/test_environment_literals.py",
+   "fingerprint": "2938354af5a9f3e5",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "tests/test_environment_literals.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "tests/test_environment_literals.py",
+   "fingerprint": "bfabc37432958b06",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "tests/test_github_sources.py",
+   "fingerprint": "2938354af5a9f3e5",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "tests/test_github_sources.py",
+   "fingerprint": "4b1b8aa3608a26da",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "tests/test_github_sources.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "tests/test_github_sources.py",
+   "fingerprint": "2938354af5a9f3e5",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "tests/test_github_sources.py",
+   "fingerprint": "4b1b8aa3608a26da",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "tests/test_github_sources.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "tests/test_learn_collect.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "tests/test_learn_collect.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "tests/test_learn_replay.py",
+   "fingerprint": "0559aadba9e29b9a",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "tests/test_learn_replay.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "tests/test_learn_replay.py",
+   "fingerprint": "0559aadba9e29b9a",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "tests/test_learn_replay.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_learn_replay.py",
+   "fingerprint": "973dfe463ec85785",
+   "reason": "Synthetic test address (reserved or placeholder domain) used by a privacy or git fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_learn_replay.py",
+   "fingerprint": "973dfe463ec85785",
+   "reason": "Synthetic test address (reserved or placeholder domain) used by a privacy or git fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "tests/test_lesson_delivery.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "tests/test_lesson_delivery.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "tests/test_public_admission.py",
+   "fingerprint": "0559aadba9e29b9a",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "tests/test_public_admission.py",
+   "fingerprint": "4b1b8aa3608a26da",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "tests/test_public_admission.py",
+   "fingerprint": "0559aadba9e29b9a",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "tests/test_public_admission.py",
+   "fingerprint": "4b1b8aa3608a26da",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_public_admission.py",
+   "fingerprint": "896cddb03b3f74a9",
+   "reason": "Synthetic test address (reserved or placeholder domain) used by a privacy or git fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "email",
+   "path": "tests/test_public_admission.py",
+   "fingerprint": "cc6d96611cffa9f0",
+   "reason": "Synthetic test address (reserved or placeholder domain) used by a privacy or git fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_public_admission.py",
+   "fingerprint": "896cddb03b3f74a9",
+   "reason": "Synthetic test address (reserved or placeholder domain) used by a privacy or git fixture; not a real mailbox."
+  },
+  {
+   "scope": "tree",
+   "kind": "email",
+   "path": "tests/test_public_admission.py",
+   "fingerprint": "cc6d96611cffa9f0",
+   "reason": "Synthetic test address (reserved or placeholder domain) used by a privacy or git fixture; not a real mailbox."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "tests/test_readme.py",
+   "fingerprint": "0559aadba9e29b9a",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "tests/test_readme.py",
+   "fingerprint": "4b1b8aa3608a26da",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "tests/test_readme.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "tests/test_readme.py",
+   "fingerprint": "0559aadba9e29b9a",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "tests/test_readme.py",
+   "fingerprint": "4b1b8aa3608a26da",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "tests/test_readme.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "tests/test_transcript_delivery.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "tests/test_transcript_delivery.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "tests/test_transcript_lessons.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "tests/test_transcript_lessons.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "tests/test_worktree_cleanup.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "tests/test_worktree_cleanup.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "transcript_delivery.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "transcript_delivery.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "transcript_lessons.py",
+   "fingerprint": "0559aadba9e29b9a",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "transcript_lessons.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "transcript_lessons.py",
+   "fingerprint": "0559aadba9e29b9a",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "transcript_lessons.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "transcript_mistakes.py",
+   "fingerprint": "0559aadba9e29b9a",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "transcript_mistakes.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "transcript_mistakes.py",
+   "fingerprint": "0559aadba9e29b9a",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "transcript_mistakes.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic word the export scan derives from synthetic fixture identities in old source history; reviewed in context, not private data."
+  },
+  {
+   "scope": "history",
+   "kind": "internal-host",
+   "path": "tests/test_private_hosts.py",
+   "fingerprint": "378e1d4df9b48d3b",
+   "reason": "Task ID in a test fixture that the host heuristic misreads (#397 known false hit); not a host."
+  },
+  {
+   "scope": "tree",
+   "kind": "internal-host",
+   "path": "tests/test_private_hosts.py",
+   "fingerprint": "378e1d4df9b48d3b",
+   "reason": "Task ID in a test fixture that the host heuristic misreads (#397 known false hit); not a host."
+  },
+  {
+   "scope": "history",
+   "kind": "internal-host",
+   "path": "tests/test_private_hosts.py",
+   "fingerprint": "a1cfaeb0e525781d",
+   "reason": "Task ID in a test fixture that the host heuristic misreads (#397 known false hit); not a host."
+  },
+  {
+   "scope": "tree",
+   "kind": "internal-host",
+   "path": "tests/test_private_hosts.py",
+   "fingerprint": "a1cfaeb0e525781d",
+   "reason": "Task ID in a test fixture that the host heuristic misreads (#397 known false hit); not a host."
+  },
+  {
+   "scope": "history",
+   "kind": "tailnet-host",
+   "path": "tests/test_private_hosts.py",
+   "fingerprint": "ec964264e889d767",
+   "reason": "Synthetic tailnet name in a test fixture (made-up tailnet and host); not a real host."
+  },
+  {
+   "scope": "tree",
+   "kind": "tailnet-host",
+   "path": "tests/test_private_hosts.py",
+   "fingerprint": "ec964264e889d767",
+   "reason": "Synthetic tailnet name in a test fixture (made-up tailnet and host); not a real host."
+  },
+  {
+   "scope": "history",
+   "kind": "tailnet-host",
+   "path": "tests/test_private_hosts.py",
+   "fingerprint": "100e6d87807758b1",
+   "reason": "Synthetic tailnet name in a test fixture (made-up tailnet and host); not a real host."
+  },
+  {
+   "scope": "tree",
+   "kind": "tailnet-host",
+   "path": "tests/test_private_hosts.py",
+   "fingerprint": "100e6d87807758b1",
+   "reason": "Synthetic tailnet name in a test fixture (made-up tailnet and host); not a real host."
+  },
+  {
+   "scope": "tree",
+   "kind": "export-path-review",
+   "path": "public-export.txt",
+   "reason": "Public file list of this export; the layout, environment-literal and packaging tests read it at the export root.",
+   "source_sha256": "f999f4a591ba51702111193f37bde3f289c77e8c7f2e7f00f1ee7fd17375566f"
+  },
+  {
+   "scope": "tree",
+   "kind": "export-path-review",
+   "path": "library/state-safety/rule.md",
+   "reason": "Public proven-lesson rule; the directory name is the lesson id state-safety, not a STATE notes file.",
+   "source_sha256": "3456627fee92aa31e527d06cdbd4bbc4a2067453404f2462eb29d5953f004b69"
+  },
+  {
+   "scope": "tree",
+   "kind": "export-path-review",
+   "path": "library/state-safety/check.py",
+   "reason": "Public proven-lesson check; the directory name is the lesson id state-safety, not a STATE notes file.",
+   "source_sha256": "58e4028054fd67c11a927fbf5653e38051f40a7213374ca79c23963068d20712"
+  },
+  {
+   "scope": "tree",
+   "kind": "export-path-review",
+   "path": "library/state-safety/fixtures/bad/store.py",
+   "reason": "Synthetic failing fixture of the public state-safety lesson; the directory name is the lesson id, not a STATE notes file.",
+   "source_sha256": "c302e8e94867f97bd610d03ced218bb28cdb65946a750fe85cb3fcff027d57b1"
+  },
+  {
+   "scope": "tree",
+   "kind": "export-path-review",
+   "path": "library/state-safety/fixtures/good/store.py",
+   "reason": "Synthetic passing fixture of the public state-safety lesson; the directory name is the lesson id, not a STATE notes file.",
+   "source_sha256": "016bd4ff29cdbc393c170fbddb24a1afd8e841d0cb0c96b48abc42069b4b44b8"
+  }
+ ]
+}

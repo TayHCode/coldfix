@@ -1,0 +1,260 @@
+{
+  "version": 1,
+  "model_role": "builder-trivial",
+  "seeds": 3,
+  "session_timeout_seconds": 900,
+  "acceptance_timeout_seconds": 300,
+  "hook_timeout_seconds": 10,
+  "agent_command": [
+    "codex"
+  ],
+  "agent_sandbox": "workspace-write",
+  "hook_matcher": "Bash|apply_patch",
+  "objective": "tokens_total",
+  "noise_multiplier": 1,
+  "control": "without",
+  "incumbent": "reflex-current",
+  "facts": "tests/fixtures/coldrecall_measure/hillclimb_facts.json",
+  "tasks": [
+    {
+      "id": "unicode-ingest",
+      "base": "56ba960fc28706d19b2cb138270e96d379a760cc",
+      "prompt": "python3 coldfix.py ingest rejects some valid JSONL batches: an event whose error text contains a Unicode line or paragraph separator (U+2028, U+2029) or U+0085 is refused as invalid. Make ingest accept such events and store their text unchanged. Run the existing tests with python3 -m unittest discover -s tests when you are done.",
+      "accept": {
+        "copy": {
+          "checks/jsonl_unicode.py": "checks/jsonl_unicode.py"
+        },
+        "commands": [
+          [
+            "python3",
+            "checks/jsonl_unicode.py"
+          ],
+          [
+            "python3",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tests"
+          ]
+        ]
+      },
+      "kind": "knowledge"
+    },
+    {
+      "id": "blank-line-count",
+      "base": "56ba960fc28706d19b2cb138270e96d379a760cc",
+      "prompt": "Make python3 coldfix.py ingest (JSONL format) also report skipped_blank_lines in its JSON output: the number of empty or whitespace-only lines it skipped. Keep the existing output fields. Run the existing tests with python3 -m unittest discover -s tests when you are done.",
+      "accept": {
+        "copy": {
+          ".accept/accept_blank_lines.py": "tests/fixtures/coldrecall_measure/accept_blank_lines.py"
+        },
+        "commands": [
+          [
+            "python3",
+            ".accept/accept_blank_lines.py"
+          ],
+          [
+            "python3",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tests"
+          ]
+        ]
+      },
+      "kind": "control"
+    },
+    {
+      "id": "help-test",
+      "base": "56ba960fc28706d19b2cb138270e96d379a760cc",
+      "prompt": "Add a new test file tests/test_help.py with a unittest that runs python3 coldfix.py --help and asserts it exits 0 and mentions the capture, ingest, propose and export commands. Do not change coldfix.py. Run the new test when you are done.",
+      "accept": {
+        "copy": {
+          ".accept/accept_help_test.py": "tests/fixtures/coldrecall_measure/accept_help_test.py"
+        },
+        "commands": [
+          [
+            "python3",
+            ".accept/accept_help_test.py"
+          ],
+          [
+            "python3",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tests"
+          ]
+        ]
+      },
+      "kind": "control"
+    },
+    {
+      "id": "show-failure",
+      "kind": "knowledge",
+      "base": "56ba960fc28706d19b2cb138270e96d379a760cc",
+      "prompt": "Add a show command to python3 coldfix.py: show --id <failure id> prints the stored failure as JSON so a reviewer can inspect it, and exits 2 for an unknown id. Run the existing tests with python3 -m unittest discover -s tests when you are done.",
+      "accept": {
+        "copy": {
+          ".accept/accept_show.py": "tests/fixtures/coldrecall_measure/accept_show.py"
+        },
+        "commands": [
+          [
+            "python3",
+            ".accept/accept_show.py"
+          ],
+          [
+            "python3",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tests"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "capture-tail",
+      "kind": "knowledge",
+      "base": "56ba960fc28706d19b2cb138270e96d379a760cc",
+      "prompt": "Add a --tail N option to python3 coldfix.py capture --log-file: store only the last N lines of the log file as the error text, keeping those lines exactly as they are in the file. Run the existing tests with python3 -m unittest discover -s tests when you are done.",
+      "accept": {
+        "copy": {
+          ".accept/accept_capture_tail.py": "tests/fixtures/coldrecall_measure/accept_capture_tail.py"
+        },
+        "commands": [
+          [
+            "python3",
+            ".accept/accept_capture_tail.py"
+          ],
+          [
+            "python3",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tests"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "recurring-groups",
+      "kind": "knowledge",
+      "base": "56ba960fc28706d19b2cb138270e96d379a760cc",
+      "prompt": "Add a --recurring flag to python3 coldfix.py propose that lists only the recurring failure groups. Run the existing tests with python3 -m unittest discover -s tests when you are done.",
+      "accept": {
+        "copy": {
+          ".accept/accept_recurring_groups.py": "tests/fixtures/coldrecall_measure/accept_recurring_groups.py"
+        },
+        "commands": [
+          [
+            "python3",
+            ".accept/accept_recurring_groups.py"
+          ],
+          [
+            "python3",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tests"
+          ]
+        ]
+      }
+    }
+  ],
+  "variants": [
+    {
+      "id": "without",
+      "params": null
+    },
+    {
+      "id": "reflex-current",
+      "params": {
+        "events": [
+          "PreToolUse"
+        ],
+        "budget": null,
+        "ranking": "ref",
+        "once": false
+      }
+    },
+    {
+      "id": "reflex-once",
+      "params": {
+        "events": [
+          "PreToolUse"
+        ],
+        "budget": null,
+        "ranking": "ref",
+        "once": true
+      }
+    },
+    {
+      "id": "reflex-budget2",
+      "params": {
+        "events": [
+          "PreToolUse"
+        ],
+        "budget": 2,
+        "ranking": "ref",
+        "once": false
+      }
+    },
+    {
+      "id": "reflex-budget2-overlap",
+      "params": {
+        "events": [
+          "PreToolUse"
+        ],
+        "budget": 2,
+        "ranking": "overlap",
+        "once": false
+      }
+    },
+    {
+      "id": "session-start",
+      "params": {
+        "events": [
+          "SessionStart"
+        ],
+        "budget": null,
+        "ranking": "ref",
+        "once": false
+      }
+    },
+    {
+      "id": "prompt-overlap3",
+      "params": {
+        "events": [
+          "UserPromptSubmit"
+        ],
+        "budget": 3,
+        "ranking": "overlap",
+        "once": false
+      }
+    },
+    {
+      "id": "start-plus-reflex-once",
+      "params": {
+        "events": [
+          "SessionStart",
+          "PreToolUse"
+        ],
+        "budget": null,
+        "ranking": "ref",
+        "once": true
+      }
+    }
+  ]
+}

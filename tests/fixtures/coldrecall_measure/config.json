@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "model_role": "builder-fast",
+  "repetitions": 3,
+  "session_timeout_seconds": 900,
+  "acceptance_timeout_seconds": 300,
+  "agent_command": ["claude"],
+  "agent_tools": ["Read", "Edit", "Write", "MultiEdit", "Glob", "Grep", "Bash"],
+  "agent_allowed": ["Bash(python3:*)", "Bash(git diff:*)", "Bash(git status:*)", "Bash(ls:*)"],
+  "wiki_command": ["python3", "tests/fixtures/coldrecall_measure/wiki_fixture.py"],
+  "tasks": [
+    {
+      "id": "unicode-ingest",
+      "base": "56ba960fc28706d19b2cb138270e96d379a760cc",
+      "prompt": "python3 coldfix.py ingest rejects some valid JSONL batches: an event whose error text contains a Unicode line or paragraph separator (U+2028, U+2029) or U+0085 is refused as invalid. Make ingest accept such events and store their text unchanged. Run the existing tests with python3 -m unittest discover -s tests when you are done.",
+      "accept": {
+        "copy": {"checks/jsonl_unicode.py": "checks/jsonl_unicode.py"},
+        "commands": [["python3", "checks/jsonl_unicode.py"], ["python3", "-B", "-m", "unittest", "discover", "-s", "tests"]]
+      }
+    },
+    {
+      "id": "blank-line-count",
+      "base": "56ba960fc28706d19b2cb138270e96d379a760cc",
+      "prompt": "Make python3 coldfix.py ingest (JSONL format) also report skipped_blank_lines in its JSON output: the number of empty or whitespace-only lines it skipped. Keep the existing output fields. Run the existing tests with python3 -m unittest discover -s tests when you are done.",
+      "accept": {
+        "copy": {".accept/accept_blank_lines.py": "tests/fixtures/coldrecall_measure/accept_blank_lines.py"},
+        "commands": [["python3", ".accept/accept_blank_lines.py"], ["python3", "-B", "-m", "unittest", "discover", "-s", "tests"]]
+      }
+    },
+    {
+      "id": "help-test",
+      "base": "56ba960fc28706d19b2cb138270e96d379a760cc",
+      "prompt": "Add a new test file tests/test_help.py with a unittest that runs python3 coldfix.py --help and asserts it exits 0 and mentions the capture, ingest, propose and export commands. Do not change coldfix.py. Run the new test when you are done.",
+      "accept": {
+        "copy": {".accept/accept_help_test.py": "tests/fixtures/coldrecall_measure/accept_help_test.py"},
+        "commands": [["python3", ".accept/accept_help_test.py"], ["python3", "-B", "-m", "unittest", "discover", "-s", "tests"]]
+      }
+    }
+  ]
+}

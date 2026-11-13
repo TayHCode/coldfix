@@ -1,0 +1,21 @@
+{
+  "type": "ci",
+  "repo": "example/project",
+  "run_id": 414,
+  "workflow": "verify",
+  "job": "unit tests",
+  "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "pr": 17,
+  "runner": "runner-a",
+  "duration_seconds": 91.5,
+  "attempt": 1,
+  "conclusion": "failure",
+  "occurred": "2026-10-20T12:00:00Z",
+  "log_tail": "AssertionError: expected 2, got 3",
+  "retry_evidence": {
+    "attempt": 2,
+    "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "conclusion": "success",
+    "url": "https://github.com/example/project/actions/runs/414/attempts/2"
+  }
+}

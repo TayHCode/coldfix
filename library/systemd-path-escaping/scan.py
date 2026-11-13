@@ -1,0 +1,65 @@
+import re
+import json
+import os
+import subprocess
+import sys
+
+FAILURE = "quoted-systemd-path"
+
+
+def tracked_files():
+    listed = subprocess.run(["git", "-c", "core.fsmonitor=false", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+                            capture_output=True, text=True)
+    if listed.returncode == 0:
+        return sorted(set(path for path in listed.stdout.split("\0") if path))
+    found = []
+    for folder, folders, names in os.walk("."):
+        folders[:] = sorted(name for name in folders if name != ".git")
+        found += [os.path.relpath(os.path.join(folder, name)) for name in sorted(names)]
+    return found
+
+
+def regular(path):
+    return os.path.isfile(path) and not os.path.islink(path)
+
+
+def read(path):
+    with open(path, "rb") as stream:
+        return stream.read()
+
+
+PATH_KEY = r"Path(?:Changed|Modified|Exists|ExistsGlob|DirectoryNotEmpty)="
+QUOTED = re.compile(PATH_KEY + r"""\s*\\?["'](?=[^\s"'+])""")
+QUOTERS = re.compile(r"\b(\w+)\s*=\s*lambda\b[^\n]*\b(?:json\.dumps|shlex\.quote)\(|"
+                     r"\bdef\s+(\w+)\([^\n]*\n(?:[ \t]+[^\n]*\n){0,3}?[ \t]+return\b[^\n]*\b(?:json\.dumps|shlex\.quote)\(")
+
+
+def hits():
+    found = []
+    for path in tracked_files():
+        if not regular(path):
+            continue
+        content = read(path)
+        if b"\0" in content:
+            continue
+        text = content.decode("utf-8", "replace")
+        if not re.search(PATH_KEY, text):
+            continue
+        quoters = {"json.dumps", "shlex.quote"} | {name for pair in QUOTERS.findall(text) for name in pair if name}
+        quoting = re.compile(PATH_KEY + r".*?(?<![\w.])(?:" + "|".join(sorted(map(re.escape, quoters))) + r")\(")
+        found += [f"{path}:{number}" for number, line in enumerate(text.split("\n"), 1)
+                  if QUOTED.search(line) or quoting.search(line)]
+    return found
+
+
+def main():
+    try:
+        found = hits()
+    except Exception as error:
+        print(json.dumps({"status": "INCOMPLETE", "reason": repr(error)}))
+        return 2
+    print(json.dumps({"status": "FAIL", "failure": FAILURE, "hits": found} if found else {"status": "PASS", "hits": []}))
+    return 1 if found else 0
+
+
+sys.exit(main())

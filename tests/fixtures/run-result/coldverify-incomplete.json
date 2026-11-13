@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "run_id": "04392e68631b4150a74d79df12b75c4f",
+  "repo": {
+    "name": "example/project",
+    "commit": "ec231672c3e1b21008e44ed59368e19ef3c70863"
+  },
+  "model": {
+    "provider": "unknown",
+    "model": "unknown",
+    "effort": "unknown"
+  },
+  "steps": [
+    {
+      "step": "check claim",
+      "command": "coldverify --ci --builder-model claude-opus-5-5",
+      "status": "skip",
+      "duration_ms": 0,
+      "inputs_hash": null
+    },
+    {
+      "step": "check repro",
+      "command": "coldverify --ci --builder-model claude-opus-5-5",
+      "status": "pass",
+      "duration_ms": 0,
+      "inputs_hash": null
+    },
+    {
+      "step": "check tests",
+      "command": "coldverify --ci --builder-model claude-opus-5-5",
+      "status": "pass",
+      "duration_ms": 0,
+      "inputs_hash": null
+    },
+    {
+      "step": "check tamper",
+      "command": "coldverify --ci --builder-model claude-opus-5-5",
+      "status": "pass",
+      "duration_ms": 0,
+      "inputs_hash": null
+    },
+    {
+      "step": "check criteria",
+      "command": "coldverify --ci --builder-model claude-opus-5-5",
+      "status": "skip",
+      "duration_ms": 0,
+      "inputs_hash": null
+    }
+  ],
+  "outcome": "incomplete",
+  "failure": {
+    "class": "harness",
+    "cause": "skipped_step",
+    "detail": "no claim: add a \"## Claim\" section to the PR description or pass --claim; no claim to derive acceptance criteria from"
+  },
+  "time": {
+    "waiting_ms": null,
+    "setup_ms": null,
+    "running_ms": null
+  },
+  "cost": {
+    "usd": null,
+    "input_tokens": null,
+    "output_tokens": null
+  },
+  "environment": {
+    "host": "ci-host",
+    "os": "Linux-7.0.0-42-generic-x86_64-with-glibc2.43",
+    "isolation": "ssh",
+    "tools": {
+      "python": "3.14.4",
+      "coldverify": "0.1.0"
+    }
+  },
+  "procedure": {
+    "recipe": "coldverify",
+    "commands": [
+      "coldverify --ci --builder-model claude-opus-5-5",
+      "nice -n 19 ionice -c3 bash /tmp/tmpf9vb20u8/tool/ci/fleet-verify.sh"
+    ]
+  },
+  "artifacts": [
+    {
+      "path": ".cold/verify-repro.json",
+      "sha256": "d7ab12fcddf65570e93d8f3e79e4200752c8c2da3906519e9f820793c1c7781e"
+    },
+    {
+      "path": ".cold/verify-result.json",
+      "sha256": "50ef10e3ea7887a0b03bacc5471ce80b22f9ba54b5746c71c60875fe6d0f2703"
+    },
+    {
+      "path": ".cold/verify-receipt.json",
+      "sha256": "d074e6dfdcb2c13cdc299d33b9e3f5e9967b2b09c49bce2781a54704378a54ba",
+      "description": "coldverify receipt"
+    }
+  ],
+  "retention": {
+    "producer": "coldverify",
+    "policy": "temporary",
+    "expires": "2026-11-26T23:01:35Z"
+  }
+}

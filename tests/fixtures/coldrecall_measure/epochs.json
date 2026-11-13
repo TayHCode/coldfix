@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "climb_config": "tests/fixtures/coldrecall_measure/hillclimb.json",
+  "max_epochs": 2,
+  "repetitions": 5
+}

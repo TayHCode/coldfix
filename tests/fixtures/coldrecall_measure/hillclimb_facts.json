@@ -1,0 +1,20 @@
+[
+  {"id": "no-echo", "anchors": ["coldfix.py", "tests/test_cli.py", "README.md"],
+   "text": "CLI output carries ids, counts and group IDs only; never print captured command or error text."},
+  {"id": "immutable-records", "anchors": ["coldfix.py"],
+   "text": "Failure records are immutable files written once through atomic_create; repeated failures stay separate records, so never rewrite or deduplicate stored records."},
+  {"id": "exact-grouping", "anchors": ["coldfix.py"],
+   "text": "Failure groups are exact: group_id hashes repo, command and error. Do not add fuzzy or normalized matching."},
+  {"id": "batch-all-or-nothing", "anchors": ["coldfix.py", "tests/test_cli.py"],
+   "text": "ingest validates the whole batch before saving any record; on any error nothing is imported."},
+  {"id": "propose-lists-groups", "anchors": ["coldfix.py", "README.md"],
+   "text": "propose without --group already builds the group listing with count, recurring flag and evidence IDs; extend that branch instead of adding a second listing."},
+  {"id": "fixed-errors", "anchors": ["coldfix.py", "tests/test_cli.py"],
+   "text": "Error messages are fixed text that never include input content; main prints 'coldfix: <message>' and exits 2."},
+  {"id": "newline-only", "anchors": ["coldfix.py"],
+   "text": "Split stored text only at \\n. str.splitlines() also splits at U+2028, U+2029 and U+0085 and silently changes the text."},
+  {"id": "tests-subprocess", "anchors": ["tests/test_cli.py"],
+   "text": "tests/test_cli.py runs the CLI as a subprocess against a temporary store; add behavior tests there."},
+  {"id": "stdlib-only", "anchors": ["coldfix.py"],
+   "text": "coldfix.py is stdlib only; add no third-party imports."}
+]

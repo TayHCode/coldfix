@@ -1,0 +1,17 @@
+{
+  "type": "t3",
+  "thread_id": "example-thread",
+  "repo": "example/project",
+  "route": "builder-default",
+  "model": "example-model",
+  "status": "blocked",
+  "goal": "Repair the failing unit test",
+  "blocker_category": "agent-mistake",
+  "what_tried": ["Ran the selected test", "Inspected the failing assertion"],
+  "evidence_links": ["https://example.invalid/evidence/test-result"],
+  "time_spent_seconds": 300,
+  "coldfix_fixable": true,
+  "human_needed": false,
+  "reason": "The attempted edit changed the wrong caller",
+  "occurred": "2026-10-20T12:05:00Z"
+}

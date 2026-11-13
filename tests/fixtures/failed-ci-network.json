@@ -1,0 +1,15 @@
+{
+  "type": "ci",
+  "repo": "example/project",
+  "run_id": 413,
+  "workflow": "verify",
+  "job": "unit tests",
+  "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "pr": 17,
+  "runner": "runner-a",
+  "duration_seconds": 91.5,
+  "attempt": 1,
+  "conclusion": "failure",
+  "occurred": "2026-10-20T12:00:00Z",
+  "log_tail": "curl: (6) Could not resolve host: example.invalid"
+}

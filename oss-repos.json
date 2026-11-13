@@ -1,0 +1,10 @@
+{
+  "repos": [
+    {"repo": "python/typing_extensions", "license": "PSF-2.0"},
+    {"repo": "more-itertools/more-itertools", "license": "MIT"},
+    {"repo": "tornadoweb/tornado", "license": "Apache-2.0"},
+    {"repo": "Python-Markdown/markdown", "license": "BSD-3-Clause"},
+    {"repo": "lark-parser/lark", "license": "MIT"},
+    {"repo": "pytest-dev/pyfakefs", "license": "Apache-2.0"}
+  ]
+}

@@ -1,0 +1,76 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "coldfix"
+version = "0.1.0"
+description = "Turn the mistakes coding agents repeat into rules backed by a check you can rerun."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+
+[project.scripts]
+coldfix = "coldfix:main"
+
+[tool.setuptools]
+py-modules = [
+    "agents_block",
+    "check_delivery",
+    "ci_actions_replay",
+    "ci_batch",
+    "ci_blockers",
+    "ci_candidates",
+    "ci_exact_unittest",
+    "ci_fix_learning",
+    "ci_vm_executor",
+    "ci_workflow_replay",
+    "codex_review_source",
+    "coldfix",
+    "coldimage",
+    "coldpass_inputs",
+    "coldpass_replay",
+    "coldpass_sources",
+    "coldrecall",
+    "coldrecall_epochs",
+    "coldrecall_epochs_report",
+    "coldrecall_epochs_resume",
+    "coldrecall_measure",
+    "collect_sources",
+    "evidence_join",
+    "failure_ingest",
+    "flakiness",
+    "github_sources",
+    "incident_admission",
+    "learn_candidates",
+    "learn_collect",
+    "learn_daily",
+    "learn_replay",
+    "learn_report",
+    "learn_stall",
+    "learn_status",
+    "lesson_delivery",
+    "lesson_loop",
+    "loop_setup",
+    "measurements",
+    "oss_replay",
+    "private_run",
+    "public_admission",
+    "regression_adapter",
+    "replay_isolation",
+    "replay_repos",
+    "repo_install",
+    "settle_codex_lessons",
+    "status_summary",
+    "t3_sources",
+    "transcript_delivery",
+    "transcript_lessons",
+    "transcript_mistakes",
+    "verify_pairs",
+    "worktree_cleanup",
+]
+packages = ["library"]
+
+[tool.setuptools.package-data]
+library = ["**/*", "**/.*"]

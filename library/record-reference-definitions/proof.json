@@ -1,0 +1,13 @@
+{
+  "repo": "https://github.com/Python-Markdown/markdown",
+  "source": "https://github.com/Python-Markdown/markdown/pull/1678#discussion_r4390408250",
+  "check_sha256": "948147fed92249b05f187a7591f864f3371d3be387251842d9692eff2b577fb9",
+  "before": {
+    "commit": "5cd3e1684d7a9a661d5ccf13b708975643a81510",
+    "exit": 1
+  },
+  "after": {
+    "commit": "2e8e7bc3e93a4240b7930f378aeda6d95c86abc0",
+    "exit": 0
+  }
+}

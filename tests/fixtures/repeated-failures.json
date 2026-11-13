@@ -1,0 +1,23 @@
+{
+  "description": "Example-only FileNotFoundError diagnostic shape observed in private collector evidence. Commands, paths, line numbers, repo labels, dates and source references are synthetic. No raw source text is included.",
+  "events": [
+    {
+      "command": "python3 -m unittest",
+      "error": "Traceback (most recent call last):\n  File \"<stdin>\", line 7, in <module>\nFileNotFoundError: [Errno 2] No such file or directory: 'example-one/assets/config.json'",
+      "repo": "example-one",
+      "agent": "example-worker",
+      "kind": "test",
+      "source_ref": "example:missing-file:1",
+      "occurred": "2026-10-20"
+    },
+    {
+      "command": "python3 -m unittest",
+      "error": "Traceback (most recent call last):\n  File \"<stdin>\", line 19, in <module>\nFileNotFoundError: [Errno 2] No such file or directory: 'example-two/data/settings.json'",
+      "repo": "example-two",
+      "agent": "example-worker",
+      "kind": "test",
+      "source_ref": "example:missing-file:2",
+      "occurred": "2026-10-21"
+    }
+  ]
+}

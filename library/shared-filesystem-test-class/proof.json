@@ -1,0 +1,13 @@
+{
+  "repo": "https://github.com/pytest-dev/pyfakefs",
+  "source": "https://github.com/pytest-dev/pyfakefs/pull/1349#discussion_r4241453974",
+  "check_sha256": "86e3aba6b7fc712dd14ffe1099d01b002c813ccf665c45e2bfe9baa240a19928",
+  "before": {
+    "commit": "80789a2cf62b36a941baaf19d8234b35de5c9ac2",
+    "exit": 1
+  },
+  "after": {
+    "commit": "7cbda88477e4a79d0ebbf371d199ea93acf2b85f",
+    "exit": 0
+  }
+}
