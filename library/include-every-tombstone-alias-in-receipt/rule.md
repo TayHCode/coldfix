@@ -1,7 +1,7 @@
 ---
 id: include-every-tombstone-alias-in-receipt
 title: Include every tombstone alias in receipt identity extraction
-proof: judged
+proof: replayed
 ---
 # Include every tombstone alias in receipt identity extraction
 

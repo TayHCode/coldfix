@@ -1,7 +1,7 @@
 ---
 id: reject-malformed-facts
 title: Reject malformed facts JSON with a controlled error
-proof: judged
+proof: replayed
 ---
 # Reject malformed facts JSON with a controlled error
 

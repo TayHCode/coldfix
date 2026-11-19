@@ -1,9 +1,12 @@
 """Admit one verified incident as a single-evidence lesson proven by replay."""
 import argparse
 import ast
+import collections
 import hashlib
+from pathlib import Path
 import re
 import shlex
+import tempfile
 import tokenize
 
 import coldfix as c
@@ -46,6 +49,90 @@ def same_test(before, after, name):
         return False
 
 
+def flagged_revert(args, repo):
+    flagged = getattr(args, "flagged", None) or dict(path=getattr(args, "flagged_path", None),
+                                                     start_line=getattr(args, "flagged_start", None),
+                                                     end_line=getattr(args, "flagged_end", None))
+    flagged = flagged if isinstance(flagged, dict) else {}
+    start, end = flagged.get("start_line"), flagged.get("end_line")
+    c.require(isinstance(flagged.get("path"), str) and type(start) is int and type(end) is int and 1 <= start <= end,
+              "a review finding is proven only with its flagged lines")
+
+    def budget():
+        return c.remaining_timeout(args.timeout, getattr(args, "deadline", None))
+
+    old, new = [re.split(r"(?<=\n)(?=.)", c.privacy_git(repo, "show", revision + ":" + flagged["path"],
+                                                         timeout=budget()).decode("utf-8"),
+                         flags=re.S) for revision in (args.before, args.after)]
+    hunks = re.findall(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", c.privacy_git(
+        repo, "diff", "-U0", "--no-color", "--no-ext-diff", "--no-textconv", args.before, args.after, "--", ":(literal)" + flagged["path"],
+        timeout=budget()).decode("utf-8", "replace"), flags=re.M)
+    reverted, changed, kept = [], False, 0
+    for old_start, old_count, new_start, new_count in hunks:
+        old_count, new_count = int(old_count or 1), int(new_count or 1)
+        i1, j1 = int(old_start) - (old_count > 0), int(new_start) - (new_count > 0)
+        i2, j2 = i1 + old_count, j1 + new_count
+        hit = i2 > i1 and i1 + 1 <= end and i2 >= start
+        c.require(not hit or start <= i1 + 1 and i2 <= end and j2 - j1 <= i2 - i1,
+                  "the fix's edit of the finding's flagged lines also adds or changes unflagged lines")
+        changed = changed or hit
+        reverted += new[kept:j1] + (old[i1:i2] if hit else new[j1:j2])
+        kept = j2
+    reverted += new[kept:]
+    c.require(changed, "the fix does not change the finding's flagged lines")
+    return flagged["path"], "".join(reverted), "".join(new)
+
+
+def module_in_tree(repo, revision, module, deadline, timeout):
+    paths = c.privacy_git(repo, "ls-tree", "-r", "--name-only", "-z", revision,
+                          timeout=c.remaining_timeout(timeout, deadline)).decode("utf-8", "replace").split("\0")
+    return any(part in (module, module + ".py") for path in paths for part in path.split("/"))
+
+
+def located(cause, args, repo):
+    missing = re.fullmatch(r"ModuleNotFoundError: No module named '(\w+)'", cause)
+    if missing and not any(module_in_tree(repo, revision, missing[1], getattr(args, "deadline", None), args.timeout)
+                           for revision in (args.before, args.after)):
+        return cause + " outside this repo"
+    return cause
+
+
+def save_flagged_receipt(root, repo, lesson, row, patch, cause):
+    if row["status"] == "INCOMPLETE" and cause:
+        row = dict(row, stderr="INCOMPLETE: " + cause + "\n")
+    not_run = dict(commit="", tree="", status="INCOMPLETE", exit=None, stdout="", stderr="not run by the flagged-lines replay\n")
+    receipt = dict(c.new_record(), version=2, lesson_revision=lesson["id"], lesson_digest=c.lesson_digest(lesson),
+                   check_sha256=c.digest(lesson["check_script"]), check_command=lesson["check_command"],
+                   repo=str(repo), before=not_run, after=not_run, reversed=row,
+                   status=c.replay_state(not_run, not_run, row)[0], test_sha256=lesson["admission"]["test_sha256"],
+                   patch_sha256=hashlib.sha256(patch.encode("utf-8")).hexdigest())
+    receipt["id"] = c.receipt_id(receipt)
+    c.save(root, "receipts", receipt)
+
+
+def require_flagged_lines_exercised(args, root, repo, script, expected, lesson=None):
+    import learn_replay
+
+    path, reverted, new = flagged_revert(args, repo)
+    patch = learn_replay.proposed_patch(path, reverted, new)
+    with tempfile.TemporaryDirectory(prefix=".flagged-", dir=root) as temporary:
+        scratch = Path(temporary)
+        check, patch_file = scratch / "check", scratch / "flagged.patch"
+        c.atomic_create(check, script)
+        patch_file.write_text(patch, encoding="utf-8")
+        row = replay_isolation.replay_tree(repo, args.after, scratch / "reverted", "python3 " + shlex.quote(str(check)),
+                                           expected, args.timeout, patch_file, deadline=getattr(args, "deadline", None))
+    if row["status"] == "INCOMPLETE":
+        c.remaining_timeout(args.timeout, getattr(args, "deadline", None))
+    if row["status"] != "FAIL":
+        cause = located(c.incomplete_cause(row["stderr"], c.load_store(root)[1]) if "INCOMPLETE: " in row["stderr"] else "",
+                        args, repo)
+        if lesson is not None:
+            save_flagged_receipt(root, repo, lesson, row, patch, cause)
+        raise c.ColdfixError(f"incident not admitted; flagged lines reverted {row['status']}; expected FAIL"
+                             + (f"; {cause}" if cause else ""))
+
+
 def hostname_text(repo, revisions, path, test_patch, rest):
     parts = path.removesuffix(".py").split("/")
     modules = {".".join(parts[index:]) for index in range(len(parts))}
@@ -82,6 +169,46 @@ def pytest_messages(failure, diagnostic):
 
 def is_assertion(message):
     return bool(re.match(r"(?:AssertionError|assert)\b.", message))
+
+
+SUITE_COMMAND = "python3 -m unittest discover -s tests"
+SUITE_SCRIPT = "import os, sys\nos.execv(sys.executable, [sys.executable, '-m', 'unittest', 'discover', '-s', 'tests'])\n"
+SUITE_RAN = re.compile(r"^Ran (\d+) tests? in ", re.M)
+SUITE_FAILED = re.compile(r"^(?:FAIL|ERROR): (.+)$", re.M)
+SUITE_SKIPPED = re.compile(r"^(?:OK|FAILED) \(.*\bskipped=(\d+)", re.M)
+
+
+def suite_run(root, repo, revision, timeout, deadline):
+    with tempfile.TemporaryDirectory(prefix=".suite-", dir=root) as temporary:
+        check = Path(temporary) / "suite.py"
+        check.write_text(SUITE_SCRIPT, encoding="utf-8")
+        row = replay_isolation.replay_tree(repo, revision, Path(temporary) / "tree", ["python3", str(check)], "",
+                                           timeout, deadline=deadline)
+    ran, failed = SUITE_RAN.findall(row["stderr"]), sorted(SUITE_FAILED.findall(row["stderr"]))
+    if row["exit"] is None or len(ran) != 1 or int(ran[0]) == 0 or (row["exit"] == 0) == bool(failed):
+        return None
+    skipped = SUITE_SKIPPED.findall(row["stderr"])
+    return dict(ran=int(ran[0]), failed=failed, skipped=int(skipped[-1]) if skipped else 0)
+
+
+def suite_counts(run):
+    return dict(ran=run["ran"], failed=len(run["failed"]), skipped=run["skipped"])
+
+
+def full_suite(root, repo, before, after, timeout, deadline=None):
+    try:
+        fixed = suite_run(root, repo, after, timeout, deadline)
+        base = suite_run(root, repo, before, timeout, deadline) if fixed and (fixed["failed"] or fixed["skipped"]) else None
+    except (c.ColdfixError, OSError) as error:
+        return dict(command=SUITE_COMMAND, status="INCOMPLETE", reason=str(error))
+    if fixed is None or (fixed["failed"] or fixed["skipped"]) and base is None:
+        return dict(command=SUITE_COMMAND, status="INCOMPLETE", reason="the suite gave no unittest result")
+    if fixed["skipped"] >= fixed["ran"]:
+        return dict(command=SUITE_COMMAND, status="INCOMPLETE", reason="every suite test was skipped")
+    new = sorted((collections.Counter(fixed["failed"]) - collections.Counter(base["failed"] if base else ())).elements())
+    newly_skipped = fixed["skipped"] > (base["skipped"] if base else 0)
+    return dict(command=SUITE_COMMAND, status="FAIL" if new or newly_skipped else "PASS", new_failures=new,
+                after=suite_counts(fixed), **(dict(before=suite_counts(base)) if base else {}))
 
 
 def admit(args, root, store):
@@ -223,6 +350,8 @@ def admit(args, root, store):
                                  diagnostic=args.diagnostic, test_paths=[path], test_sha256=digest,
                                  **(dict(binding_sha256=coldpass_replay.companion_key(args.coldpass_entry["coldpass_screen"]))
                                     if coldpass is not None else {})))
+    if coldpass is None and failure.get("kind") == "review":
+        require_flagged_lines_exercised(args, root, repo, script, expected, lesson=record)
     c.public_text("\n".join(record[key] for key in ("title", "rule", "check_command")),
                   [store["failures"][ref] for ref in evidence])
     rest = "\n".join([path, script, args.title, args.rule, args.lesson_failure, args.fix, args.diagnostic])
@@ -273,7 +402,16 @@ def admit(args, root, store):
         root, store = c.load_store(root)
         receipt = store["receipts"][result["receipt_id"]]
         states = {side: (receipt[side] or {}).get("status") for side in ("before", "after", "reversed")}
+        causes = {}
+        for side, label in (("before", "red"), ("after", "green"), ("reversed", "reversed")):
+            cause = located(c.incomplete_cause((receipt[side] or {}).get("stderr", ""), store), args, args.repo).replace("; ", ", ") \
+                if states[side] == "INCOMPLETE" else ""
+            if cause:
+                causes.setdefault(cause, []).append(label)
+        causes = "".join(f"; {', '.join(labels)}: {cause}" for cause, labels in causes.items())
         raise c.ColdfixError(f"incident not admitted; red {states['before']}, green {states['after']}, "
-                             f"reversed-patch {states['reversed']}; expected FAIL, PASS, FAIL")
+                             f"reversed-patch {states['reversed']}; expected FAIL, PASS, FAIL{causes}")
     result["test_sha256"] = digest
+    result["full_suite"] = full_suite(root, repo, args.before, args.after, args.timeout,
+                                      getattr(args, "deadline", None))
     return result

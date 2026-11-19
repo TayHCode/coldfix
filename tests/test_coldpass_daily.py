@@ -73,7 +73,7 @@ class ColdpassFlowTests(unittest.TestCase):
         data = json.loads(prompt.split('\n', 1)[1])
         if shape is learn_daily.DRAFTS:
             self.assertIn('witness', data[0])
-            return dict(drafts=[dict(fingerprint=row['fingerprint'], kind='test', title='Check package imports',
+            return dict(drafts=[dict(fingerprint=row['fingerprint'], kind='test', cause='c', prevention='p', title='Check package imports',
                                     rule='Test imports through the package.', check_command='ignored') for row in data])
         self.assertIn('check_script', data['drafts'][0])
         return dict(reviews=[dict(fingerprint=row['fingerprint'], verdict=self.verdict, reason='Assertion checks the diagnostic.')
@@ -201,7 +201,7 @@ class ColdpassFlowTests(unittest.TestCase):
                         'body = json.loads(prompt[prompt.index(chr(10)) + 1:])\n'
                         'open(' + repr(str(seen)) + ", 'a').write(role + chr(10))\n"
                         "if role == 'drafter':\n"
-                        "    print(json.dumps(dict(drafts=[dict(fingerprint=row['fingerprint'], kind='test', title='Import siblings via the package',\n"
+                        "    print(json.dumps(dict(drafts=[dict(fingerprint=row['fingerprint'], kind='test', cause='c', prevention='p', title='Import siblings via the package',\n"
                         "        rule='Import sibling modules through the package.', check_command='ignored') for row in body])))\n"
                         'else:\n'
                         "    print(json.dumps(dict(reviews=[dict(fingerprint=row['fingerprint'], verdict='PASS', reason='checks the import')\n"
@@ -539,12 +539,16 @@ class ColdpassReviewRegressionTests(unittest.TestCase):
                 self.assertLessEqual(kwargs['timeout'], 60)
             return read(repo, *args, **kwargs)
 
+        deadline = time.monotonic() + 60
         with patch.object(learn_replay, 'source_repo', return_value=self.repo), \
-                patch.object(c, 'privacy_git', side_effect=bounded_read):
+                patch.object(c, 'privacy_git', side_effect=bounded_read), \
+                patch.object(learn_replay.incident_admission, 'full_suite',
+                             wraps=learn_replay.incident_admission.full_suite) as suite:
             learn_replay.coldpass_replay.preflight(self.store, c.load_store(self.store)[1], [pair], projects)
             _, proof = learn_replay.coldpass_proof(self.store, c.load_store(self.store)[1], draft, self.failure,
-                                                 pair, projects, 60, time.monotonic() + 60)
+                                                 pair, projects, 60, deadline)
         self.assertTrue(proof)
+        self.assertEqual(suite.call_args.args[-1], deadline)
         self.assertTrue(subjects)
 
     def test_settled_drafts_do_not_shrink_a_slow_valid_replay_budget(self):
@@ -661,7 +665,7 @@ class ColdpassReviewRegressionTests(unittest.TestCase):
                 for index, row in enumerate(data):
                     rules.setdefault(row['fingerprint'], 'Check behavior number ' + str(index) + '.')
                 fingerprints = list(rules)
-                return dict(drafts=[dict(fingerprint=row['fingerprint'], kind='test', title='Check behavior',
+                return dict(drafts=[dict(fingerprint=row['fingerprint'], kind='test', cause='c', prevention='p', title='Check behavior',
                     rule=rules[fingerprints[1]] if revising else rules[row['fingerprint']], check_command='ignored')
                     for row in data])
             return dict(reviews=[dict(fingerprint=row['fingerprint'], verdict='PASS', reason='Checked.')

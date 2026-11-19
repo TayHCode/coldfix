@@ -156,7 +156,7 @@ class CliLessonLifecycleTests(CliCase):
                 self.assertFalse((self.cwd / 'briefing.md').exists())
 
     def test_briefing_ignores_prose_words_after_credential_keywords(self):
-        for error in ('the bearer and the client', 'authorization: may be required', 'tokens=0 by default',
+        for error in ('the bearer and the client', 'authorization: may be required',
                       'Authorization: Bearer and the client', 'the env-bearer and routine-id fix',
                       '{"note": "the bearer of news\\", then"}'):
             with self.subTest(error=error):

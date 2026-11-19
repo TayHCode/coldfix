@@ -233,6 +233,8 @@ library/time-regexes-on-long-adversarial-inputs-before/scan.py
 library/update-callers-and-stubs/rule.md
 library/update-callers-and-stubs/scan.py
 library/use-the-configured-ssh-alias/rule.md
+library/use-the-triggering-invocation-id/rule.md
+library/use-the-triggering-invocation-id/scan.py
 library/validate-at-the-boundary/check.py
 library/validate-at-the-boundary/fixtures/bad/dates.py
 library/validate-at-the-boundary/fixtures/good/dates.py
@@ -257,6 +259,7 @@ replay_repos.py
 repo_install.py
 requirements-replay.txt
 settle_codex_lessons.py
+speed/pytest-xdist.md
 status_summary.py
 t3_sources.py
 test_suite.py
@@ -332,6 +335,7 @@ tests/test_cli_canaries_other.py
 tests/test_cli_canaries_phone.py
 tests/test_cli_lessons.py
 tests/test_cli_lessons_lifecycle.py
+tests/test_cli_short_prose_captures.py
 tests/test_codex_finding_lesson.py
 tests/test_codex_review_source.py
 tests/test_cold_verify_ingest.py

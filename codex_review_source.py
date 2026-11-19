@@ -42,6 +42,18 @@ def retryable(reason):
     return reason in RETRYABLE or isinstance(reason, str) and reason.startswith(prefix) and reason[len(prefix):] in RETRYABLE
 
 
+def stamp(previous):
+    today, revision = learn_replay.utc_day(), learn_replay.code_revision()
+    same = isinstance(previous, dict) and previous.get('revision') == revision
+    confirmed = same and (bool(previous.get('confirmed')) or previous.get('day') not in (None, today))
+    return dict(revision=revision, day=today, confirmed=bool(confirmed))
+
+
+def settled(record):
+    return (isinstance(record, dict) and bool(record.get('confirmed'))
+            and record.get('revision') == learn_replay.code_revision() and learn_replay.recent(record.get('day')))
+
+
 def skip_classes(rows):
     classes = {}
     for row in rows:
@@ -480,7 +492,7 @@ def resume(args):
                     and isinstance(row.get('before'), str) and SHA.fullmatch(row['before'])
                     and isinstance(row.get('after'), str) and SHA.fullmatch(row['after']))
     due = sorted((row for row in rows if retryable(row['reason']) and row.get('before') and row.get('after')
-                  and not learn_replay.settled(row.get('retried'))),
+                  and not settled(row.get('retried'))),
                  key=lambda row: row.get('retry_order', 0))
     order = max((row.get('retry_order', 0) for row in rows), default=0)
     report['skipped_by_class'] = skip_classes(rows)
@@ -514,7 +526,7 @@ def resume(args):
         previous = row.get('retried')
         row['reason'] = None
         attempt(row, output, args.timeout)
-        row['retried'] = learn_replay.stamp(previous)
+        row['retried'] = stamp(previous)
         order += 1
         row['retry_order'] = order
         report['counts'].update(red_reproduced=sum(r['red_reproduced'] for r in rows),

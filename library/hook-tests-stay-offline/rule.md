@@ -1,7 +1,7 @@
 ---
 id: hook-tests-stay-offline
 title: Git hook install tests must not contact Codex
-proof: judged
+proof: replayed
 ---
 # Git hook install tests must not contact Codex
 

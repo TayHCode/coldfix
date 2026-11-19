@@ -1,7 +1,7 @@
 ---
 id: keep-outputs-in-allowed-dirs
 title: Keep tool outputs within the sample job’s allowed directory
-proof: judged
+proof: judged (opinion)
 ---
 # Keep tool outputs within the sample job’s allowed directory
 

@@ -211,6 +211,31 @@ class TranscriptMistakesTest(unittest.TestCase):
         self.assertEqual(result['prescreened'], 0)
         call.assert_not_called()
 
+    def test_wrong_guesses_and_repeats_across_helpers_are_flagged_and_labelled(self):
+        for middle, kind in (('I assumed the port was 8080, but it turns out to be 9090.', 'guess'),
+                             ('You did this again, just like the other agent.', 'repeat')):
+            with self.subTest(kind=kind):
+                self.path.write_text(conversation(middle))
+                self.assertEqual(tm.CORRECTION.search(middle), None)
+                with patch.object(tm, 'score', return_value=.9):
+                    result = self.scan()
+                self.assertEqual((result['prescreened'], result[kind]), (1, 1))
+                errors = [json.loads(json.loads(p.read_text())['error']) for p in (self.store / 'failures').glob('*.json')]
+                [error] = [error for error in errors if middle in error['evidence']]
+                self.assertEqual(error['mistake_types'], [kind])
+
+    def test_a_new_prescreen_reopens_transcripts_the_old_one_screened_out(self):
+        self.path.write_text(conversation('I guessed the port.'))
+        with patch.object(tm, 'PRESCREEN', 'old'), patch.object(tm, 'MISTAKE_TYPES', dict(correction=tm.CORRECTION)):
+            self.assertEqual(self.scan()['prescreened'], 0)
+            self.assertEqual(self.scan()['scanned'], 0)
+        with patch.object(tm, 'score', return_value=.1) as call:
+            self.assertEqual(self.scan()['guess'], 1)
+            self.assertEqual(self.scan()['scanned'], 0)
+        self.assertEqual(call.call_count, 1)
+        with closing(sqlite3.connect(self.ledger)) as db:
+            self.assertEqual(db.execute("select rowid > (select cast(value as integer) from settings where name='prescreen_rowid') from scans").fetchone(), (1,))
+
     def test_missing_transcript_root_fails_instead_of_reporting_empty_success(self):
         result = subprocess.run([sys.executable, str(Path(tm.__file__)), str(self.root / 'missing'),
                                  '--ledger', str(self.ledger), '--store', str(self.store),
@@ -309,6 +334,79 @@ class TranscriptMistakesTest(unittest.TestCase):
         self.assertEqual((self.root / 'judge.py.role').read_text(), 'judge')
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(tm.judge('https://jev.invalid', 'jev-latest'), (None, 'jev-latest'))
+
+    def test_an_unreachable_jev_hands_the_rest_of_the_run_to_the_bulk_role(self):
+        with socket.socket() as probe:
+            probe.bind((LOOPBACK, 0))
+            closed = f'http://{LOOPBACK}:{probe.getsockname()[1]}/v1'
+        haiku = dict(provider='claudeAgent', model='claude-haiku-5-5', effort='default')
+        asked = []
+
+        def ask(model, prompt, shape, work):
+            asked.append((model, prompt, shape))
+            return dict(score=.8)
+        with patch.dict(os.environ, JEV_API_KEY='secret'), \
+                patch.object(tm.learn_daily, 'route', side_effect=lambda role: dict(haiku, role=role)) as route, \
+                patch.object(tm.learn_daily, 'ask', side_effect=ask):
+            os.environ.pop('COLDFIX_MODEL_CMD', None)
+            call, label = tm.judge(closed, 'jev-latest')
+            self.assertEqual((label, call.model), ('jev-latest', 'jev-latest'))
+            self.assertEqual([tm.score([], call), tm.score([], call)], [.8, .8])
+        route.assert_called_once_with('bulk')
+        self.assertEqual((call.model, call.fallen_back), ('claude-haiku-5-5', True))
+        self.assertEqual([(model['model'], shape) for model, _, shape in asked], [('claude-haiku-5-5', tm.SCORE)] * 2)
+        self.assertTrue(asked[0][1].startswith(tm.QUESTION))
+
+    def test_a_jev_server_error_falls_back_but_a_rate_limit_keeps_jev_and_its_retry(self):
+        for code, fallen in ((429, False), (401, False), (503, True)):
+            def refused(*args, code=code):
+                raise urllib.error.HTTPError('https://jev.invalid', code, 'no', {}, None)
+            call = tm.JevOrRole(refused, 'jev-latest')
+            with self.subTest(code=code), patch.object(tm, 'role_judge', return_value=(lambda *a: .3, 'claude-haiku-5-5')):
+                if fallen:
+                    self.assertEqual(tm.score([], call), .3)
+                else:
+                    with self.assertRaises(urllib.error.HTTPError):
+                        tm.score([], call)
+                self.assertEqual(call.fallen_back, fallen)
+
+    def test_a_fallback_score_is_rescored_once_jev_answers_again(self):
+        def down(*args):
+            raise OSError('jev down')
+        scan = lambda judge: tm.scan([self.path], self.ledger, self.store, 'http://example.invalid', 'jev', judge, 10, 10, .6)
+        status = lambda: sqlite3.connect(self.ledger).execute('select status, score from scans').fetchone()
+        with patch.object(tm, 'role_judge', return_value=(lambda *a: .1, 'claude-haiku-5-5')):
+            self.assertEqual(scan(tm.JevOrRole(down, 'jev'))['scanned'], 1)
+        self.assertEqual(status(), ('fallback_scored', .1))
+        fallen = tm.JevOrRole(down, 'jev')
+        with patch.object(tm, 'role_judge', return_value=(lambda *a: .1, 'claude-haiku-5-5')):
+            fallen({}, 'warm', '', {})
+            self.assertEqual(scan(fallen)['scanned'], 0)
+        self.assertEqual(scan(tm.JevOrRole(lambda *a: .2, 'jev'))['scanned'], 1)
+        self.assertEqual(status(), ('scored', .2))
+        self.assertEqual(scan(tm.JevOrRole(lambda *a: .3, 'jev'))['scanned'], 0)
+
+    def test_a_cached_fallback_score_waits_behind_new_transcripts_while_jev_stays_down(self):
+        def down(*args):
+            raise OSError('jev down')
+        later = self.root / '2026-01-02_codex-example.md'
+        scan = lambda paths: tm.scan(paths, self.ledger, self.store, 'http://example.invalid', 'jev', tm.JevOrRole(down, 'jev'), 10, 1, .6)
+        with patch.object(tm, 'role_judge', return_value=(lambda *a: .1, 'claude-haiku-5-5')):
+            scan([self.path])
+            later.write_text(conversation())
+            self.assertEqual(scan([self.path, later])['jev_calls'], 1)
+        rows = dict(sqlite3.connect(self.ledger).execute('select path, status from scans'))
+        self.assertEqual(rows, {str(self.path.resolve()): 'fallback_scored', str(later.resolve()): 'fallback_scored'})
+
+    def test_jev_stays_the_judge_while_it_answers_and_a_bad_score_is_not_a_fallback(self):
+        replies = iter([.7, 2.0])
+        call = tm.JevOrRole(lambda *args: tm.probability(next(replies)), 'jev-latest')
+        with patch.object(tm.learn_daily, 'route') as route:
+            self.assertEqual(tm.score([], call), .7)
+            with self.assertRaises(ValueError):
+                tm.score([], call)
+        route.assert_not_called()
+        self.assertEqual(call.model, 'jev-latest')
 
     def test_a_timed_out_model_command_is_a_retryable_scan_error(self):
         with patch.object(tm, 'score', side_effect=subprocess.TimeoutExpired('model', 1800)):

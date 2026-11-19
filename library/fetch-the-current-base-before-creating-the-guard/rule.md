@@ -1,7 +1,7 @@
 ---
 id: fetch-the-current-base-before-creating-the-guard
 title: Fetch the current base before creating the guard worktree
-proof: judged
+proof: replayed
 ---
 # Fetch the current base before creating the guard worktree
 

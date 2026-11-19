@@ -1,7 +1,7 @@
 ---
 id: export-the-full-committed-source-tree-to-pre
 title: Export the full committed source tree to pre-push snapshots
-proof: judged
+proof: replayed
 ---
 # Export the full committed source tree to pre-push snapshots
 

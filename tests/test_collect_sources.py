@@ -7,6 +7,7 @@ import tarfile
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 import collect_sources
 import coldfix
@@ -233,6 +234,45 @@ class SourceTests(unittest.TestCase):
             self.assertEqual((result["imported"], result["deduped"], result["rejected"]), (0, 1, 0))
             changed = collect_sources.vm02_jobs(store, settled_jobs({identifier: dict(current, guest_exit=2)}))
             self.assertEqual((changed["imported"], changed["rejected"]), (0, 1))
+
+    def test_vm02_known_job_is_deduped_without_reloading_the_store(self):
+        base = dict(version="vm02-lifecycle-v2", verdict="FAIL", cleanup="gone", cleaned_at=1793865073,
+                    started=1793865033, owner="coldfix", command=["pytest"], guest_exit=1)
+        known, fresh = "00000000-0000-4000-8000-000000000008", "00000000-0000-4000-8000-000000000009"
+        job = dict(base, token=known, repo="example/app")
+        with tempfile.TemporaryDirectory() as folder:
+            store = Path(folder) / "store"
+            store.mkdir(mode=0o700)
+            self.assertEqual(collect_sources.vm02_jobs(store, settled_jobs({known: job}))["imported"], 1)
+            before = coldfix.load_store(store)[1]["failures"]
+            loads, imports = [], []
+            real_load, real_import = coldfix.load_store, collect_sources.fi.import_records
+
+            def load(root):
+                loads.append(root)
+                return real_load(root)
+
+            def import_records(root, records):
+                imports.append([row["source_ref"] for row in records])
+                return real_import(root, records)
+
+            with patch.object(coldfix, "load_store", load), patch.object(collect_sources.fi, "import_records", import_records):
+                same = collect_sources.vm02_jobs(store, settled_jobs({known: job}))
+                self.assertEqual((same["imported"], same["deduped"], same["rejected"]), (0, 1, 0))
+                self.assertEqual((len(loads), imports), (1, []))
+                for field, value in (("guest_exit", 2), ("owner", "other"), ("command", ["tox"]), ("started", 1793865034)):
+                    with self.subTest(field=field):
+                        imports.clear()
+                        changed = collect_sources.vm02_jobs(store, settled_jobs({known: dict(job, **{field: value})}))
+                        self.assertEqual((changed["imported"], changed["rejected"]), (0, 1))
+                        self.assertEqual(imports, [["vm02-job:" + coldfix.digest(known)]])
+                imports.clear()
+                new = collect_sources.vm02_jobs(store, settled_jobs({known: job, fresh: dict(base, token=fresh)}))
+                self.assertEqual((new["imported"], new["deduped"], new["rejected"]), (1, 1, 0))
+                self.assertEqual(imports, [["vm02-job:" + coldfix.digest(fresh)]])
+            after = coldfix.load_store(store)[1]["failures"]
+            self.assertEqual({key: after[key] for key in before}, before)
+            self.assertEqual(len(after), len(before) + 1)
 
     def test_vm02_receipt_with_malformed_identity_is_rejected(self):
         base = dict(version="vm02-lifecycle-v2", verdict="FAIL", cleanup="gone", cleaned_at=1793865073,

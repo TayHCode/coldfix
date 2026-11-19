@@ -608,6 +608,14 @@ class LocalProofTests(unittest.TestCase):
     def candidate(self, result):
         return json.loads((self.output / result["artifact"]).read_text())
 
+    def test_configured_runner_replays_ci_without_coldbox(self):
+        with patch.dict(os.environ, {'COLDFIX_REPLAY_RUNNER': 'sh -c {script}'}), \
+                patch.object(ci, 'vm_replay_tree', side_effect=AssertionError('Coldbox used')):
+            with patch.object(ci.sys, 'executable', os.path.realpath(sys.executable)):
+                result = self.attempt()
+        self.assertTrue(result['proven'], result)
+        self.assertEqual(self.candidate(result)['replay']['reversed']['status'], 'FAIL')
+
     def test_green_fix_is_not_proven_when_reversal_still_passes(self):
         execute = ci.vm_replay_tree.side_effect
         def without_reversal(*args, **kwargs):

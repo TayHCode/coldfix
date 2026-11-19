@@ -83,6 +83,7 @@ class TranscriptLessonsTests(unittest.TestCase):
         self.scans = self.dir / "transcripts.sqlite"
         with closing(sqlite3.connect(self.scans)) as db:
             db.execute("CREATE TABLE scans (path TEXT PRIMARY KEY, digest TEXT, status TEXT, score REAL)")
+            db.execute("CREATE TABLE settings (name TEXT PRIMARY KEY, value TEXT NOT NULL)")
             for index in range(tl.CONTROLS):
                 path = self.dir / f"control-{index}_claude-x.md"
                 path.write_text(f"## owner · 2026-01-01 00:00:00Z · u{index}\nFix the tests.\n"
@@ -151,6 +152,67 @@ class TranscriptLessonsTests(unittest.TestCase):
         self.assertEqual(proof["judge"], dict(model="jev-test", threshold=tl.JEV_MIN, prompt_sha256=digest))
         self.assertEqual(proof["controls"], tl.CONTROLS)
 
+    def test_a_proof_whose_judge_changed_is_proven_again_on_the_fallback_in_the_same_run(self):
+        record = self.lead()
+
+        def down(*args):
+            raise OSError("jev down")
+        with mock.patch.object(tm, "role_judge", return_value=(judge(), "claude-haiku-5-5")):
+            tl.run(self.store, self.coldlocker, self.scans, tl.BATCH, tm.JevOrRole(down, "jev-latest"), route=lambda role: LUNA,
+                   ask=self.ask, jev_model="jev-latest")
+        lead = self.ledger()["leads"][record["id"]]
+        self.assertEqual((lead["status"], lead["proof"]["judge"]["model"]), ("proven", "claude-haiku-5-5"))
+        self.assertEqual(td.judge_name(lead), "claude-haiku-5-5")
+
+    def test_a_fallback_rejection_is_retried_for_jev_not_settled(self):
+        record = self.lead()
+
+        def down(*args):
+            raise OSError("jev down")
+        with mock.patch.object(tm, "role_judge", return_value=(judge(flag=()), "claude-haiku-5-5")):
+            tl.run(self.store, self.coldlocker, self.scans, tl.BATCH, tm.JevOrRole(down, "jev-latest"),
+                   route=lambda role: LUNA, ask=self.ask, jev_model="jev-latest")
+        lead = self.ledger()["leads"][record["id"]]
+        self.assertEqual(lead["status"], "retry")
+        self.assertTrue(lead["reason"].startswith("jev check failed: claude-haiku-5-5 rejected: "))
+
+    def test_a_fallback_rejection_spends_no_attempt_beside_a_settled_lead(self):
+        held = self.lead()
+        other = self.lead(wrong="I'll force-push main now.")
+        self.replies[other["id"]] = lambda case: lesson(case, wrong_message="x9")
+
+        def down(*args):
+            raise OSError("jev down")
+        def ask(model, prompt, shape, work):
+            if shape is tl.GROUPS:
+                return dict(groups=[dict(ids=row["id"]) for row in json.loads(prompt[prompt.index("\n") + 1:])])
+            return self.ask(model, prompt, shape, work)
+        with mock.patch.object(tm, "role_judge", return_value=(judge(flag=()), "claude-haiku-5-5")):
+            tl.run(self.store, self.coldlocker, self.scans, tl.BATCH, tm.JevOrRole(down, "jev-latest"),
+                   route=lambda role: LUNA, ask=ask, jev_model="jev-latest")
+        leads = self.ledger()["leads"]
+        self.assertEqual(leads[other["id"]]["status"], "unprovable")
+        self.assertEqual((leads[held["id"]]["status"], leads[held["id"]]["attempts"]), ("retry", 0))
+
+    def test_a_duplicate_of_a_fallback_rejection_spends_no_attempt_beside_a_settled_lead(self):
+        held = self.lead()
+        duplicate = self.lead(wrong="Running git stash pop again.")
+        other = self.lead(wrong="I'll force-push main now.")
+        self.replies[other["id"]] = lambda case: lesson(case, wrong_message="x9")
+
+        def down(*args):
+            raise OSError("jev down")
+        def ask(model, prompt, shape, work):
+            if shape is tl.GROUPS:
+                return dict(groups=[dict(ids=f"{held['id']} {duplicate['id']}"), dict(ids=other["id"])])
+            return self.ask(model, prompt, shape, work)
+        with mock.patch.object(tm, "role_judge", return_value=(judge(flag=()), "claude-haiku-5-5")):
+            tl.run(self.store, self.coldlocker, self.scans, tl.BATCH, tm.JevOrRole(down, "jev-latest"),
+                   route=lambda role: LUNA, ask=ask, jev_model="jev-latest")
+        leads = self.ledger()["leads"]
+        self.assertEqual(leads[other["id"]]["status"], "unprovable")
+        self.assertEqual([(leads[k]["status"], leads[k]["attempts"]) for k in (held["id"], duplicate["id"])], [("retry", 0)] * 2)
+
     def test_known_lessons_come_from_the_shared_folder_and_not_a_stale_coldlocker_copy(self):
         (self.coldlocker / "lessons").mkdir()
         (self.coldlocker / "lessons" / "L2-stale-copy.md").write_text("# L2 stale copy\n\nAn old checkout's lesson.\n")
@@ -161,6 +223,15 @@ class TranscriptLessonsTests(unittest.TestCase):
         ids = [row["id"] for row in tl.existing(c.load_store(self.store)[1], self.coldlocker, dict(leads={}))]
         self.assertEqual(ids, ["coldlocker:lessons/L1-docs-sync", "coldlocker:lessons/L46-continue-through-a-fallback",
                                "coldlocker:rules/shared-policy"])
+
+    def test_known_lessons_leave_out_only_proposed_store_lessons(self):
+        lessons = {status: dict(id=status, lesson_id=status, previous="", title=status, rule=status, status=status)
+                   for status in c.STATUSES}
+        lessons["retired-revision"] = dict(id="retired-revision", lesson_id="retired", previous="retired", title="retired",
+                                           rule="revised", status="proposed")
+        rows = [row for row in tl.existing(dict(lessons=lessons), self.coldlocker, dict(leads={}))
+                if row["id"].startswith("coldfix:")]
+        self.assertEqual([row["rule"] for row in rows], [status for status in c.STATUSES if status != "proposed"])
 
     def test_extraction_refuses_to_run_without_the_shared_lessons_folder(self):
         for folder in ("", str(self.dir / "missing")):
@@ -462,6 +533,33 @@ class TranscriptLessonsTests(unittest.TestCase):
         changed = self.dir / "control-0_claude-x.md"
         changed.write_text(changed.read_text() + "\nedited")
         self.assertEqual(len(tl.controls(self.scans)), tl.CONTROLS - 1)
+
+    def test_a_control_whose_window_grew_after_jev_scored_it_is_not_used(self):
+        path = self.dir / "control-0_claude-x.md"
+        path.write_text(path.read_text() + "\n## owner · 2026-01-01 00:00:09Z · ux\n" + "x" * 1300 + " You assumed the port.\n")
+        with closing(sqlite3.connect(self.scans)) as db:
+            db.execute("UPDATE scans SET digest=? WHERE path=?", (hashlib.sha256(path.read_bytes()).hexdigest(), str(path)))
+            db.execute("INSERT INTO settings SELECT 'prescreen_rowid', max(rowid) FROM scans")
+            db.commit()
+        self.assertEqual(len(tl.controls(self.scans)), tl.CONTROLS - 1)
+        with closing(sqlite3.connect(self.scans)) as db:
+            db.execute("DELETE FROM scans WHERE path=?", (str(path),))
+            db.execute("INSERT INTO scans VALUES (?, ?, 'scored', 0.1)", (str(path), hashlib.sha256(path.read_bytes()).hexdigest()))
+            db.commit()
+        self.assertEqual(len(tl.controls(self.scans)), tl.CONTROLS)
+
+    def test_fallback_scored_transcripts_supply_controls_after_jev_scored_ones(self):
+        with closing(sqlite3.connect(self.scans)) as db:
+            db.execute("UPDATE scans SET status='fallback_scored'")
+            db.commit()
+        self.assertEqual(len(tl.controls(self.scans)), tl.CONTROLS)
+        jev_scored = self.dir / "control-jev_claude-x.md"
+        jev_scored.write_text("## owner · 2026-01-01 00:00:00Z · uj\nFix the docs.\n"
+                              "## assistant · 2026-01-01 00:00:01Z · cj\n" + "I fixed the docs and checked them. " * 10)
+        with closing(sqlite3.connect(self.scans)) as db:
+            db.execute("INSERT INTO scans VALUES (?, ?, 'scored', 0.1)", (str(jev_scored), hashlib.sha256(jev_scored.read_bytes()).hexdigest()))
+            db.commit()
+        self.assertTrue(tl.controls(self.scans, 1)[0]["message"].startswith("I fixed the docs"))
 
     def test_a_jev_model_that_is_not_jev_is_refused(self):
         with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()), mock.patch.dict(os.environ, JEV_API_KEY="example-key"):

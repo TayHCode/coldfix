@@ -1,7 +1,7 @@
 ---
 id: clear-facts-restores-rule
 title: Clearing facts restores whole-rule authoring
-proof: judged
+proof: replayed
 ---
 # Clearing facts restores whole-rule authoring
 

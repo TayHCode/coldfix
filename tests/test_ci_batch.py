@@ -629,6 +629,31 @@ class OpenSourceTests(unittest.TestCase):
             github = OpenSourceGitHub({}, {}, {}, visibility={"o/b": "private", "o/c": "internal", "o/d": "gone"})
             self.assertEqual(self.feature("public_repos")(path, github), ["o/a"])
 
+    def test_repositories_in_the_coldpass_opt_out_register_are_never_learned_from(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path, optout = Path(directory) / "repos.json", Path(directory) / "optout.json"
+            path.write_text(json.dumps(dict(repos=[dict(repo=name) for name in ("o/a", "o/b", "o/c", "o/old")])))
+            optout.write_text(json.dumps(dict(schema_version=1, repos=[
+                dict(repo="O/B", date="2026-11-15"), dict(repo="HTTPS://GitHub.com/o/C.GIT", date="2026-11-15"),
+                dict(repo="o/renamed", date="2026-11-15")])))
+            github = OpenSourceGitHub({}, {}, {})
+
+            def renamed(endpoint, **options):
+                meta = github(endpoint, **options)
+                return dict(meta, full_name="o/renamed") if endpoint == "repos/o/old" else meta
+            self.assertEqual(ci_batch.public_repos(path, renamed, optout=optout), ["o/a"])
+            for register in ("{}", "{", json.dumps(dict(schema_version=1, repos=[dict(repo="", date="2026-11-15")])),
+                             json.dumps(dict(schema_version=1, repos=[dict(repo="o/b")])),
+                             json.dumps(dict(schema_version=1, repos=[dict(repo="o/b", date="soon")]))):
+                with self.subTest(register=register):
+                    optout.write_text(register)
+                    with self.assertRaises(ci_batch.c.ColdfixError):
+                        ci_batch.public_repos(path, github, optout=optout)
+            with self.assertRaises(ci_batch.c.ColdfixError):
+                ci_batch.public_repos(path, github, optout=Path(directory) / "missing.json")
+            with self.assertRaises(ci_batch.c.ColdfixError):
+                ci_batch.main(["--store", str(Path(directory) / ".coldfix"), "--repos", str(path)])
+
     def test_a_human_finding_whose_file_a_later_pr_commit_fixed_with_a_new_test_becomes_a_pair(self):
         github = OpenSourceGitHub(
             pulls={"o/a": [pull(1, "f"), pull(2, "e", merged=False)]},
@@ -653,6 +678,53 @@ class OpenSourceTests(unittest.TestCase):
         github = OpenSourceGitHub({"o/a": [pull(1, "f")]}, {1: [comment(10, "a", path=TEST["filename"])]},
                                   {"a" * 40 + "..." + "f" * 40: fixed([TEST])})
         self.assertEqual(self.feature("review_findings")(dict(seen={}, pages={}, batches=[]), ["o/a"], 10, github)[0], [])
+
+    def test_review_pairs_keep_original_right_side_lines_only_on_the_reviewed_commit(self):
+        github = OpenSourceGitHub(
+            pulls={"o/a": [pull(1, "f")]},
+            comments={1: [dict(comment(10, "a"), side="RIGHT", start_side="RIGHT",
+                              original_start_line=4, original_line=6, line=10),
+                          dict(comment(11, "b"), side="RIGHT", original_line=7),
+                          dict(comment(12, "a"), side="LEFT", original_line=9),
+                          dict(comment(13, "a"), side="RIGHT", original_line=11)]},
+            compare={"a" * 40 + "..." + "f" * 40: fixed([CODE, TEST]),
+                     "b" * 40 + "..." + "f" * 40: fixed([CODE, TEST], commits=[
+                         ("e", "2025-12-31T00:00:00Z"), ("f", "2026-01-01T12:00:00Z")]),
+                     "e" * 40 + "..." + "f" * 40: fixed([CODE, TEST])})
+        pairs, _, _ = ci_batch.review_findings({}, ["o/a"], 10, github)
+        self.assertEqual([(pair["finding_url"].rsplit("_r", 1)[1], pair["before"], pair.get("path"),
+                           pair.get("start_line"), pair.get("end_line")) for pair in pairs],
+                         [("10", "a" * 40, "pkg/core.py", 4, 6),
+                          ("11", "e" * 40, None, None, None),
+                          ("12", "a" * 40, None, None, None),
+                          ("13", "a" * 40, "pkg/core.py", 11, 11)])
+
+    def test_a_stored_review_pair_without_flagged_lines_is_refetched_once_and_replays_again(self):
+        url = "https://github.com/datarobot-oss/datarobot-genai/pull/772#discussion_r4605753840"
+        before, after = "171b645c33bb65d62450e21508a74a62bcfc55ac", "29596a24732a312d2f97c7405bd5e58d4595cda9"
+        stored = dict(repo="datarobot-oss/datarobot-genai", before=before, after=after, finding_url=url)
+        endpoint = "repos/datarobot-oss/datarobot-genai/pulls/comments/4605753840"
+        recorded = dict(path="src/datarobot_genai/core/auth/workload_identity/source.py", original_line=96,
+                        original_start_line=None, side="RIGHT", start_side=None, original_commit_id=before)
+        github = OpenSourceGitHub({}, {}, {})
+        api = lambda call, missing=None: (github.calls.append(call) or recorded) if call == endpoint else github(call, missing)
+        failure = dict(id="f", kind="review", source_ref=url, repo="datarobot-oss/datarobot-genai", error="Finding")
+        inputs = lambda rows: ci_batch.learn_replay.pair_inputs(dict(failures=dict(f=failure)), dict(evidence=["f"]), rows)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / ".coldfix"
+            root.mkdir(mode=0o700)
+            (root / ci_batch.PAIRS).write_text(json.dumps(dict(results=[stored])))
+            settled = inputs([stored])
+            outcome = dict(learned=True, drafted=0, draft_pass=0, proven=0, rejected=0, reject_reasons={})
+            with mock.patch.object(ci_batch, "learn", side_effect=lambda root, entry, *rest: entry.update(outcome)) as learn, \
+                    mock.patch.object(ci_batch.failure_ingest, "gh", side_effect=AssertionError("owner discovery")):
+                for _ in range(2):
+                    ci_batch.run(root, None, 10, api=api, public=["datarobot-oss/datarobot-genai"])
+            pairs = json.loads((root / ci_batch.PAIRS).read_text())["results"]
+        self.assertEqual(learn.call_count, 1)
+        self.assertEqual(pairs, [dict(stored, path=recorded["path"], start_line=96, end_line=96)])
+        self.assertEqual(github.calls.count(endpoint), 1)
+        self.assertNotEqual(inputs(pairs), settled)
 
     def test_each_batch_examines_a_bounded_share_of_merged_prs_per_repository(self):
         pulls = {repo: [pull(number, "f") for number in range(1, 120)] for repo in ("o/a", "o/b")}
@@ -683,6 +755,33 @@ class OpenSourceTests(unittest.TestCase):
             pairs = json.loads((root / ci_batch.PAIRS).read_text())["results"]
             self.assertEqual([row.get("finding_url") for row in pairs], ["https://github.com/o/a/pull/1#discussion_r10"])
             self.assertTrue(ci_batch.learn_candidates.candidates(store, pairs=pairs)[0]["replayable"])
+
+    def test_retained_evidence_from_a_repository_no_longer_allowed_is_never_drafted(self):
+        self.feature("review_findings")
+        github = OpenSourceGitHub({"o/a": [pull(1, "f")]}, {1: [comment(10, "a")]},
+                                  {"a" * 40 + "..." + "f" * 40: fixed([CODE, TEST])})
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / ".coldfix"
+            root.mkdir(mode=0o700)
+            outcome = dict(learned=True, drafted=0, draft_pass=0, proven=0, rejected=0, reject_reasons={})
+            with mock.patch.object(ci_batch, "learn", side_effect=lambda root, entry, *rest: entry.update(outcome)), \
+                    mock.patch.object(ci_batch.failure_ingest, "gh", side_effect=AssertionError("owner discovery")):
+                ci_batch.run(root, None, 10, api=github, public=["o/a"])
+            seen = []
+
+            def drafting(root, day, ask, reserved_rules=None):
+                pairs = json.loads((root / ci_batch.PAIRS).read_text())["results"]
+                store = ci_batch.c.load_store(root)[1]
+                seen.append([row["repos"] for row in ci_batch.learn_candidates.candidates(store, pairs=pairs)])
+                return dict(day=day, candidates=0)
+            with mock.patch.object(ci_batch.learn_daily, "run", side_effect=drafting), \
+                    mock.patch.object(ci_batch.learn_replay, "run_in_workspace", return_value={}), \
+                    mock.patch.object(ci_batch, "measure", return_value={}), \
+                    mock.patch.object(ci_batch, "merge_evidence"):
+                for public in (["O/A"], []):
+                    ci_batch.learn(root, dict(batch=1, ids=[]), None, None, 1, None, public)
+            self.assertEqual(seen, [[["o/a"]], []])
+            self.assertEqual(len(ci_batch.c.load_store(root)[1]["failures"]), 1)
 
     def test_a_finding_is_judged_from_the_last_pr_commit_before_it_when_a_later_one_exists(self):
         github = OpenSourceGitHub(

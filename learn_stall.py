@@ -2,8 +2,8 @@
 """Append an agentfleet alert note when Coldfix learning stalls. Reads `journalctl -o json` lines on stdin: the
 oldest user-journal entry, which marks how far back the journal reaches, then this host's collect, daily,
 transcript, backlog and OSS units, plus the start-job results of every coldfix unit: a unit whose latest run failed
-is an alert. The collect unit also carries the hourly check-delivery summary. Pipes new STALLED or RECOVERED notes
-into the command given. With --issues, keeps one open issue labelled stall-alert per active alert in that GitHub
+is an alert until a later run succeeds or systemd no longer has the unit. The collect unit also carries the hourly
+check-delivery summary. Pipes new STALLED or RECOVERED notes into the command given. With --issues, keeps one open issue labelled stall-alert per active alert in that GitHub
 repository, recorded next to the state file, and closes it when the alert recovers."""
 import argparse
 from datetime import datetime, timedelta, timezone
@@ -139,6 +139,17 @@ def stalls(journal, now):
     return found, judged
 
 
+def removed(key):
+    if not key.startswith("failed:"):
+        return False
+    try:
+        show = subprocess.run(["systemctl", "--user", "show", "--property", "LoadState", "--value",
+                               key.removeprefix("failed:") + ".service"], text=True, capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return show.returncode == 0 and show.stdout.strip() == "not-found"
+
+
 def save(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     pending = path.with_name(path.name + ".tmp")
@@ -183,7 +194,10 @@ def main(argv=None):
     now = datetime.now(timezone.utc)
     active = json.loads(args.state.read_text()).get("active", {}) if args.state.exists() else {}
     found, judged = stalls(sorted(entries(sys.stdin), key=lambda item: item[0]), now)
+    gone = {key for key in found.keys() | active.keys() if removed(key)}
+    judged |= gone
     found.update({key: message for key, message in active.items() if key not in judged})
+    found = {key: message for key, message in found.items() if key not in gone}
     stamp = now.strftime("%Y-%m-%dT%H:%MZ")
     lines = [f"STALLED coldfix on {platform.node()} at {stamp}: {found[key]}. {INSPECT}" for key in sorted(found.keys() - active.keys())]
     lines += [f"RECOVERED coldfix on {platform.node()} at {stamp}: {active[key]} no longer holds."

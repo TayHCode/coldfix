@@ -23,6 +23,7 @@ RECEIPT_ONLY_REJECTION = "coldbox receipt repo must be owner/repo; nothing impor
 def reviews(root, repos):
     github_sources.private_store(root)
     total = dict(imported=0, deduped=0, unavailable=0)
+    records = []
     for repo in repos:
         try:
             events = []
@@ -33,12 +34,11 @@ def reviews(root, repos):
                 event = dict(kind="review", command="PR review finding", error=row["body"], repo=repo,
                              agent="codex-review", source_ref=url, occurred=row["created_at"])
                 events.append(c.event_record(event, "github"))
-            counts = import_reviews(root, events)
-            total["imported"] += counts["imported"]
-            total["deduped"] += counts["deduped"]
+            records += events
         except fi.SOURCE_ERRORS as error:
             total["unavailable"] += 1
             total.setdefault("reason", {})[repo] = type(error).__name__
+    total.update(import_reviews(root, records))
     return total
 
 

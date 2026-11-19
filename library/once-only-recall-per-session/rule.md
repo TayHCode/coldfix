@@ -1,7 +1,7 @@
 ---
 id: once-only-recall-per-session
 title: Isolate once-only recall by session
-proof: judged
+proof: replayed
 ---
 # Isolate once-only recall by session
 

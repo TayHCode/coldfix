@@ -266,6 +266,33 @@ class LearnCollectTests(unittest.TestCase):
         self.assertEqual(output["codex_review"]["reason"], {"example/project": "ColdfixError"})
         self.assertEqual(output["coldbox"]["imported"], 1)
 
+    def test_codex_findings_import_once_and_a_failed_repo_marks_only_itself(self):
+        def finding(repo):
+            return dict(id=1, user={"login": "chatgpt-codex-connector[bot]"}, body="<!-- codex-code-review-finding:v1 --> Fix " + repo,
+                        html_url=f"https://github.com/{repo}/pull/1#discussion_r1", created_at="2026-11-01T12:00:00Z")
+
+        def pages(github, path):
+            if github.repo == "example/broken":
+                raise c.ColdfixError("unavailable")
+            return [finding(github.repo)]
+
+        calls = []
+        real = learn_collect.import_reviews
+
+        def import_reviews(root, records):
+            calls.append(sorted(row["repo"] for row in records))
+            return real(root, records)
+
+        with patch("ci_fix_learning.discover", return_value=["example/one", "example/broken", "example/two"]), \
+                patch.object(ingest, "poll", return_value={"imported": 0, "skipped": 0, "unlisted": 0}), \
+                patch("github_sources.GitHub.pages", pages), patch.object(learn_collect, "import_reviews", import_reviews):
+            _, first = self.main()
+            _, second = self.main()
+        self.assertEqual(calls, [["example/one", "example/two"]] * 2)
+        self.assertEqual(first["codex_review"], dict(imported=2, deduped=0, unavailable=1, reason={"example/broken": "ColdfixError"}))
+        self.assertEqual(second["codex_review"], dict(imported=0, deduped=2, unavailable=1, reason={"example/broken": "ColdfixError"}))
+        self.assertEqual(sorted(row["repo"] for row in self.failures().values()), ["example/one", "example/two"])
+
     def test_github_run_already_reported_by_a_coldbox_receipt_is_not_imported_twice(self):
         bundle_dir = self.work / "remote"
         bundle_dir.mkdir()

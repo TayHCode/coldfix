@@ -1351,6 +1351,15 @@ class CliTests(CliCase):
         self.assertFalse((self.cwd / "secret.md").exists())
         self.assertNotIn("example-private-canary", result.stderr + result.stdout)
 
+    def test_replay_runs_the_check_through_the_configured_runner(self):
+        revision = self.author_lesson()
+        marker = self.cwd / "runner-used"
+        runner = f"echo used >> {shlex.quote(str(marker))} && sh -c {{script}}"
+        with patch.dict(os.environ, {"COLDFIX_REPLAY_RUNNER": runner}):
+            result = json.loads(self.run_replay(revision, *self.history()).stdout)
+        self.assertEqual(result["verification"], "proven")
+        self.assertEqual(marker.read_text(), "used\nused\n")
+
     def test_replay_preserves_sha256_repository_format(self):
         revision = self.author_lesson()
         repo = self.cwd / "sha256-history"

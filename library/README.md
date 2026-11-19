@@ -6,6 +6,8 @@ directory: `library/<id>/rule.md` holds the rule, and a rerunnable lesson also h
 ## Proof levels
 
 - `rerunnable`: anyone can rerun the proof from files in this directory.
+  A chat lesson that gains a fixture proof becomes `rerunnable (opinion)`: the check reruns, but the rule
+  stays a model's opinion.
   - Fixture proofs ship `check.py` with `fixtures/bad` and `fixtures/good`. The bad fixture is a
     small synthetic reproduction of the bug class, not the original incident. The check must exit
     1 on the bad fixture and 0 on the good one.
@@ -15,8 +17,10 @@ directory: `library/<id>/rule.md` holds the rule, and a rerunnable lesson also h
   - Repository proofs ship `check.py` and `proof.json`, which names a public repository and the
     commits before and after the fix. The check must exit 1 before the fix and 0 after it. A lesson
     with fixtures can also ship `proof.json`; the rerun then needs both proofs to hold.
-- `judged`: the lesson was proven against private history, or by judging agent transcripts, so no
-  public rerun exists. Treat it as reviewed guidance, not as a reproducible proof.
+- `replayed`: a replay on private history failed before the fix and passed after it, so no public
+  rerun exists.
+- `judged (opinion)`: a model judged an agent chat. It is an opinion, not a proof.
+- `judged`: reviewed guidance with no public rerun.
 
 ## Check contract
 
@@ -26,9 +30,16 @@ library and git.
 
 ## Portable checks
 
-A lesson can also ship `scan.py`, a static check that `coldfix check` runs on any repository. It follows
-the check contract and adds a `hits` list of `file:line` entries. It only reads files in the tree under
-test: it never imports or runs that tree's code, tests or README commands, and never uses the network.
+A lesson can also ship `scan.py`, a static check that `coldfix check [path]` runs on any repository (default:
+the current directory). It follows the check contract and adds a `hits` list of `file:line` entries and, on FAIL,
+a `fix` string that tells the agent the real fix; without one, `coldfix check` prints the first paragraph of the
+rule's `## Fix` section, or of the rule itself. It only reads files in the tree under test: it never imports or runs
+that tree's code, tests or README commands, and never uses the network.
+
+A lesson file in the transcript lessons folder names its check in its frontmatter: `check: <path>` for a scan here
+or a delivered proving test, or `check: none (<reason>)` when no check can catch the mistake. Coldfix writes that line
+for every lesson it proves; `checks/lesson-checks.json` maps a Coldfix lesson ID to a scan here or to the reason it
+has none, and wins over the proving test. A new scan must FAIL on the real past mistake and PASS on its fix.
 These lessons have one:
 
 - [tests-must-test](tests-must-test/scan.py): a module-level `def test*` in a unittest file that unittest never collects
@@ -38,7 +49,7 @@ These lessons have one:
 - [clean-checkout](clean-checkout/scan.py): a `.worktrees` folder that the committed `.gitignore` does not ignore
 - [cross-account-shared-queue](cross-account-shared-queue/scan.py): a group- or world-writable mode passed to `mkdir`, `makedirs`, `touch` or `os.open` with no `chmod` or `umask` in the same function
 - [errors-are-states](errors-are-states/scan.py): `return x != "FAIL"` (or `failed`, `failure`), which treats INCOMPLETE as a pass
-- [no-environment-assumptions](no-environment-assumptions/scan.py): a `TestCase` with `test` methods in a file that neither the default nor a configured test file pattern discovers
+- [no-environment-assumptions](no-environment-assumptions/scan.py): a `TestCase` with `test` methods in a file that neither the default nor a configured test file pattern discovers, or a vitest test file that no vitest config's literal `include` matches
 - [preserve-relative-links-when-moving-documents](preserve-relative-links-when-moving-documents/scan.py): a relative Markdown link to a missing file or outside the repository
 - [secrets-and-private-data](secrets-and-private-data/scan.py): a committed token, private key or credential in a URL (it does not look for names, emails or phone numbers)
 - [systemd-path-escaping](systemd-path-escaping/scan.py): a `Path*=` value written in quotes or through `json.dumps`, `shlex.quote` or a helper built on them
@@ -63,6 +74,7 @@ These lessons have one:
 - [pre-push-uses-pushed-tree](pre-push-uses-pushed-tree/scan.py): a pre-push file that tests a path looped over from `git diff` with `exists`/`isfile` or `[ -f`, which reads the working tree instead of the pushed commit
 - [update-callers-and-stubs](update-callers-and-stubs/scan.py): a call that passes a keyword its same-module top-level Python function does not accept (other modules and stubs are not checked)
 - [reject-malformed-facts](reject-malformed-facts/scan.py): `json.load(s)` of JSON text taken straight from `sys.stdin`, `sys.argv`, `input()` or parsed `args`, with no handler for both `ValueError` and `RecursionError` in that function or around every caller (a file named by an argument is not checked)
+- [use-the-triggering-invocation-id](use-the-triggering-invocation-id/scan.py): `InvocationID` read in a source file that runs `journalctl` but never reads `MONITOR_INVOCATION_ID`, so a failure handler can read a later run's journal
 
 ## Rerun the proofs
 
@@ -76,11 +88,12 @@ Repository proofs fetch commits from GitHub, so they need network access.
 ## Add newly proven lessons
 
 `coldfix export --format library --output library --lessons <transcript lesson folder>` adds each proven
-lesson whose rule is not already here, after the export privacy screen. Exported lessons are `judged`, because the
-store cannot show that a replay repository is public. To make one `rerunnable`, write a synthetic fixture proof
+lesson whose rule is not already here, after the export privacy screen. Store lessons are `replayed`, because the
+store cannot show that a replay repository is public; chat lessons are `judged (opinion)`. A lesson already here
+as `judged` takes the level of its source. To make one `rerunnable`, write a synthetic fixture proof
 (`<proofs>/<id>/check.py`, `fixtures/bad`, `fixtures/good`) and add `--proofs <proofs>`. The export reruns each proof
 in a clean folder and runs the privacy screen on every file. It adds the proof only when the check exits 1 on the bad
-fixture and 0 on the good one. Otherwise the lesson stays `judged`, and `proof_refused` gives the reason. Run
+fixture and 0 on the good one. Otherwise the lesson keeps its level, and `proof_refused` gives the reason. Run
 release-check on the result before any release.
 
 ## Cross-repository lessons
@@ -108,38 +121,38 @@ release-check on the result before any release.
 
 | Lesson | Proof |
 | --- | --- |
-| [Use the documented worker lifecycle and receipt wake path](worker-lifecycle-and-receipts/rule.md) | judged |
-| [Assign one task to each agent](one-task-per-agent/rule.md) | judged |
-| [Answer the user's questions before launching unrelated work](answer-questions-before-launching/rule.md) | judged |
-| [Stop repeating a failed credential path and offer the user’s requested alternative](switch-from-a-failed-credential-path/rule.md) | judged |
-| [Stop when uncertain repair advice risks damage](stop-on-uncertain-repair-advice/rule.md) | judged |
-| [Verify the bottleneck before prescribing an architecture](verify-the-bottleneck-first/rule.md) | judged |
-| [Keep diagnostic requests proportionate](proportionate-diagnostics/rule.md) | judged |
-| [Verify an owner is active before recommending that the user wait](verify-the-owner-is-active/rule.md) | judged |
-| [Establish that a process is stale before terminating it](prove-a-process-is-stale/rule.md) | judged |
-| [Keep tool outputs within the sample job’s allowed directory](keep-outputs-in-allowed-dirs/rule.md) | judged |
-| [Do not describe an unfinished check as a blocker when a documented fallback works](fallback-is-not-a-blocker/rule.md) | judged |
-| [Use the configured SSH alias](use-the-configured-ssh-alias/rule.md) | judged |
+| [Use the documented worker lifecycle and receipt wake path](worker-lifecycle-and-receipts/rule.md) | judged (opinion) |
+| [Assign one task to each agent](one-task-per-agent/rule.md) | judged (opinion) |
+| [Answer the user's questions before launching unrelated work](answer-questions-before-launching/rule.md) | judged (opinion) |
+| [Stop repeating a failed credential path and offer the user’s requested alternative](switch-from-a-failed-credential-path/rule.md) | judged (opinion) |
+| [Stop when uncertain repair advice risks damage](stop-on-uncertain-repair-advice/rule.md) | judged (opinion) |
+| [Verify the bottleneck before prescribing an architecture](verify-the-bottleneck-first/rule.md) | judged (opinion) |
+| [Keep diagnostic requests proportionate](proportionate-diagnostics/rule.md) | judged (opinion) |
+| [Verify an owner is active before recommending that the user wait](verify-the-owner-is-active/rule.md) | judged (opinion) |
+| [Establish that a process is stale before terminating it](prove-a-process-is-stale/rule.md) | judged (opinion) |
+| [Keep tool outputs within the sample job’s allowed directory](keep-outputs-in-allowed-dirs/rule.md) | judged (opinion) |
+| [Do not describe an unfinished check as a blocker when a documented fallback works](fallback-is-not-a-blocker/rule.md) | judged (opinion) |
+| [Use the configured SSH alias](use-the-configured-ssh-alias/rule.md) | judged (opinion) |
 
 ## Repository-specific lessons
 
 | Lesson | Proof |
 | --- | --- |
-| [Clearing facts restores whole-rule authoring](clear-facts-restores-rule/rule.md) | judged |
+| [Clearing facts restores whole-rule authoring](clear-facts-restores-rule/rule.md) | replayed |
 | [Parse JSONL at newline record boundaries](jsonl-unicode-separators/rule.md) | rerunnable |
-| [Isolate once-only recall by session](once-only-recall-per-session/rule.md) | judged |
-| [Resolve the Git root before compiling from a subdirectory](compile-from-git-root/rule.md) | judged |
-| [Isolate hook suppression by session](hook-suppression-by-session/rule.md) | judged |
-| [Reject malformed facts JSON with a controlled error](reject-malformed-facts/rule.md) | judged |
-| [Git hook install tests must not contact Codex](hook-tests-stay-offline/rule.md) | judged |
-| [Fetch the current base before creating the guard worktree](fetch-the-current-base-before-creating-the-guard/rule.md) | judged |
+| [Isolate once-only recall by session](once-only-recall-per-session/rule.md) | replayed |
+| [Resolve the Git root before compiling from a subdirectory](compile-from-git-root/rule.md) | replayed |
+| [Isolate hook suppression by session](hook-suppression-by-session/rule.md) | replayed |
+| [Reject malformed facts JSON with a controlled error](reject-malformed-facts/rule.md) | replayed |
+| [Git hook install tests must not contact Codex](hook-tests-stay-offline/rule.md) | replayed |
+| [Fetch the current base before creating the guard worktree](fetch-the-current-base-before-creating-the-guard/rule.md) | replayed |
 | [Preserve relative links when moving documents](preserve-relative-links-when-moving-documents/rule.md) | rerunnable |
-| [Export the full committed source tree to pre-push snapshots](export-the-full-committed-source-tree-to-pre/rule.md) | judged |
-| [Include every tombstone alias in receipt identity extraction](include-every-tombstone-alias-in-receipt/rule.md) | judged |
+| [Export the full committed source tree to pre-push snapshots](export-the-full-committed-source-tree-to-pre/rule.md) | replayed |
+| [Include every tombstone alias in receipt identity extraction](include-every-tombstone-alias-in-receipt/rule.md) | replayed |
 | [Time regexes on long adversarial inputs before merging](time-regexes-on-long-adversarial-inputs-before/rule.md) | rerunnable |
-| [Keep the project virtual environment available in snapshots](keep-the-project-virtual-environment-available/rule.md) | judged |
+| [Keep the project virtual environment available in snapshots](keep-the-project-virtual-environment-available/rule.md) | replayed |
 | [Do not count insertion-only hunks as changing a reviewed line](do-not-count-insertion-only-hunks-as-changing-a/rule.md) | rerunnable |
-| [Register required signals for bounded consumers](register-required-signals-for-bounded-consumers/rule.md) | judged |
+| [Register required signals for bounded consumers](register-required-signals-for-bounded-consumers/rule.md) | replayed |
 | [Remap a carried comment's line before comparing it at a newer head](remap-a-carried-comment-s-line-before-comparing/rule.md) | rerunnable |
 
 ## Code review lessons
@@ -179,3 +192,4 @@ release-check on the result before any release.
 | [Handle terminal cloud-init statuses instead of retrying forever](terminal-cloud-init-status/rule.md) | judged |
 | [Reject usage and error diagnostics in linter output](reject-linter-error-output/rule.md) | rerunnable |
 | [Apply the outbox age limit to enrichment failures too](outbox-age-limit-everywhere/rule.md) | judged |
+| [Use the triggering invocation ID in async failure handlers](use-the-triggering-invocation-id/rule.md) | judged |

@@ -349,6 +349,68 @@ else:
         meta = json.loads(self.records()[0]["error"])
         self.assertEqual((meta.get("command"), meta.get("repository_id")), ("./.fleet/verify.sh", 7))
 
+    def test_json_rejects_a_masked_failed_step_command(self):
+        result = self.cli(*self.write(dict(fixture(), failed_step_command="pytest --token=***")))
+        self.assertEqual(result.returncode, 2)
+        self.assertFalse(self.store.exists())
+
+    def test_reimport_accepts_legacy_and_enriched_ci_records_without_overwriting_either(self):
+        command = "python3 -m unittest discover -s tests"
+        for run_id, enrich_first in ((412, False), (413, True)):
+            with self.subTest(enrich_first=enrich_first):
+                old = dict(fixture(), run_id=run_id)
+                enriched = dict(old, failed_step_command=command)
+                first, later = (enriched, old) if enrich_first else (old, enriched)
+                self.assertEqual(self.cli(*self.write(first)).returncode, 0)
+                before = self.records()
+                result = self.cli(*self.write(later))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout), dict(imported=0, skipped=1))
+                self.assertEqual(self.records(), before)
+                if enrich_first:
+                    conflict = dict(enriched, failed_step_command="python -m unittest discover -s tests")
+                    self.assertEqual(self.cli(*self.write(conflict)).returncode, 2)
+                    self.assertEqual(self.records(), before)
+
+    def test_github_fetch_retains_the_failed_shell_command_outside_the_log_tail(self):
+        env, data, _ = self.fake_github()
+        fake = json.loads(data.read_text())
+        command = "python3 -m unittest discover -s tests"
+
+        def log_step(name, lines, log_format, second):
+            step = "UNKNOWN STEP" if log_format == "unknown" else name
+            prefix = "unit tests\t" + step + "\t" if log_format != "raw" else ""
+            return "\n".join(prefix + f"2026-10-20T11:59:{second}.1234567Z " + line for line in lines)
+
+        def shell_step(command, prefixed):
+            escape = "^[" if prefixed else "\x1b"
+            return ["##[group]Run " + command, escape + "[36;1m" + command + escape + "[0m",
+                    "  shell: /usr/bin/bash -e {0}", "##[endgroup]"]
+
+        for log_format in ("named", "unknown", "raw"):
+            prefixed = log_format != "raw"
+            for outcome in ("failure", "continued", "passed"):
+                with self.subTest(log_format=log_format, outcome=outcome):
+                    failed = outcome == "failure"
+                    fake["jobs"]["jobs"][0]["steps"] = [
+                        dict(name="Tests", conclusion="failure" if failed else "success",
+                             started_at="2026-10-20T11:59:51Z", completed_at="2026-10-20T11:59:56Z"),
+                        dict(name="Cleanup", conclusion="success" if failed else "failure",
+                             started_at="2026-10-20T11:59:57Z", completed_at="2026-10-20T11:59:59Z"),
+                    ]
+                    error = "##[error]Process completed with exit code 1."
+                    output = ["x" * ingest.TAIL] + ([error] if outcome != "passed" else [])
+                    cleanup = ["##[group]Run example/action@v4", "##[endgroup]"] + ([] if failed else [error])
+                    log = (log_step("Tests", shell_step(command, prefixed), log_format, 51) + "\n"
+                           + log_step("Tests", output, log_format, 56) + "\n"
+                           + log_step("Cleanup", cleanup, log_format, 59))
+                    fake.update(log=log if prefixed else "", job_logs={"888": log})
+                    data.write_text(json.dumps(fake))
+                    with patch.dict(os.environ, env):
+                        record = ingest.fetch("example/project", 412, 1)
+                    self.assertNotIn(command, json.loads(record["error"])["log_tail"])
+                    self.assertEqual(ingest.recorded_command(record), command if failed else None)
+
     def test_poll_skips_ingested_run_before_fetch_and_imports_later_attempt(self):
         env, data, calls = self.fake_github()
         config = self.work / "repos.json"
@@ -435,6 +497,15 @@ else:
         result = self.cli("github", "--repo", "example/project", "--run-id", "412", env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("AssertionError: expected two rows", json.loads(self.records()[0]["error"])["log_tail"])
+
+    def test_empty_failed_run_log_uses_existing_job_log_fallback(self):
+        env, data, _ = self.fake_github()
+        response = json.loads(data.read_text())
+        response.update(log="", job_logs={"888": "FAIL: test_example (tests.test_unit.UnitTests.test_example)"})
+        data.write_text(json.dumps(response))
+        result = self.cli("github", "--repo", "example/project", "--run-id", "412", env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(self.records()[0]["error"])["log_tail"], response["job_logs"]["888"] + "\n")
 
     def test_expired_job_log_status_in_parentheses_uses_annotations(self):
         env, data, _ = self.fake_github()
@@ -566,6 +637,71 @@ else:
         result = self.cli("poll", "--config", str(config), env=env)
         self.assertEqual(json.loads(result.stdout), dict(imported=0, skipped=0, coldbox=1))
         self.assertNotIn("--log-failed", calls.read_text())
+
+    def test_poll_backfills_verify_receipt_outside_recent_runs_once(self):
+        receipt = dict(schema="coldbox.receipt/v1", id="cbx-1793998683-04f242", mode="runner",
+                       repo="example/project", sha="a" * 40, verdict="fail", started_at="2026-10-20T11:58:00Z",
+                       checks=[dict(check="unit", command="python3 /opt/example/ci-check --ci", status="fail", exit=1)],
+                       github=dict(run_id="412", run_attempt="1", workflow="verify", job="unit tests"))
+        self.input.write_text(json.dumps(receipt))
+        loaded = subprocess.run([sys.executable, str(ROOT / "coldfix.py"), "--store", str(self.store),
+                                 "ingest", "--format", "coldbox", "--input", str(self.input)], capture_output=True, text=True)
+        self.assertEqual(loaded.returncode, 0, loaded.stderr)
+        env, data, calls = self.fake_github()
+        env["COLDFIX_CI_COMMAND"] = "ci-check --ci"
+        response = json.loads(data.read_text())
+        response["runs"] = []
+        response["log"] = "FAIL: test_example (tests.test_unit.UnitTests.test_example)\n"
+        response["jobs"]["jobs"][0]["runner_name"] = receipt["id"]
+        data.write_text(json.dumps(response))
+        config = self.work / "repos.json"
+        config.write_text('{"repos":["example/project"]}')
+        result = self.cli("poll", "--config", str(config), "--limit", "1", env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), dict(imported=1, skipped=0))
+        meta = [json.loads(row["error"]) for row in self.records() if row["source_ref"].startswith("https:")][0]
+        self.assertEqual(meta["type"], "ci")
+        self.assertEqual(meta["log_tail"], (response["log"] + "\n")[-ingest.TAIL:])
+        before = calls.read_text()
+        result = self.cli("poll", "--config", str(config), env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls.read_text()[len(before):].count("--log-failed"), 0)
+
+    @patch.dict(os.environ, {"COLDFIX_CI_COMMAND": "ci-check --ci"})
+    def test_poll_historical_backlog_advances_after_unavailable_run(self):
+        rows = []
+        for run_id, workflow in [(410, "other"), (411, "verify"), (412, None)]:
+            metadata = dict(type="coldbox", id=f"cbx-{run_id}", repo="example/project",
+                            command="ci-check --ci", github=dict(run_id=str(run_id), run_attempt="1", workflow=workflow))
+            rows.append(c.event_record(dict(kind="ci", repo="example/project", agent="unknown", command="verify", error=json.dumps(metadata),
+                                           source_ref=f"coldbox:{run_id}", occurred="2026-10-20T12:00:00Z"), "coldbox"))
+        for row, run_id in zip(rows, (410, 411, 412)):
+            row["id"] = f"{run_id:032x}"
+        ingest.import_records(self.store, rows)
+        with patch.object(ingest, "gh", return_value=[]), patch.object(ingest, "fetch", side_effect=c.ColdfixError("unavailable")) as fetch:
+            result = ingest.poll(self.store, ["example/project"], 1, "verify")
+        self.assertEqual(result["failed"], 1)
+        self.assertEqual(fetch.call_args.args[1], 411)
+        fetched = ingest.record(ingest.ci_event(fixture()))
+        def fetch_next(repo, run_id, *args, **kwargs):
+            if run_id == 411:
+                raise c.ColdfixError("unavailable")
+            return fetched
+        with patch.object(ingest, "gh", return_value=[]), patch.object(ingest, "fetch", side_effect=fetch_next) as fetch:
+            result = ingest.poll(self.store, ["example/project"], 1, "verify")
+        self.assertEqual(result["imported"], 1)
+        self.assertEqual([call.args[1] for call in fetch.call_args_list], [412])
+        with patch.object(ingest, "gh", return_value=[]), patch.object(ingest, "fetch") as fetch:
+            ingest.poll(self.store, ["example/project"], 1, "verify")
+        fetch.assert_not_called()
+        ledger = self.store / "github-waiting.json"
+        waiting = json.loads(ledger.read_text())
+        for _, run in waiting.values():
+            run["retry_after"] = 0
+        ledger.write_text(json.dumps(waiting))
+        with patch.object(ingest, "gh", return_value=[]), patch.object(ingest, "fetch", side_effect=c.ColdfixError("unavailable")) as fetch:
+            ingest.poll(self.store, ["example/project"], 1, "verify")
+        self.assertEqual(fetch.call_count, 1)
 
     def test_poll_waits_for_the_coldbox_receipt_before_importing(self):
         env, data, _ = self.fake_github()

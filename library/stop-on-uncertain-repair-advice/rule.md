@@ -1,7 +1,7 @@
 ---
 id: stop-on-uncertain-repair-advice
 title: Stop when uncertain repair advice risks damage
-proof: judged
+proof: judged (opinion)
 ---
 # Stop when uncertain repair advice risks damage
 

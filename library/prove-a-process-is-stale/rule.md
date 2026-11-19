@@ -1,7 +1,7 @@
 ---
 id: prove-a-process-is-stale
 title: Establish that a process is stale before terminating it
-proof: judged
+proof: judged (opinion)
 ---
 # Establish that a process is stale before terminating it
 

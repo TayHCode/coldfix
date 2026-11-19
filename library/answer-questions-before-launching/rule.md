@@ -1,7 +1,7 @@
 ---
 id: answer-questions-before-launching
 title: Answer the user's questions before launching unrelated work
-proof: judged
+proof: judged (opinion)
 ---
 # Answer the user's questions before launching unrelated work
 

@@ -1,7 +1,7 @@
 ---
 id: switch-from-a-failed-credential-path
 title: Stop repeating a failed credential path and offer the user’s requested alternative
-proof: judged
+proof: judged (opinion)
 ---
 # Stop repeating a failed credential path and offer the user’s requested alternative
 

@@ -1,7 +1,7 @@
 ---
 id: fallback-is-not-a-blocker
 title: Do not describe an unfinished check as a blocker when a documented fallback works
-proof: judged
+proof: judged (opinion)
 ---
 # Do not describe an unfinished check as a blocker when a documented fallback works
 

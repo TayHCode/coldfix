@@ -26,7 +26,7 @@ SCANS = ("conflict-markers", "jsonl-unicode-separators", "tests-must-test", "aut
          "runnable-commands", "hook-suppression-by-session", "once-only-recall-per-session", "inline-review-edits-after-merge",
          "resolve-tools-before-restricting-path", "stream-guest-output-to-log", "terminal-cloud-init-status",
          "fetch-the-current-base-before-creating-the-guard", "pre-push-uses-pushed-tree", "update-callers-and-stubs",
-         "reject-malformed-facts")
+         "reject-malformed-facts", "use-the-triggering-invocation-id")
 PYTHON_SCANS = {"jsonl-unicode-separators", "tests-must-test", "authz-everywhere", "cross-account-shared-queue",
                 "errors-are-states", "no-environment-assumptions", "time-regexes-on-long-adversarial-inputs-before",
                 "hook-suppression-by-session", "once-only-recall-per-session", "inline-review-edits-after-merge",
@@ -188,6 +188,51 @@ class CheckTests(unittest.TestCase):
              "tests/run_me.py": case + "\n\nif __name__ == '__main__':\n    unittest.main()\n"},
             ["tests/check_flags.py:4"])
 
+    def test_vitest_spec_outside_every_include_is_a_hit(self):
+        spec = "import { it } from 'vitest';\n\nit('reviews', () => {});\n"
+        config = "import { defineConfig } from 'vitest/config';\n\nexport default defineConfig({\n  test: {\n    include: [%s],\n" \
+                 "    coverage: { include: ['src/**'] },\n  },\n});\n"
+        tree = {"tests/integration/review.integration.spec.ts": spec, "tests/unit/a.test.ts": spec,
+                "tests/fixtures/sample.test.ts": spec, "src/plain.spec.ts": "export const x = 1;\n"}
+        self.assert_scan(
+            "no-environment-assumptions",
+            {**tree, "vitest.integration.config.ts": config % "'tests/integration/other.integration.spec.ts'",
+             "vitest.config.ts": config % "'tests/unit/**/*.test.ts'"},
+            {**tree, "vitest.integration.config.ts": config % "'tests/integration/**/*.integration.spec.ts'",
+             "vitest.config.ts": config % "'tests/unit/**/*.test.ts'"},
+            ["tests/integration/review.integration.spec.ts:1"])
+
+    def test_vitest_config_with_computed_include_or_repeating_extglob_is_not_guessed(self):
+        spec = "import { it } from 'vitest';\n"
+        for include in ("...globs", "'tests/+(unit|integration).spec.ts'", "'tests/!(unit).spec.ts'"):
+            with self.subTest(include):
+                shutil.rmtree(self.tree)
+                self.tree.mkdir()
+                self.write({"vitest.config.ts": "export default { test: { include: [%s] } };\n" % include,
+                            "tests/unitunit.spec.ts": spec})
+                self.assertEqual(self.lessons()[1]["no-environment-assumptions"]["status"], "PASS")
+
+    def test_vitest_include_with_a_character_class_still_finds_an_unmatched_test(self):
+        spec = "import { it } from 'vitest';\n"
+        self.write({"vitest.config.ts": "export default { test: { include: ['tests/[ab]*.spec.ts', 'e2e/**/*.spec.ts'] } };\n",
+                    "tests/alpha.spec.ts": spec, "e2e/flow/x.spec.ts": spec, "tests/miss.spec.ts": spec})
+        row = self.lessons()[1]["no-environment-assumptions"]
+        self.assertEqual((row["status"], row["hits"]), ("FAIL", ["tests/miss.spec.ts:1"]))
+
+    def test_failure_handler_reading_the_current_invocation_is_a_hit(self):
+        handler = ("import subprocess\n\n\ndef invocation(unit):\n"
+                   "    return subprocess.run(['systemctl', 'show', '-p', 'InvocationID', unit]).stdout\n\n\n"
+                   "def failures(unit):\n    return subprocess.run(['journalctl', '_SYSTEMD_INVOCATION_ID=' + invocation(unit)])\n")
+        fixed = handler.replace("def invocation(unit):\n", "def invocation(unit):\n"
+                                "    if os.environ.get('MONITOR_INVOCATION_ID'):\n"
+                                "        return os.environ['MONITOR_INVOCATION_ID']\n")
+        self.assert_scan(
+            "use-the-triggering-invocation-id",
+            {"ops/alert.py": handler, "status.py": "print('InvocationID')\n",
+             "ops/note.py": "# MONITOR_INVOCATION_ID is available here\n" + handler},
+            {"ops/alert.py": "import os\n" + fixed, "status.py": "print('InvocationID')\n"},
+            ["ops/alert.py:5", "ops/note.py:6"])
+
     def test_relative_link_to_a_missing_file_is_a_hit(self):
         self.assert_scan(
             "preserve-relative-links-when-moving-documents",
@@ -235,6 +280,17 @@ class CheckTests(unittest.TestCase):
                          'ON = re.search(r"(.*(?:\\n(?:[ #].*|))*)", "")\nPATH = re.compile(r"/[\\w.-]+(?:/[\\w.-]+)*")\n'
                          'PLAIN = re.compile(r"(?:.+\\n)+X")\nCOUNTED = re.sub(r"(?:.+\\n)+X", "", "", 16)\n'},
             ["paths.py:3", "paths.py:4", "paths.py:5", "paths.py:6"])
+
+    def test_repeat_anchored_to_input_start_runs_at_most_once(self):
+        self.assert_scan(
+            "time-regexes-on-long-adversarial-inputs-before",
+            {"card.py": 'import re\n\nLOOSE = re.compile(r"^(?:HIERARCH +)?(?:[ -<>-~]+ ?)+$", re.I)\n'
+                        'INNER = re.compile(r"(?:^(?:a+)+$)+")\n'
+                        'SCOPED = re.compile(r"(?m:(?:^[a\\n]+)+$)")\n'
+                        'BRANCHY = re.compile(r"(?:^(a|aa)+)+$")\n'},
+            {"card.py": 'import re\n\nKEYWORD = re.compile(r"^(?:HIERARCH +)?(?:^[ -<>-~]+ ?)+$", re.I)\n'
+                        'START = re.compile(r"(?:\\A\\w+ ?)+$")\n'},
+            ["card.py:3", "card.py:4", "card.py:5", "card.py:6"])
 
     def test_fence_opener_that_allows_only_letters_is_a_hit(self):
         self.assert_scan(
@@ -428,8 +484,21 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         lines = result.stdout.splitlines()
         self.assertEqual(lines[:2], ["FAIL: tests-must-test (A test must exercise the failure it names)", "  test_demo.py:8"])
+        self.assertTrue(lines[2].startswith("  fix: ") and len(lines[2]) > len("  fix: "), lines[2])
         self.assertIn("NO_PORTABLE_CHECK: races (Guard read-then-write on shared state)", lines)
         self.assertRegex(lines[-1], rf"^1 with hits, 0 incomplete, {len(SCANS) - 1} passed, \d+ with no portable check$")
+
+    def test_check_scans_the_named_path_and_prints_the_scan_fix(self):
+        self.write({"other/tests/check_flags.py": "import unittest\n\n\nclass T(unittest.TestCase):\n"
+                                                  "    def test_a(self):\n        pass\n"})
+        result = self.check("other")
+        self.assertEqual(result.returncode, 1)
+        lines = result.stdout.splitlines()
+        index = lines.index("FAIL: no-environment-assumptions (Don't assume the environment)")
+        self.assertEqual(lines[index + 1], "  tests/check_flags.py:4")
+        self.assertTrue(lines[index + 2].startswith("  fix: Register each listed test file"), lines[index + 2])
+        missing = self.check("nowhere")
+        self.assertNotEqual(missing.returncode, 0)
 
     def test_shared_fallback_for_a_missing_session_id_is_a_hit(self):
         self.assert_scan(

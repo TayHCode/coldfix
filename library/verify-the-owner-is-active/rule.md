@@ -1,7 +1,7 @@
 ---
 id: verify-the-owner-is-active
 title: Verify an owner is active before recommending that the user wait
-proof: judged
+proof: judged (opinion)
 ---
 # Verify an owner is active before recommending that the user wait
 

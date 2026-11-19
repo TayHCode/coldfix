@@ -1,6 +1,12 @@
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 import unittest
+from unittest.mock import patch
+
+import coldfix
 
 import test_cli
 import test_draft
@@ -31,6 +37,45 @@ class InitTests(unittest.TestCase):
         self.assertEqual(json.loads((self.store / 'config.json').read_text()), config)
         self.init('--force', '--input', 'other')
         self.assertEqual(json.loads((self.store / 'config.json').read_text())['input'], str(self.cwd / 'other'))
+
+    def test_init_yes_keeps_an_existing_config(self):
+        config = json.loads(self.init('--input', 'events.jsonl').stdout)
+        result = self.init('--yes', '--input', 'other')
+        self.assertEqual(json.loads(result.stdout), config)
+        self.assertIn('kept existing', result.stderr)
+        self.assertEqual(json.loads((self.store / 'config.json').read_text()), config)
+        (self.store / 'config.json').write_text('{broken')
+        self.assertIn('invalid config JSON', self.init('--yes', code=2).stderr)
+        self.assertEqual((self.store / 'config.json').read_text(), '{broken')
+        self.init('--yes', '--force', '--input', 'other', code=2)
+        self.assertEqual((self.store / 'config.json').read_text(), '{broken')
+
+    def test_init_asks_before_overwriting(self):
+        config = json.loads(self.init('--input', 'events.jsonl').stdout)
+        argv = ['--store', str(self.store), 'init', '--repo', str(self.repo), '--input', str(self.cwd / 'other')]
+        for answer, code, expected in (('n', 2, config['input']), ('y', 0, str(self.cwd / 'other'))):
+            with self.subTest(answer=answer), patch.object(coldfix, 'ask', return_value=answer):
+                self.assertEqual(coldfix.main(argv), code)
+                self.assertEqual(json.loads((self.store / 'config.json').read_text())['input'], expected)
+
+    def test_init_runs_doctor_and_reports_it(self):
+        result = self.init()
+        self.assertIn('coldfix: sandbox: available', result.stderr)
+        self.assertIn('coldfix: private_hosts:', result.stderr)
+
+    def test_init_yes_outside_git_needs_repo(self):
+        result = self.run_cli('--store', str(self.store), 'init', '--yes', code=2)
+        self.assertIn('not inside a Git repository', result.stderr)
+        self.assertFalse((self.store / 'config.json').exists())
+        result = self.run_cli('--store', str(self.store), 'init', '--yes', '--repo', str(self.repo))
+        self.assertEqual(json.loads(result.stdout), {'repo': str(self.repo)})
+
+    def test_init_stops_on_a_failing_doctor_without_writing(self):
+        result = subprocess.run([sys.executable, str(test_cli.CLI), '--store', str(self.store), 'init', '--yes'],
+                                cwd=self.cwd, capture_output=True, text=True, env=dict(os.environ, PATH=str(self.cwd)))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('sandbox unavailable: bwrap is not installed', result.stderr)
+        self.assertFalse((self.store / 'config.json').exists())
 
     def test_init_keeps_release_check_command_name_and_resolves_paths(self):
         self.init('--release-check', 'coldrelease', '--release-check-repo', 'repo')

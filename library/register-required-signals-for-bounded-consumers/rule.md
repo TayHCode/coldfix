@@ -1,7 +1,7 @@
 ---
 id: register-required-signals-for-bounded-consumers
 title: Register required signals for bounded consumers
-proof: judged
+proof: replayed
 ---
 # Register required signals for bounded consumers
 

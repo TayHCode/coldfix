@@ -58,9 +58,20 @@ python3 -m pip install .
 coldfix --help
 ```
 
+Then set it up in the repository you want Coldfix to learn from:
+
+```sh
+coldfix init --yes
+```
+
+`init` runs `doctor` (stopping with its fix if the sandbox cannot run) and saves `.coldfix/config.json` with
+this Git checkout as `repo`. With `--yes` it never prompts: it keeps an existing config and needs a Git checkout
+or `--repo`. Without `--yes`, it asks before replacing an existing config and asks for the repository when you
+run it outside one.
+
 ## Check your repository
 
-`coldfix check` runs the library's static portable checks on the current directory. They only read files: they never run your code, your tests or your README's commands, and never use the network. Each hit names the lesson and the `file:line`, and the command exits 1 when anything is hit. The block below makes a repository with a test that unittest never collects; in your own repository, just run `coldfix check`.
+`coldfix check` runs the library's static portable checks on the current directory. They only read files: they never run your code, your tests or your README's commands, and never use the network. Each hit names the lesson, the `file:line` and the fix, and the command exits 1 when anything is hit. `coldfix check <path>` scans another tree. The block below makes a repository with a test that unittest never collects; in your own repository, just run `coldfix check`.
 
 ```sh
 mkdir demo && cd demo && git init -q
@@ -163,7 +174,9 @@ On a fresh Ubuntu machine, after [Install](#install):
 1. Install the GitHub CLI and bubblewrap: `sudo apt install gh bubblewrap`. Run `coldfix doctor` and apply
    the fix it prints, if any (see [Replay sandbox](#replay-sandbox)). This is the `local` backend: replays run
    in a bubblewrap sandbox on this machine. Inside a container, the container must also allow nested
-   namespaces (for Incus, `security.nesting=true`), or `doctor` reports `Can't mount proc`.
+   namespaces (for Incus, `security.nesting=true`), or `doctor` reports `Can't mount proc`. To replay somewhere
+   else, such as a VM or any host over SSH, set `COLDFIX_REPLAY_RUNNER` instead
+   ([Configured runner](docs/replay-backends.md#configured-runner)).
 2. Give Coldfix read access to your repositories' Actions runs: `export GH_TOKEN=<token>` (or `gh auth login`),
    and `export GITHUB_OWNER=<your GitHub user or organization>`.
 3. Set `COLDFIX_MODEL_CMD` to your model command (see [Requirements](#requirements)).

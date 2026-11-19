@@ -1,7 +1,7 @@
 ---
 id: one-task-per-agent
 title: Assign one task to each agent
-proof: judged
+proof: judged (opinion)
 ---
 # Assign one task to each agent
 

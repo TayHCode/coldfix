@@ -910,6 +910,9 @@ def replay_pair(clone, before, after, plan, temporary, timeout, executor=None):
     def run(side, revision, reverse_patch=None):
         if executor is not None:
             return executor(clone, revision, temporary / side, shell, EXPECTED, timeout)
+        if replay_isolation.runner() is not None:
+            return replay_isolation.replay_tree(clone, revision, temporary / side, command.replace("{check}", shlex.quote(str(check))),
+                                                EXPECTED, timeout, reverse_patch)
         paths = []
         row = vm_replay_tree(clone, revision, temporary / side, shell, EXPECTED, timeout,
                              reverse_patch=reverse_patch, receipts=paths)

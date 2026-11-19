@@ -33,11 +33,14 @@ class LibraryTests(unittest.TestCase):
                 self.assertEqual(front["id"], slug)
                 self.assertTrue(front["title"])
                 shipped = rerun.proof_kind(os.path.join(LIBRARY, slug))
-                self.assertEqual(front["proof"], "judged" if shipped is None else "rerunnable")
+                if shipped is None:
+                    self.assertIn(front["proof"], ("judged", "judged (opinion)", "replayed"))
+                else:
+                    self.assertIn(front["proof"], ("rerunnable", "rerunnable (opinion)"))
 
     def test_index_lists_every_lesson_with_its_proof_level(self):
         with open(os.path.join(LIBRARY, "README.md")) as stream:
-            rows = re.findall(r"^\| \[.+\]\(([^/]+)/rule\.md\) \| (\w+) \|$", stream.read(), re.M)
+            rows = re.findall(r"^\| \[.+\]\(([^/]+)/rule\.md\) \| ([^|]+?) \|$", stream.read(), re.M)
         self.assertEqual(sorted(rows), [(slug, frontmatter(slug)["proof"]) for slug in lessons()])
 
     def test_index_lists_every_portable_scan(self):

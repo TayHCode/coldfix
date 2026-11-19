@@ -17,6 +17,7 @@ HARNESS_OUTCOMES = {"harness_error"}
 SETUP_OUTCOMES = {"unsupported", "needs_credentials", "needs_browser", "needs_keys_or_hardware"}
 CHECKED = {"partly_checked", "readme_checked"}
 EXCERPT = 2000
+RECHECKS = "coldpass-rechecks.json"
 NOT_REPO = re.compile(r"output file could not be checked|\bNone required\b|\bNone for the\b|No fix needed"
                       r"|\bno (?:documented |runnable |user-facing )*(?:CLI|command-line|command|entry ?point|product operation|program|operation)\b"
                       r"|import-only|exposes no runnable|\b(?:no|needs?|requires?) (?:an? )?(?:[\w-]+ ){0,2}API key"
@@ -70,6 +71,7 @@ def normalize(row):
                 diagnostic=optional_text(row["what_failed"]) or optional_text(row["error_excerpt"]),
                 text="\n".join(filter(None, (optional_text(row[key]) for key in ("what_failed", "error_excerpt", "suggested_fix")))),
                 origin=optional_text(row["failure_origin"]),
+                outcome_class=optional_text(row.get("outcome_class")),
                 evidence=optional_text(row["evidence_strength"]),
                 owner=optional_text(fault.get("owner")) if fault else None)
 
@@ -78,11 +80,12 @@ def classify(run):
     """Return pass, harness, setup, inconclusive or product. Only product failures describe the repo under test."""
     if run["outcome"] == "pass":
         return "pass"
-    if run["outcome"] in HARNESS_OUTCOMES or run["owner"] == "test":
+    if run["outcome"] in HARNESS_OUTCOMES or run["owner"] == "test" or run["origin"] == "harness_error":
         return "harness"
     if run["outcome"] in SETUP_OUTCOMES or run["owner"] == "prerequisite":
         return "setup"
-    if run["owner"] == "repo" or run["evidence"] in CHECKED and run["outcome"] == "blocked":
+    if run["owner"] == "repo" or run["owner"] is None and (
+            run["origin"] == "repo" or run["outcome_class"] == "repo_failure"):
         return "product"
     return "inconclusive"
 
@@ -106,6 +109,7 @@ def event(run, failure_class):
 
 def collect(data, on_reject=None):
     records, buckets, noise, classes, seen = [], Counter(), Counter(), {}, set()
+    runs = []
     for number, raw in enumerate(data.split(b"\n"), 1):
         if not raw.strip():
             continue
@@ -121,6 +125,7 @@ def collect(data, on_reject=None):
             on_reject("invalid Coldpass row")
             continue
         seen.add(run["run_id"])
+        runs.append(run)
         buckets[bucket] += 1
         if bucket in ("harness", "setup", "inconclusive"):
             noise[bucket + ":" + run["outcome"]] += 1
@@ -134,9 +139,38 @@ def collect(data, on_reject=None):
     records.sort(key=lambda row: (c.time_key(row["occurred"]), row["source_ref"]))
     receipt = dict(source="coldpass-runs", input_sha256=hashlib.sha256(data).hexdigest(), runs=len(seen),
                    buckets=dict(sorted(buckets.items())), noise=dict(sorted(noise.items())), records=len(records),
-                   classes={name: dict(runs=entry["runs"], repos=sorted(entry["repos"])) for name, entry in sorted(classes.items())})
+                   classes={name: dict(runs=entry["runs"], repos=sorted(entry["repos"])) for name, entry in sorted(classes.items())},
+                   rechecks=recheck_pairs(runs))
     return records, receipt
 
+
+
+def recheck_pairs(runs):
+    pairs = []
+    valid = lambda value: isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value)
+    passes = [run for run in runs if classify(run) == "pass" and valid(run["commit"])]
+    for run in runs:
+        if classify(run) != "product" or not valid(run["commit"]) or failure_class(run) == "not-repo":
+            continue
+        later = [green for green in passes if green["repo"].lower() == run["repo"].lower()
+                 and green["commit"] != run["commit"]
+                 and c.time_key(green["occurred"]) > c.time_key(run["occurred"])]
+        if later:
+            green = min(later, key=lambda row: (c.time_key(row["occurred"]), row["run_id"]))
+            record = fi.record(event(run, failure_class(run)))
+            pairs.append(dict(failure_id=record["id"], repo=run["repo"].lower(),
+                              before=run["commit"], after=green["commit"],
+                              run_id=run["run_id"], pass_run_id=green["run_id"],
+                              occurred=run["occurred"], passed=green["occurred"]))
+    return pairs
+
+
+def save_rechecks(root, summary):
+    path = c.ordinary_path(root / RECHECKS)
+    previous = json.loads(c.read_text(path)) if path.exists() else []
+    pairs = {row["failure_id"]: row for row in previous}
+    pairs.update({row["failure_id"]: row for row in summary["rechecks"]})
+    c.atomic_create(path, c.encoded(sorted(pairs.values(), key=lambda row: row["failure_id"])), replace=True, mode=0o600)
 
 def main(argv=None):
     parser = c.Parser(description=__doc__)
@@ -154,6 +188,7 @@ def main(argv=None):
         summary["dry_run"] = args.dry_run
         if not args.dry_run:
             root.mkdir(parents=True, mode=0o700, exist_ok=True)
+            save_rechecks(root, summary)
             summary.update(fi.import_records(root, records))
         print(json.dumps(summary, sort_keys=True))
         return 0

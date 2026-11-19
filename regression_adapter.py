@@ -7,7 +7,65 @@ import re
 import tokenize
 import zlib
 
-TEMPLATE = '''import hashlib
+LEGACY_TEMPLATE = '''import hashlib
+import json
+import os
+import re
+import shutil
+import sys
+from subprocess import DEVNULL, run
+import tempfile
+import zlib
+
+def apply(root, patch_file, *options):
+    return run(["git", "apply", "--whitespace=nowarn", *options, patch_file], cwd=root,
+               stdout=DEVNULL, stderr=DEVNULL).returncode
+
+
+def main():
+    data = json.loads(zlib.decompress(bytes.fromhex("".join(PAYLOAD))))
+    patch = data["patch"].encode("utf-8")
+    if hashlib.sha256(patch).hexdigest() != TEST_SHA256:
+        return 2
+    names = data["names"]
+    with tempfile.TemporaryDirectory() as temporary:
+        root = os.path.join(temporary, "tree")
+        shutil.copytree(".", root, symlinks=True, ignore=shutil.ignore_patterns(".git"))
+        patch_file = os.path.join(temporary, "tests.patch")
+        with open(patch_file, "wb") as stream:
+            stream.write(patch)
+        if apply(root, patch_file, "-R", "--check") != 0 and apply(root, patch_file) != 0:
+            return 2
+        directory, name = os.path.split(data["path"])
+        command = [sys.executable, "-m", "unittest", "discover", "-s", directory or ".", "-p", name, "-v"]
+        for test in names:
+            command += ["-k", test]
+        result = run(command, cwd=root, capture_output=True, text=True, errors="replace",
+                     env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"))
+    output = result.stdout + result.stderr
+    ran = re.findall(r"^Ran ([0-9]+) tests? in ", output, re.M)
+    if not ran or int(ran[0]) < max(1, len(names)):
+        return 2
+    target = re.fullmatch(r"(?:FAIL|ERROR): (test\\w*)", data["diagnostic"])
+    statuses = re.findall(r"^(test\\w*) \\([\\w.]+\\)(?:\\n.*)? \\.\\.\\. (ok|skipped|FAIL|ERROR)\\b", result.stderr, re.M)
+    diagnosed = {status for test, status in statuses if target and test == target[1]}
+    skipped = [test for test, status in statuses if status == "skipped"]
+    summary = re.findall(r"^Ran [0-9]+ tests? in [0-9.]+s\\n\\nOK(?: \\(skipped=([0-9]+)\\))?$", result.stderr, re.M)
+    if result.returncode == 0 and summary and (
+            summary[-1] == "" or (diagnosed == {"ok"} and int(summary[-1]) == len(skipped))):
+        print('{"status": "PASS"}')
+        return 0
+    if (result.returncode == 1 and re.search("^" + re.escape(data["diagnostic"]) + " \\\\(", output, re.M)
+            and re.findall(r"^FAILED \\(", output, re.M)):
+        print('{"status": "FAIL", "failure": "' + EXPECTED_FAILURE + '"}')
+        return 1
+    return 2
+
+
+sys.exit(main())
+'''
+
+PREVIOUS_TEMPLATE = '''import hashlib
 import json
 import os
 import re
@@ -58,7 +116,31 @@ def main():
 sys.exit(main())
 '''
 
-EXISTING_TEMPLATE = '''import hashlib
+REPORTING = r"""
+def incomplete(why):
+    sys.stderr.write("INCOMPLETE: " + why.strip() + "\n")
+    return 2
+
+
+def cause(output):
+    lines = [line.strip() for line in output.split("\n") if line.strip()]
+    errors = [line for line in lines if re.match(r"[A-Za-z_][\w.]*(Error|Exception|Exit|Interrupt)\b", line)]
+    return (errors or lines or ["no test output"])[-1]
+
+
+def main():"""
+TEMPLATE = LEGACY_TEMPLATE
+for _old, _new in (("\ndef main():", REPORTING),
+                   ("!= TEST_SHA256:\n        return 2", '!= TEST_SHA256:\n        return incomplete("test patch digest changed")'),
+                   ("apply(root, patch_file) != 0:\n            return 2",
+                    'apply(root, patch_file) != 0:\n            return incomplete("test patch does not apply")'),
+                   ("    output = result.stdout + result.stderr\n",
+                    '    output = (result.stdout + result.stderr).replace(temporary, "<tmp>")\n'),
+                   ("max(1, len(names)):\n        return 2", "max(1, len(names)):\n        return incomplete(cause(output))"),
+                   ("        return 1\n    return 2\n", "        return 1\n    return incomplete(cause(output))\n")):
+    TEMPLATE = TEMPLATE.replace(_old, _new, 1)
+
+LEGACY_EXISTING_TEMPLATE = '''import hashlib
 import json
 import os
 from pathlib import Path
@@ -96,12 +178,27 @@ if result.returncode == 1 and data["diagnostic"] in output and re.findall(r"^FAI
     sys.exit(1)
 sys.exit(2)
 '''
+EXISTING_REPORTING = (
+    ("import zlib\n\ndata = ", "import zlib\n" + REPORTING.removesuffix("\ndef main():") + "\ndata = "),
+    ("        sys.exit(2)\n    directory", '        sys.exit(incomplete("test source digest changed"))\n    directory'),
+    ("int(ran[0]) != 1:\n    sys.exit(2)", 'int(ran[0]) != 1:\n    sys.exit(incomplete(cause(output.replace(temporary, "<tmp>"))))'),
+    ("    sys.exit(1)\nsys.exit(2)\n", '    sys.exit(1)\nsys.exit(incomplete(cause(output.replace(temporary, "<tmp>"))))\n'))
+EXISTING_TEMPLATE = LEGACY_EXISTING_TEMPLATE
+for _old, _new in EXISTING_REPORTING:
+    EXISTING_TEMPLATE = EXISTING_TEMPLATE.replace(_old, _new, 1)
+
+
+def without_existing_reporting(script):
+    for old, new in EXISTING_REPORTING:
+        script = script.replace(new, old, 1)
+    return script
+
 
 PAIR_TEMPLATE = EXISTING_TEMPLATE.replace('!= TEST_SHA256', 'not in data["source_sha256s"]')
 EXACT_EXISTING_TEMPLATE = EXISTING_TEMPLATE.replace('"-k", data["names"][0]', '"-k", "*." + data["names"][0]')
 EXACT_PAIR_TEMPLATE = PAIR_TEMPLATE.replace('"-k", data["names"][0]', '"-k", "*." + data["names"][0]')
 
-PYTEST_PAIR_TEMPLATE = '''import hashlib
+LEGACY_PYTEST_PAIR_TEMPLATE = '''import hashlib
 import json
 import os
 from pathlib import Path
@@ -137,6 +234,12 @@ if (result.returncode == 1 and summary == ["failed"] and len(failed) == 1 and fa
     sys.exit(1)
 sys.exit(2)
 '''
+PYTEST_PAIR_TEMPLATE = (
+    LEGACY_PYTEST_PAIR_TEMPLATE
+    .replace("import zlib\n\ndata = ", "import zlib\n" + REPORTING.removesuffix("\ndef main():") + "\ndata = ")
+    .replace("        sys.exit(2)\n    command", '        sys.exit(incomplete("test source digest changed"))\n    command')
+    .replace("sys.exit(2)\n", 'sys.exit(incomplete(cause(output.replace(temporary, "<tmp>"))))\n')
+)
 
 
 CANONICAL_VERIFY = b'#!/usr/bin/env bash\nset -euo pipefail\ncd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."\n\npython3 -B -m unittest discover -s tests\n'
@@ -270,7 +373,7 @@ def test_digest(test_patch):
     return hashlib.sha256(test_patch.encode("utf-8")).hexdigest()
 
 
-def build(test_path, test_patch, test_names, diagnostic):
+def build(test_path, test_patch, test_names, diagnostic, template=TEMPLATE):
     digest = test_digest(test_patch)
     expected = "regression:" + digest[:16]
     data = json.dumps(dict(path=test_path, names=list(test_names), diagnostic=diagnostic, patch=test_patch), sort_keys=True)
@@ -279,7 +382,7 @@ def build(test_path, test_patch, test_names, diagnostic):
     constants = (f'TEST_SHA256 = "{digest}"\n'
                  f"EXPECTED_FAILURE = {expected!r}\n"
                  f"PAYLOAD = (\n{lines},\n)\n")
-    return constants + "\n" + TEMPLATE, expected, digest
+    return constants + "\n" + template, expected, digest
 
 
 def build_existing(test_path, source_sha256, test_name, diagnostic, *, exact=False):

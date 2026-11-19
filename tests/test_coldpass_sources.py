@@ -89,6 +89,43 @@ class ColdpassSourcesTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
 
+    def test_checked_unknown_is_not_a_repo_failure(self):
+        rows, summary = sources.collect(json.dumps(run_row("unknown", "blocked")).encode())
+        self.assertEqual(rows, [])
+        self.assertEqual(summary["buckets"], {"inconclusive": 1})
+
+    def test_recheck_pairs_require_owned_failure_later_pass_and_new_commit(self):
+        red = run_row("red", "blocked", owner="repo")
+        green = run_row("green", "pass", date="2026-10-21", commit="b" * 40)
+        for change in ({}, {"repo": "other/project"}, {"commit": "a" * 40},
+                       {"date": "2026-10-19"}, {"commit": None}, {"outcome": "blocked"}):
+            with self.subTest(change=change):
+                self.write([red, dict(green, **change)])
+                records, summary = sources.collect(self.runs.read_bytes())
+                if change:
+                    self.assertEqual(summary["rechecks"], [])
+                else:
+                    self.assertEqual(summary["rechecks"], [dict(
+                        failure_id=records[0]["id"], repo="example/project",
+                        before="a" * 40, after="b" * 40, run_id="red", pass_run_id="green",
+                        occurred="2026-10-20", passed="2026-10-21")])
+
+    def test_recheck_drafts_without_manifest_but_cannot_claim_replay_ready(self):
+        import learn_daily
+        red = run_row("red", "blocked", owner="repo")
+        green = run_row("green", "pass", date="2026-10-21", commit="b" * 40)
+        self.write([red, green])
+        self.cli()
+        store = c.load_store(self.store)[1]
+        pairs = json.loads((self.store / sources.RECHECKS).read_text())
+        rows = learn_daily.waiting(store, {"drafts": {}}, [], pairs)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["evidence"], [pairs[0]["failure_id"]])
+        self.assertFalse(rows[0]["readiness"]["ready"])
+        self.assertFalse(rows[0]["replayable"])
+        self.assertEqual(rows[0]["recheck_pair"]["after"], "b" * 40)
+        self.assertEqual(learn_daily.waiting(store, {"drafts": {}}, []), [])
+
     def test_each_case_lands_in_its_bucket(self):
         expected = {"pass": "pass", "harness-outcome": "harness", "harness-owner": "harness",
                     "setup-outcome": "setup", "setup-owner": "setup", "product-blocked": "product",

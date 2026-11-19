@@ -1,7 +1,7 @@
 ---
 id: hook-suppression-by-session
 title: Isolate hook suppression by session
-proof: judged
+proof: replayed
 ---
 # Isolate hook suppression by session
 

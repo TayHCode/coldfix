@@ -96,7 +96,7 @@ def section(path, chars=400):
 
 def existing(store, coldlocker, ledger):
     rows = [dict(id="coldfix:" + row["lesson_id"], title=row["title"], rule=row["rule"][:400])
-            for row in c.latest_lessons(store).values()]
+            for row in store["lessons"].values() if row["status"] != "proposed"]
     shared = sorted(Path(FOLDER).glob("L*-*.md")) if FOLDER else []
     rows += [section(path) for path in shared if re.fullmatch(r"L\d+-.+\.md", path.name)]
     rows += [section(path) for path in sorted((coldlocker / "rules").glob("*.md")) if re.match(r"[a-z]", path.name)]
@@ -154,18 +154,25 @@ def group_prompt(rows):
 def controls(ledger_path, size=CONTROLS):
     db = sqlite3.connect("file:" + str(ledger_path) + "?mode=ro", uri=True)
     try:
-        digests = dict(db.execute("SELECT path, digest FROM scans WHERE status='scored' AND score < 0.2"))
+        found = db.execute("SELECT path, digest, status FROM scans WHERE status IN ('scored', 'fallback_scored') AND score < 0.2").fetchall()
+        boundary = db.execute("SELECT value FROM settings WHERE name='prescreen_rowid'").fetchone()
+        older = {row[0] for row in db.execute("SELECT path FROM scans WHERE rowid <= ?", (int(boundary[0]) if boundary else 2**62,))}
     finally:
         db.close()
+    digests = {path: digest for path, digest, _ in found}
+    fallback = {path for path, _, status in found if status == "fallback_scored"}
     out = []
-    for path in sorted(digests, key=lambda p: hashlib.sha256(p.encode()).hexdigest()):
+    for path in sorted(digests, key=lambda p: (p in fallback, hashlib.sha256(p.encode()).hexdigest())):
         try:
             raw = Path(path).read_bytes()
         except OSError:
             continue
         if hashlib.sha256(raw).hexdigest() != digests[path]:
             continue
-        rows = transcript_mistakes.excerpt(transcript_mistakes.read_messages(Path(path), raw))
+        full = [row for row in transcript_mistakes.read_messages(Path(path), raw) if row["role"] != "system"]
+        if path in older and set(transcript_mistakes.mistake_types(full)) - {"correction"}:
+            continue
+        rows = transcript_mistakes.excerpt(full)
         found = next((row["id"] for row in rows if row["role"] == "assistant" and len(row["text"]) >= 200), None)
         if found:
             out.append(dict(message=next(r["text"] for r in rows if r["id"] == found), context=context(rows, found)))
@@ -394,17 +401,26 @@ def run(root, coldlocker, scan_ledger, size, jev, route=model_route, ask=learn_d
             if len(texts) < CONTROLS and not waits_for_owner(lead["lesson"]):
                 lead.update(status="unprovable", reason="control messages unavailable")
                 continue
-            lead["status"], lead["reason"], lead["proof"] = prove(lead["lesson"], rows[key], replays.get(key), texts, judge)
+            for _ in range(2):
+                judged_by = getattr(jev, "model", jev_model)
+                lead["status"], lead["reason"], lead["proof"] = prove(lead["lesson"], rows[key], replays.get(key), texts, judge)
+                if lead["status"] == "proven":
+                    try:
+                        lead["proof"]["general"] = review(lead["lesson"], rows[key], judge)
+                    except Exception as error:
+                        lead.update(status="rejected", reason="jev review failed: " + type(error).__name__)
+                if getattr(jev, "model", jev_model) == judged_by:
+                    break
+            else:
+                lead.update(status="rejected", reason="jev check failed: judge changed mid-proof")
+                continue
             if lead["status"] == "proven":
                 lead["proof"]["replayed"] = replays[key]
-                lead["proof"]["judge"] = {"model": jev_model, "threshold": JEV_MIN, "prompt_sha256": JUDGE_PROMPT_SHA256}
-                try:
-                    lead["proof"]["general"] = review(lead["lesson"], rows[key], judge)
-                except Exception as error:
-                    lead.update(status="rejected", reason="jev review failed: " + type(error).__name__)
-                    continue
+                lead["proof"]["judge"] = {"model": judged_by, "threshold": JEV_MIN, "prompt_sha256": JUDGE_PROMPT_SHA256}
                 if lead["proof"]["general"] < JEV_MIN:
                     lead.update(status="rejected", reason="jev: not a general lesson")
+            if lead["status"] == "rejected" and getattr(jev, "fallen_back", False):
+                lead["reason"] = f"jev check failed: {judged_by} rejected: {lead['reason']}"
     batch["retried"], batch["skipped"] = 0, len(picked) - len(leads)
     outage = all(retry(lead, leads) for lead in leads.values())
     for key, lead in leads.items():
@@ -412,7 +428,9 @@ def run(root, coldlocker, scan_ledger, size, jev, route=model_route, ask=learn_d
         if retry(lead, leads):
             batch["retried"] += 1
             used = ledger["leads"].get(key, {}).get("attempts", 0)
-            ledger["leads"][key] = dict(lead, status="retry", attempts=used if outage else used + 1)
+            first = leads.get(lead["reason"].removeprefix("transcript:"), lead)
+            held = getattr(jev, "fallen_back", False) and first["reason"].startswith("jev check failed")
+            ledger["leads"][key] = dict(lead, status="retry", attempts=used if outage or held else used + 1)
         else:
             ledger["leads"][key] = lead
     batch.update(measure(leads))

@@ -1,10 +1,12 @@
 """Run automatic local checks without host filesystem, environment, or network access."""
 from contextlib import contextmanager
+import math
 import os
 from pathlib import Path
 import shlex
 import shutil
 import subprocess
+import tarfile
 import tempfile
 
 import coldfix as c
@@ -49,12 +51,40 @@ def sandbox(repo, argv, check=None):
     return [*command, '--', *argv]
 
 
-def unavailable():
+RUNNER = 'COLDFIX_REPLAY_RUNNER'
+RUNNER_SCRIPT = ('d=$(mktemp -d) || exit 2; trap \'rm -rf "$d"\' EXIT; tar -xf - -C "$d" || exit 2; '
+                 'cd "$d/repo" || exit 2; env -i PATH="$PATH" HOME="$d" PYTHONDONTWRITEBYTECODE=1 ')
+
+
+def runner():
+    template = os.environ.get(RUNNER, '').strip()
+    c.require(not template or '{script}' in template, RUNNER + ' must contain {script}')
+    return template or None
+
+
+def run(repo, argv, check, timeout, deadline=None):
+    template = runner()
+    if template is None:
+        return c.process(sandbox(repo, argv, check), timeout=c.remaining_timeout(timeout, deadline))
+    with tempfile.TemporaryFile() as payload:
+        with tarfile.open(fileobj=payload, mode='w') as archive:
+            archive.add(repo, arcname='repo')
+            archive.add(check, arcname='check')
+        payload.seek(0)
+        timeout = c.remaining_timeout(timeout, deadline)
+        limit = ['timeout', '-k', '5', str(max(1, math.ceil(timeout)))] if timeout is not None else []
+        script = (RUNNER_SCRIPT + shlex.join([*limit, *argv[:-1], '../check'])
+                  + ' >"$d/out" 2>"$d/err"; s=$?; cat "$d/out"; cat "$d/err" >&2; exit $s')
+        command = template.replace('{script}', shlex.quote(shlex.join(['sh', '-c', script])))
+        return c.process(['sh', '-c', command], timeout=timeout, stdin=payload)
+
+
+def unavailable(timeout=30):
     if shutil.which('bwrap') is None:
         return 'bwrap is not installed; ' + INSTALL_FIX
     with tempfile.TemporaryDirectory(prefix='coldfix-sandbox-') as temporary:
         try:
-            result = c.process(sandbox(Path(temporary), ['true']), timeout=30)
+            result = c.process(sandbox(Path(temporary), ['true']), timeout=timeout)
         except (OSError, subprocess.TimeoutExpired) as error:
             return f'bwrap could not start ({type(error).__name__}); ' + NAMESPACE_FIX
     if result.returncode == 0:
@@ -64,8 +94,13 @@ def unavailable():
     return f'bwrap cannot create the sandbox ({detail}); ' + NAMESPACE_FIX
 
 
-def require_sandbox():
-    reason = unavailable()
+def require_sandbox(deadline=None):
+    template = runner()
+    if template is not None:
+        c.remaining_timeout(None, deadline)
+        return dict(sandbox='off', runner=template)
+    reason = unavailable(c.remaining_timeout(30, deadline))
+    c.remaining_timeout(None, deadline)
     c.require(reason is None, f'sandbox unavailable: {reason}')
     return dict(sandbox='available')
 
@@ -79,14 +114,15 @@ def check_command(command):
     return ['python3', *argv[1:-1], '/retained-check'], check
 
 
-def replay_tree(repo, revision, scratch, command, expected_failure, timeout, reverse_patch=None):
-    require_sandbox()
+def replay_tree(repo, revision, scratch, command, expected_failure, timeout, reverse_patch=None, *, deadline=None):
+    require_sandbox(deadline)
     return c.replay_tree(repo, revision, scratch, command, expected_failure, timeout, reverse_patch,
-                         isolated=True)
+                         isolated=True, deadline=deadline)
 
 
 def witness_process(command, cwd=None, timeout=None):
-    require_sandbox()
+    reason = unavailable()
+    c.require(reason is None, f'sandbox unavailable: {reason}')
     with tempfile.TemporaryDirectory(prefix='coldfix-witness-') as temporary:
         copy = Path(temporary) / 'tree'
         shutil.copytree(cwd, copy, symlinks=True)

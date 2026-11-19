@@ -1,4 +1,5 @@
 import argparse
+import datetime
 import hashlib
 import json
 import os
@@ -286,6 +287,65 @@ class WithdrawalTests(Fixture, unittest.TestCase):
             dict(lesson='L43', result='unchecked', reason='judged: stored messages missing')]))
         self.assertFalse(self.rule.exists())
         self.assertNotIn(self.rule.name, agents.read_text())
+
+    def runs(self):
+        return [json.loads(line) for line in (self.store / lesson_delivery.RUNS).read_text().splitlines()]
+
+    def test_recheck_records_each_run_with_its_counts_and_rows(self):
+        self.deliver()
+        self.recheck()
+        self.break_witness()
+        self.recheck(code=1)
+        self.assertEqual([{k: v for k, v in run.items() if k != 'at'} for run in self.runs()], [
+            dict(delivered=1, passed=1, withdrawn=0, regression=0, retired=0, unchecked=0, gone=0,
+                 lessons=[self.row('passed', reason='witness passed')]),
+            dict(delivered=1, passed=0, withdrawn=1, regression=0, retired=0, unchecked=0, gone=0,
+                 lessons=[self.row('withdrawn')])])
+        self.assertTrue(all(datetime.datetime.fromisoformat(run['at']).tzinfo for run in self.runs()))
+
+    def test_a_lesson_that_passed_three_rechecks_in_a_row_is_checked_monthly(self):
+        self.deliver()
+        for _ in range(3):
+            self.recheck()
+        self.break_witness()
+        skipped = self.recheck()['lessons']
+        self.assertEqual([row['result'] for row in skipped], ['skipped'])
+        self.assertRegex(skipped[0]['reason'], r'^passed 3 rechecks in a row; next monthly check after \d{4}-\d\d-\d\d$')
+        self.assertEqual(self.delivery_states(), ['delivered'])
+        path = self.store / lesson_delivery.RUNS
+        month_ago = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(weeks=4)).isoformat()
+        path.write_text(''.join(json.dumps(dict(run, at=month_ago)) + '\n' for run in self.runs()))
+        self.assertEqual(self.recheck(code=1)['lessons'], [self.row('withdrawn')])
+
+    def test_a_recheck_that_does_not_pass_puts_the_lesson_back_on_weekly(self):
+        self.deliver()
+        for _ in range(3):
+            self.recheck()
+        path = self.store / lesson_delivery.RUNS
+        runs = self.runs()
+        runs[-1]['lessons'] = [self.row('unchecked', reason='rule not registered')]
+        path.write_text(''.join(json.dumps(run) + '\n' for run in runs) + 'not json\n')
+        self.assertEqual(self.recheck()['lessons'], [self.row('passed', reason='witness passed')])
+
+    def test_recheck_withdraws_a_regressed_lessons_folder_lesson_without_deleting_it(self):
+        self.deliver()
+        folder = self.cwd / 'lessons'
+        self.lesson_file(folder, 'L7-unproven.md', 'proven')
+        path = folder / 'L7-unproven.md'
+        import transcript_delivery
+        original = transcript_delivery.check_evidence
+        transcript_delivery.check_evidence = lambda meta, content, exists: dict(result='regression', reason='unproven: proven')
+        self.addCleanup(setattr, transcript_delivery, 'check_evidence', original)
+        args = argparse.Namespace(repo=str(self.repo), timeout=30.0, notes=None, lessons=str(folder))
+        _, store = coldfix.load_store(self.store)
+        result = lesson_delivery.recheck(args, self.store, store)
+        self.assertEqual((result['_exit'], result['withdrawn'], result['regression'], result['lessons'][-1]),
+                         (1, 1, 0, dict(lesson='L7', result='withdrawn', reason='unproven: proven')))
+        front = dict(line.split(': ', 1) for line in path.read_text().split('---\n')[1].splitlines() if ': ' in line)
+        self.assertEqual((front['status'], front['retired_by'], front['retired_reason']), ('retired', 'recheck', 'unproven: proven'))
+        self.assertEqual(self.runs()[-1]['lessons'][-1], dict(lesson='L7', result='withdrawn', reason='unproven: proven'))
+        again = lesson_delivery.recheck(args, self.store, store)
+        self.assertEqual((again['_exit'], again['lessons'][-1]), (0, dict(lesson='L7', result='retired', reason='retired by recheck')))
 
     def test_recheck_without_a_repo_reports_an_unreadable_target_unchecked(self):
         self.deliver()

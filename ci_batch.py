@@ -161,14 +161,37 @@ def known_runs(store_path):
                      for match in [RUN_ID.search(row.get("source_ref") or "")] if match)
 
 
-def public_repos(path, api=api):
+def repo_key(name):
+    value = re.sub(r"^[a-z]+://", "", name.strip().casefold()).strip("/ ").removeprefix("www.").removeprefix("github.com/")
+    parts = [part for part in value.split("/") if part]
+    return parts[0] + "/" + parts[1].removesuffix(".git") if len(parts) >= 2 else ""
+
+
+def opted_out(path):
+    try:
+        register = json.loads(c.read_text(path), object_pairs_hook=c.unique_object)
+    except ValueError:
+        raise c.ColdfixError("invalid Coldpass opt-out register") from None
+    c.require(isinstance(register, dict) and register.get("schema_version") == 1 and isinstance(register.get("repos"), list)
+              and all(isinstance(row, dict) and set(row) == {"repo", "date"} and isinstance(row["repo"], str)
+                      and repo_key(row["repo"]) and isinstance(row["date"], str)
+                      and re.fullmatch(r"\d{4}-\d{2}-\d{2}", row["date"]) for row in register["repos"]),
+              "invalid Coldpass opt-out register")
+    return frozenset(repo_key(row["repo"]) for row in register["repos"])
+
+
+def public_repos(path, api=api, optout=None):
     rows = json.loads(c.read_text(c.ordinary_path(path)))["repos"]
+    skip = opted_out(optout) if optout else frozenset()
     repos = []
     for row in rows:
         c.require(isinstance(row, dict) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_][A-Za-z0-9_.-]*",
                                                          str(row.get("repo"))), "invalid open-source repository entry")
+        if repo_key(row["repo"]) in skip:
+            continue
         meta = api(f"repos/{row['repo']}", missing="HTTP 404") or {}
-        if meta.get("private") is False and meta.get("visibility") == "public" and not meta.get("archived"):
+        if (meta.get("private") is False and meta.get("visibility") == "public" and not meta.get("archived")
+                and repo_key(meta["full_name"]) not in skip):
             repos.append(meta["full_name"])
     return sorted(repos)
 
@@ -214,6 +237,33 @@ def compare(repo, before, head, api):
     return api(f"repos/{repo}/compare/{before}...{head}", missing="HTTP 404") or {}
 
 
+def flagged_lines(comment, before):
+    end = comment.get("original_line")
+    start = comment.get("original_start_line")
+    if start is None:
+        start = end
+    if (before == comment.get("original_commit_id") and comment.get("side") == "RIGHT"
+            and comment.get("start_side") in (None, "RIGHT")
+            and type(start) is int and type(end) is int and 1 <= start <= end):
+        return dict(path=comment["path"], start_line=start, end_line=end)
+    return {}
+
+
+def refetch_flagged_lines(pairs, api):
+    found = 0
+    for pair in pairs:
+        finding = learn_replay.FINDING.fullmatch(str(pair.get("finding_url", "")))
+        if not finding or "path" in pair:
+            continue
+        try:
+            comment = api(f"repos/{finding[1]}/pulls/comments/{finding[3]}", missing="HTTP 404")
+            pair.update(flagged_lines(comment or {}, pair.get("before")) or dict(path=None))
+        except failure_ingest.SOURCE_ERRORS:
+            continue
+        found += isinstance(pair["path"], str)
+    return found
+
+
 def review_findings(ledger, repos, size, api=api):
     quota = max(1, size // max(1, len(repos)))
     seen = set(ledger.setdefault("pulls_seen", []))
@@ -256,7 +306,8 @@ def review_findings(ledger, repos, size, api=api):
                     if (diff.get("status") != "ahead" or not adds_test(diff) or only_tests(diff, True)
                             or comment.get("path") not in {row.get("filename") for row in diff.get("files", [])}):
                         continue
-                    pairs.append(dict(repo=repo, before=before, after=head, finding_url=comment["html_url"]))
+                    pairs.append(dict(repo=repo, before=before, after=head, finding_url=comment["html_url"],
+                                      **flagged_lines(comment, before)))
                     events.append(c.event_record(dict(kind="review", command="PR review finding", error=comment["body"],
                                                       repo=repo, agent="oss-review", source_ref=comment["html_url"],
                                                       occurred=comment["created_at"]), "github"))
@@ -296,6 +347,7 @@ def ingest(root, ledger, owner, size, api, fetch, known=frozenset(), public=None
             del ledger["seen"][number]
     pairs_path = root / PAIRS
     pairs = json.loads(c.read_text(pairs_path)) if pairs_path.exists() else dict(results=[])
+    refetched = refetch_flagged_lines(pairs["results"], api) if public is not None else 0
     pairs["results"] += kept + reviews
     c.atomic_create(pairs_path, c.encoded(pairs), replace=True)
     entry = dict(batch=batch, considered=considered, fix_pairs=len(picked), ingested=len(ids),
@@ -304,7 +356,7 @@ def ingest(root, ledger, owner, size, api, fetch, known=frozenset(), public=None
         learn_collect.import_reviews(root, findings)
         urls = {row["source_ref"] for row in findings}
         ids += [ref for ref, row in c.load_store(root)[1]["failures"].items() if row.get("source_ref") in urls]
-        entry.update(pulls_examined=pulls, review_pairs=len(reviews))
+        entry.update(pulls_examined=pulls, review_pairs=len(reviews), flagged_refetched=refetched)
     entry["ids"] = sorted(set(ids))
     return entry
 
@@ -324,12 +376,18 @@ def cheap_only(ask):
     return guarded
 
 
-def learn(root, entry, owner, ask, timeout, reserved_rules=None, public=()):
+def learn(root, entry, owner, ask, timeout, reserved_rules=None, public=None):
     stalled, summary = 0, dict(candidates=0)
     while stalled < DRAFT_TRIES:
         before = learn_daily_ledger(root)
         day = f"backlog-{entry['batch']}-{len(before['runs'])}"
-        summary = learn_daily.run(root, day, ask=cheap_only(ask), reserved_rules=reserved_rules)
+        with c.held_store(root):
+            if public is not None:
+                allowed = {repo_key(name) for name in public}
+                failures = c.load_store(root)[1]["failures"]
+                for key in [key for key, row in failures.items() if repo_key(row["repo"]) not in allowed]:
+                    del failures[key]
+            summary = learn_daily.run(root, day, ask=cheap_only(ask), reserved_rules=reserved_rules)
         c.require("error" not in summary, "drafting failed: " + str(summary.get("error")))
         if not summary.get("candidates"):
             break
@@ -338,7 +396,7 @@ def learn(root, entry, owner, ask, timeout, reserved_rules=None, public=()):
     merge_evidence(root, set(entry["ids"]))
     with learn_replay.replay_isolation.source_workspace(root, ".backlog-sources-") as workspace, \
             tempfile.TemporaryDirectory(prefix=".backlog-projects-", dir=root) as empty:
-        sources = learn_replay.SourceProjects(Path(empty), workspace, owner, timeout, public)
+        sources = learn_replay.SourceProjects(Path(empty), workspace, owner, timeout, public or ())
         replay = learn_replay.run_in_workspace(root, learn_daily_ledger(root), sources, root / PAIRS, timeout, history=False, unbounded=True)
     entry.update(replay=replay, learned=True, undrafted=summary.get("candidates", 0), **measure(root, set(entry["ids"])))
 
@@ -387,10 +445,11 @@ def run(root, owner, size, *, api=api, fetch=failure_ingest.fetch, ask=learn_dai
         if not fresh["ingested"] and fresh.get("ingest_errors") and not fresh.get("review_pairs"):
             save()
             raise c.ColdfixError("no failure in the batch could be ingested: " + json.dumps(fresh["ingest_errors"]))
-        if not fresh["fix_pairs"] and not fresh["considered"] and not fresh.get("pulls_examined"):
+        if (not fresh["fix_pairs"] and not fresh["considered"] and not fresh.get("pulls_examined")
+                and not fresh.get("flagged_refetched")):
             save()
             return ["ci-backlog: no new fix pairs left in GitHub CI history"]
-        if not fresh["ingested"] and not fresh.get("review_pairs"):
+        if not fresh["ingested"] and not fresh.get("review_pairs") and not fresh.get("flagged_refetched"):
             save()
             return [f"ci-backlog: no new fix pairs to learn from; considered {fresh['considered']} failures, "
                     f"{fresh['fix_pairs']} fix pairs, screened {json.dumps(fresh['screened'], sort_keys=True)}"]
@@ -398,7 +457,7 @@ def run(root, owner, size, *, api=api, fetch=failure_ingest.fetch, ask=learn_dai
         save()
     entry = ledger["batches"][-1]
     if not entry["learned"]:
-        learn(root, entry, owner, ask, timeout, reserved_rules, public or ())
+        learn(root, entry, owner, ask, timeout, reserved_rules, public)
     lines = [journal(entry)]
     streak = next((index for index, row in enumerate(reversed(ledger["batches"])) if row.get("proven")), len(ledger["batches"]))
     if streak >= ZERO_STREAK:
@@ -416,14 +475,16 @@ def main(argv=None):
     source.add_argument("--repos", help="JSON list of public open-source repositories to learn from, read-only")
     parser.add_argument("--size", type=int, default=100)
     parser.add_argument("--skip-store", help="store whose already-collected runs are not selected again")
+    parser.add_argument("--optout", help="Coldpass opt-out register; listed repositories are never learned from")
     args = parser.parse_args(argv)
     c.require(0 < args.size <= 200, "batch size must be between 1 and 200")
+    c.require(not args.repos or args.optout, "--repos needs the Coldpass --optout register")
     root = c.ordinary_path(args.store)
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
     live = c.ordinary_path(args.skip_store) if args.skip_store else root
     with c.lesson_lock(live, name=".learn-daily.lock"), c.lesson_lock(root, name=".backlog.lock"):
         reserved = learn_daily.peer_rules(args.skip_store)
-        public = public_repos(args.repos) if args.repos else None
+        public = public_repos(args.repos, optout=args.optout) if args.repos else None
         for line in run(root, args.owner, args.size, known=known_runs(args.skip_store), reserved_rules=reserved, public=public):
             print(line, flush=True)
     return 0

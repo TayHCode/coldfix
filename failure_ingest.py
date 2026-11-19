@@ -4,6 +4,7 @@
 from datetime import datetime, timezone
 import json
 import math
+import os
 import re
 import subprocess
 import sys
@@ -83,9 +84,12 @@ def classify(log, reported=None, retry=None):
                 rules=[rule for _, rule in matches])
 
 
-LOG_PREFIX = re.compile(r"^(?:[^\t\n]*\t[^\t\n]*\t)?\ufeff?(?:\d{4}-\d\d-\d\dT[0-9:.]+Z )?")
+LOG_PREFIX = re.compile(r"^(?:(?P<step>[^\t\n]*\t[^\t\n]*)\t)?\ufeff?(?:(?P<time>\d{4}-\d\d-\d\dT[0-9:.]+Z) )?")
 VERIFY_FAILED = "FAIL: real verification command failed"
 FLEET_VERIFY = "./.fleet/verify.sh"
+RUN_GROUP = "##[group]Run "
+EXIT_ERROR = re.compile(r"##\[error\]Process completed with exit code [1-9]\d*\.")
+LOG_COLOR = re.compile(r"(?:\x1b|\^\[)\[[0-9;]*m")
 
 
 def log_lines(log):
@@ -96,12 +100,61 @@ def failing_command(log):
     return FLEET_VERIFY if VERIFY_FAILED in log_lines(log) else None
 
 
+def recordable_step_command(command):
+    return (len(command) <= TAIL and command.isprintable() and "***" not in command
+            and not c.privacy_counts(command, filename_exempt=True))
+
+
+def failed_step_commands(log, jobs):
+    conclusions, windows = {}, {}
+    for job in jobs:
+        for step in job.get("steps") or []:
+            key = job["name"] + "\t" + step["name"]
+            conclusion = step["conclusion"]
+            conclusions.setdefault(key, set()).add(conclusion)
+            if step.get("started_at") and step.get("completed_at"):
+                windows.setdefault(job["name"], []).append(
+                    (step["started_at"][:19], step["completed_at"][:19], conclusion))
+    raw_job = jobs[0]["name"] if len(jobs) == 1 else None
+    step, header, echoed, command, began = None, "", "", "", ""
+    commands = set()
+    for raw in log.split("\n"):
+        prefix = LOG_PREFIX.match(raw)
+        if prefix["step"] != step:
+            step, header, echoed, command = prefix["step"], "", "", ""
+        when = (prefix["time"] or "")[:19]
+        line = raw[prefix.end():].strip()
+        if line.startswith("##[group]") or line == "Post job cleanup.":
+            header = line.removeprefix(RUN_GROUP) if line.startswith(RUN_GROUP) else ""
+            echoed, command, began = "", "", when
+        elif line.startswith("shell: ") and header:
+            if header == echoed:
+                command = header
+            header = ""
+        elif header:
+            if echoed or line.startswith("##["):
+                header = ""
+            else:
+                echoed = LOG_COLOR.sub("", line).strip()
+        elif command and EXIT_ERROR.fullmatch(line):
+            if step is None or step.endswith("\tUNKNOWN STEP"):
+                job_name = raw_job if step is None else step.rsplit("\t", 1)[0]
+                failed = [conclusion for start, end, conclusion in windows.get(job_name, ())
+                          if start <= began <= when <= end] == ["failure"]
+            else:
+                failed = conclusions.get(step) == {"failure"}
+            if failed:
+                commands.add(command)
+            command = ""
+    return commands
+
+
 def recorded_command(failure):
     metadata = flakiness.metadata(failure)
     prefix = {"coldbox": "coldbox:", "verify-trace": "verify-trace:", "ci": "https://github.com/"}.get(metadata.get("type"))
     command = metadata.get("command") if prefix else None
     if prefix == "https://github.com/" and command is None:
-        command = failing_command(metadata.get("log_tail") or "")
+        command = failing_command(metadata.get("log_tail") or "") or metadata.get("failed_step_command")
     if command is not None:
         c.require(failure.get("source") == "failure-ingest" and failure.get("source_ref", "").startswith(prefix),
                   "untrusted recorded command")
@@ -110,7 +163,7 @@ def recorded_command(failure):
 
 def ci_event(row):
     fields(row, "type repo run_id workflow job head_sha pr runner duration_seconds attempt conclusion occurred log_tail",
-           "jobs retry_evidence check command repository_id")
+           "jobs retry_evidence check command failed_step_command repository_id")
     need(row["type"] == "ci")
     repo = repo_name(row["repo"])
     for key in ("workflow", "job", "runner"):
@@ -122,6 +175,9 @@ def ci_event(row):
     if "check" in row:
         line(row["check"])
     need(row.get("command", FLEET_VERIFY) == FLEET_VERIFY)
+    if "failed_step_command" in row:
+        command = line(row["failed_step_command"])
+        need(row["conclusion"] in FAILED and recordable_step_command(command))
     if "repository_id" in row:
         integer(row["repository_id"])
     need(row["pr"] is None or type(row["pr"]) is int and row["pr"] > 0)
@@ -289,6 +345,24 @@ def record(event):
     return c.validate(row, "failures", row["id"])
 
 
+def same_import(previous, incoming):
+    before, after = ({key: value for key, value in row.items() if key != "created"}
+                     for row in (previous, incoming))
+    if before == after:
+        return True
+    old, new = flakiness.metadata(before), flakiness.metadata(after)
+    field = "failed_step_command"
+    if (before["source"] != "failure-ingest" or after["source"] != "failure-ingest"
+            or old.get("type") != "ci" or new.get("type") != "ci"
+            or (field in old) == (field in new)):
+        return False
+    enriched, metadata = (before, old) if field in old else (after, new)
+    del metadata[field]
+    enriched["error"] = c.encoded(metadata).strip()
+    enriched["group_id"] = enriched["signature"] = c.group_id(enriched)
+    return before == after
+
+
 def import_records(root, records):
     from flakiness import collection
 
@@ -299,7 +373,7 @@ def import_records(root, records):
         for row in records:
             previous = seen.get(row["id"])
             if previous is not None:
-                need({k: v for k, v in previous.items() if k != "created"} == {k: v for k, v in row.items() if k != "created"})
+                need(same_import(previous, row))
             else:
                 pending.append(row)
                 seen[row["id"]] = row
@@ -323,17 +397,18 @@ def failed_log(github, run_id, attempt, jobs, whole=True):
     if whole:
         log = gh(["run", "view", str(run_id), "--repo", "github.com/" + github.repo, "--attempt", str(attempt), "--log-failed"],
                  raw=True, missing=("log not found", "HTTP 410:") if jobs else "log not found")
-        if log is not None:
-            return log
+        if log is not None and log.strip():
+            return log, failed_step_commands(log, jobs)
     if not jobs:
-        return f"GitHub kept no log for run {run_id} attempt {attempt} and listed no failed jobs"
-    return "\n".join(job_log(github, job, TAIL // len(jobs)) for job in jobs)
+        return f"GitHub kept no log for run {run_id} attempt {attempt} and listed no failed jobs", set()
+    logs, commands = zip(*(job_log(github, job, TAIL // len(jobs)) for job in jobs))
+    return "\n".join(logs), set().union(*commands)
 
 
 def job_log(github, job, size):
     log = gh(["api", f"repos/{github.repo}/actions/jobs/{job['id']}/logs"], raw=True, missing=("HTTP 404", "HTTP 410:", "HTTP 410)"))
     if log is not None:
-        return log[-size:]
+        return log[-size:], failed_step_commands(log, [job])
     notes, page = [], 1
     while True:
         batch = github.api(f"repos/{github.repo}/check-runs/{job['id']}/annotations?per_page=100&page={page}")
@@ -347,7 +422,7 @@ def job_log(github, job, size):
     need(bool(messages))
     lines = [f"{job['name']}: GitHub kept no log; unfinished or failed steps: {', '.join(steps) or 'none'}"]
     lines += [f"{job['name']}: {message}" for message in messages]
-    return "\n".join(lines)[-size:]
+    return "\n".join(lines)[-size:], set()
 
 
 def fetch(repo, run_id, expected_attempt=None, hold=lambda jobs: None, covered=frozenset()):
@@ -388,7 +463,7 @@ def fetch(repo, run_id, expected_attempt=None, hold=lambda jobs: None, covered=f
     # Multiple PR associations cannot be reduced to one number without losing evidence.
     need(len(numbers) <= 1)
     started, completed = instant(run["run_started_at"]), instant(run["updated_at"])
-    log = failed_log(github, run_id, attempt, failed, whole=not reported)
+    log, step_commands = failed_log(github, run_id, attempt, failed, whole=not reported)
     need(bool(log.strip()))
     row = dict(type="ci", repo=repo, run_id=run_id, workflow=run["name"],
                job="; ".join(job["name"] for job in jobs) or "unknown",
@@ -398,8 +473,13 @@ def fetch(repo, run_id, expected_attempt=None, hold=lambda jobs: None, covered=f
                attempt=attempt, conclusion=run["conclusion"], occurred=completed, log_tail=log[-TAIL:])
     if jobs:
         row["jobs"] = jobs
-    if failing_command(log):
-        row["command"] = failing_command(log)
+    command = failing_command(log)
+    if command:
+        row["command"] = command
+    elif len(step_commands) == 1:
+        command = step_commands.pop()
+        if recordable_step_command(command):
+            row["failed_step_command"] = command
     row["repository_id"] = integer(run["repository"]["id"])
     return record(ci_event(row))
 
@@ -408,15 +488,30 @@ def poll(root, repos, limit, workflow=None):
     _, store = c.load_store(root)
     known = {row["id"] for row in store["failures"].values() if row["source"] == "failure-ingest"}
     covered = set()
+    missing_logs = {}
+    diagnostic_receipts = set()
+    ci_command = os.environ.get("COLDFIX_CI_COMMAND", "")
     for row in store["failures"].values():
         if not row.get("source_ref", "").startswith("coldbox:"):
             continue
         try:
             metadata = json.loads(row["error"])
             github = metadata.get("github") or {}
-            covered.add((metadata["id"], metadata["repo"], str(github["run_id"]), str(github["run_attempt"])))
+            if ci_command and re.search(r"(?:^|/)" + re.escape(ci_command) + r"(?:\s|$)", metadata.get("command", "")):
+                diagnostic_receipts.add((metadata["id"], metadata["repo"], str(github["run_id"]), str(github["run_attempt"])))
+                repo = repo_name(metadata["repo"])
+                run_id, attempt = int(github["run_id"]), int(github["run_attempt"])
+                integer(run_id)
+                integer(attempt)
+                ref = f"https://github.com/{repo}/actions/runs/{run_id}#attempt-{attempt}"
+                if record_id(ref) not in known:
+                    missing_logs[ref] = [repo, dict(databaseId=run_id, attempt=attempt,
+                                                   conclusion="failure", workflowName=github.get("workflow"))]
+            else:
+                covered.add((metadata["id"], metadata["repo"], str(github["run_id"]), str(github["run_attempt"])))
         except (ValueError, KeyError, TypeError, AttributeError):
             continue
+    covered -= diagnostic_receipts
     ledger = root / "collected-receipts.json"
     seen = json.loads(ledger.read_text()) if ledger.exists() else {}
     collected = {name.removesuffix(".json") for name in seen if isinstance(seen, list) or seen[name] == "imported"}
@@ -435,10 +530,14 @@ def poll(root, repos, limit, workflow=None):
             unlisted += 1
             continue
         listed = {f"https://github.com/{repo}/actions/runs/{run.get('databaseId')}#attempt-{run.get('attempt')}" for run in runs}
-        runs = runs + [run for ref, (owner, run) in deferred.items() if owner == repo and ref not in listed]
+        runs = runs + [run for ref, (owner, run) in deferred.items() if owner == repo and ref not in listed and ref not in missing_logs]
+        runs += [run for ref, (owner, run) in missing_logs.items()
+                 if owner == repo and ref not in listed
+                 and (ref not in deferred or deferred[ref][1].get("retry_after", 0) <= now.timestamp())
+                 and (workflow is None or run.get("workflowName") in (None, workflow))][:limit]
         seen = set()
         for run in runs:
-            if workflow is not None and run.get("workflowName") != workflow:
+            if workflow is not None and run.get("workflowName") not in (None, workflow):
                 continue
             integer(run["databaseId"])
             integer(run["attempt"])
@@ -479,7 +578,9 @@ def poll(root, repos, limit, workflow=None):
                 result = import_records(root, [row])
             except SOURCE_ERRORS:
                 failed += 1
-                if expired:
+                if ref in missing_logs:
+                    deferred[ref] = [repo, dict(run, retry_after=now.timestamp() + DEFERRED_RETRY_SECONDS)]
+                elif expired:
                     deferred.pop(ref, None)
                 continue
             deferred.pop(ref, None)

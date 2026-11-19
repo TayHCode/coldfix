@@ -150,11 +150,38 @@ def unbounded(pattern):
     return False
 
 
+def scoped(op, value, flags):
+    return (flags | value[1]) & ~value[2] if op == constants.SUBPATTERN else flags
+
+
+def starts_at_input_start(sequence, flags):
+    while sequence and sequence[0][0] == constants.SUBPATTERN:
+        flags = scoped(*sequence[0], flags)
+        sequence = sequence[0][1][-1]
+    return bool(sequence) and sequence[0][0] == constants.AT and (
+        sequence[0][1] == constants.AT_BEGINNING_STRING or sequence[0][1] == constants.AT_BEGINNING and not flags & re.MULTILINE)
+
+
+def repeats_single_characters(pattern, flags):
+    for op, value in pattern:
+        if unbounded_repeat(op, value) and not (len(flatten(value[2])) == 1 and charset(flatten(value[2])[0], flags) is not None):
+            return False
+        if not all(repeats_single_characters(child, flags) for child in children(op, value)):
+            return False
+    return True
+
+
+def runs_once_without_backtracking(sequence, flags):
+    return starts_at_input_start(sequence, flags) and repeats_single_characters(sequence, flags)
+
+
 def nested(pattern, flags):
     for op, value in pattern:
-        if unbounded_repeat(op, value) and unbounded(value[2]) and ambiguous(flatten(value[2]), first(value[2], flags), flags):
+        if (unbounded_repeat(op, value) and not runs_once_without_backtracking(value[2], flags) and unbounded(value[2])
+                and ambiguous(flatten(value[2]), first(value[2], flags), flags)):
             return True
-        if op != getattr(constants, "ATOMIC_GROUP", None) and any(nested(child, flags) for child in children(op, value)):
+        if op != getattr(constants, "ATOMIC_GROUP", None) and any(
+                nested(child, scoped(op, value, flags)) for child in children(op, value)):
             return True
     return False
 

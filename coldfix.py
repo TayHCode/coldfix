@@ -51,13 +51,16 @@ ADMISSION_FIELDS = {"kind", "source_ref", "diagnostic", "test_paths", "test_sha2
 ID = re.compile(r"[0-9a-f]{32}\Z")
 GROUP = re.compile(r"[0-9a-f]{64}\Z")
 NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,62}\.md\Z")
-CREDENTIAL = re.compile(
-    r"""(?ix)(?:\b[\w-]*(?:secret|password|passwd|credential)[\w-]*["']?\s*[:=]\s*|--(?:secret|password|passwd)\s+|"""
+CREDENTIAL_KEYWORD = (
+    r"""(?:(?P<strict>\b[\w-]*(?:secret|password|passwd|credential)[\w-]*["']?\s*[:=]\s*|--(?:secret|password|passwd)\s+)|"""
     r"""(?:\b[\w-]*authorization[\w-]*["']?\s*[:=]\s*bearer\s+|\b[\w-]*(?:token|api[_-]?key|authorization)[\w-]*["']?\s*[:=]\s*|"""
     r"""--(?:token|api[-_]?key|authorization)\s+|\bbearer\s+)"""
-    r"""(?!(?:[a-z]+|\d+)[ \t]+[a-z]+(?:-[a-z]+)*(?:[,.;!?)]|\\?["'`])*(?:\s|\Z)))"""
-    r"""(?:\\?["'])?([^\s"'`,;]+?)(?=\\["']|[\s"'`,;]|\Z)"""
 )
+CREDENTIAL_VALUE = r"""(?:\\?["'])?(?P<value>[^\s"'`,;]+?)(?=\\["']|[\s"'`,;]|\Z)"""
+CREDENTIAL = re.compile(
+    CREDENTIAL_KEYWORD + r"""(?!(?:[a-z]+|\d+)[ \t]+[a-z]+(?:-[a-z]+)*(?:[,.;!?)]|\\?["'`])*(?:\s|\Z)))""" + CREDENTIAL_VALUE,
+    re.I | re.X)
+CREDENTIAL_EVERY_START = re.compile("(?=" + CREDENTIAL_KEYWORD + ")" + CREDENTIAL_VALUE + ")", re.I | re.X)
 SECRET_SHAPE = re.compile(
     r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|"
     r"sk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{20,}|AKIA[A-Z0-9]{16}|"
@@ -205,8 +208,8 @@ def model_environment():
     return {key: value for key, value in os.environ.items() if key not in ("GH_TOKEN", "GITHUB_TOKEN", "FLEET_GITHUB_APP")}
 
 
-def model_command(role, prompt, shape, cwd=None):
-    reply = process([*shlex.split(os.environ["COLDFIX_MODEL_CMD"]), role, json.dumps(shape)], cwd=cwd, timeout=1800,
+def model_command(role, prompt, shape, cwd=None, timeout=1800):
+    reply = process([*shlex.split(os.environ["COLDFIX_MODEL_CMD"]), role, json.dumps(shape)], cwd=cwd, timeout=timeout,
                     input=prompt.encode("utf-8"), env=model_environment())
     require(reply.returncode == 0, "COLDFIX_MODEL_CMD " + role + " failed")
     row = json.loads(reply.stdout.decode("utf-8"), object_pairs_hook=unique_object)
@@ -515,6 +518,8 @@ def check_pins(check_script, test_sha256, admission=None):
             names = data["names"]
             script, _, digest = regression_adapter.build_pytest_pair(data["path"], data["source_sha256s"], data["diagnostic"],
                                                                      data["message"])
+            if check_script == script.replace(regression_adapter.PYTEST_PAIR_TEMPLATE, regression_adapter.LEGACY_PYTEST_PAIR_TEMPLATE):
+                script = check_script
         elif data.get("mode") in ("existing", "existing_exact", "existing_pair", "existing_pair_exact"):
             names = data["names"]
             require(isinstance(names, list) and len(names) == 1, "invalid existing test identity")
@@ -524,9 +529,14 @@ def check_pins(check_script, test_sha256, admission=None):
             else:
                 script, _, digest = regression_adapter.build_existing_pair(data["path"], data["source_sha256s"], names[0], data["diagnostic"],
                                                                            exact=data["mode"] == "existing_pair_exact")
+            if check_script == regression_adapter.without_existing_reporting(script):
+                script = check_script
         else:
             names = sorted(set(regression_adapter.TEST_NAME.findall(data["patch"])))
             script, _, digest = regression_adapter.build(data["path"], data["patch"], names, data["diagnostic"])
+            if check_script in {script.replace(regression_adapter.TEMPLATE, older)
+                                for older in (regression_adapter.LEGACY_TEMPLATE, regression_adapter.PREVIOUS_TEMPLATE)}:
+                script = check_script
         return (script == check_script and digest == test_sha256 and data["names"] == names
                 and (admission is None or (admission["test_paths"] == [data["path"]]
                                            and admission["diagnostic"] == data["diagnostic"])))
@@ -671,8 +681,29 @@ def latest_lessons(store):
     return tips
 
 
+HELD_STORES = {}
+
+
+@contextmanager
+def held_store(root):
+    root = ordinary_path(root)
+    HELD_STORES[root] = None
+    try:
+        yield
+    finally:
+        HELD_STORES.pop(root, None)
+
+
 def load_store(root):
     root = ordinary_path(root)
+    if root in HELD_STORES:
+        if HELD_STORES[root] is None:
+            HELD_STORES[root] = read_store(root)
+        return root, HELD_STORES[root]
+    return root, read_store(root)
+
+
+def read_store(root):
     require(not root.exists() or root.is_dir(), "store must be a directory")
     result = {}
     # Reports publish last, so load their manifests before any immutable dependencies.
@@ -748,7 +779,7 @@ def load_store(root):
         validate_reports(result)
     except (ValueError, TypeError, KeyError, OverflowError, RecursionError):
         raise ColdfixError("corrupt measurement evidence; left unchanged") from None
-    return root, result
+    return result
 
 
 def new_record():
@@ -759,18 +790,25 @@ def save(root, collection, record):
     validate(record, collection, record["id"])
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
     atomic_create(root / collection / (record["id"] + ".json"), encoded(record))
+    held = HELD_STORES.get(ordinary_path(root))
+    if held is not None:
+        records = held[collection]
+        records[record["id"]] = json.loads(encoded(record))
+        ordered = sorted(records.items())
+        records.clear()
+        records.update(ordered)
 
 
 def public_text(value, failures):
     text(value, "export text")
     require(not any(ord(c) < 32 and c not in "\n\t" or ord(c) == 127 for c in value), "export text contains control characters")
-    require(not CREDENTIAL.search(value) and not SECRET_SHAPE.search(value), "export text contains possible credentials")
+    require(not credential_matches(value) and not SECRET_SHAPE.search(value), "export text contains possible credentials")
     for failure in failures:
         for field in ("command", "error", "repo", "agent", "thread", "source", "source_ref", "occurred"):
             if field not in failure:
                 continue
-            for match in CREDENTIAL.finditer(failure[field]):
-                require(match[1] not in value, "export text repeats a captured credential")
+            for match in credential_matches(failure[field]):
+                require(match["value"] not in value, "export text repeats a captured credential")
     return value
 
 
@@ -829,10 +867,23 @@ def repository_terms(label):
         path = label
     base = re.split(r"[/\\:]", unquote(path).rstrip("/\\"))[-1]
     base = re.sub(r"(?i)\.git$", "", base)
-    return {label, base} - {""}
+    parts = re.split(r"[/\\:]", unquote(path).rstrip("/\\"))
+    return {label, base, parts[-2] if len(parts) > 1 else ""} - {""}
 
 
-def privacy_sources(args, store):
+def credential_matches(text):
+    matches = [match for pattern in (CREDENTIAL, CREDENTIAL_EVERY_START) for match in pattern.finditer(text)]
+    return list({(match.start("value"), match["value"]): match
+                 for match in sorted(matches, key=lambda match: bool(match["strict"]))}.values())
+
+
+@functools.cache
+def blocking_captures(text):
+    return frozenset(match["value"] for match in credential_matches(text)
+                     if match["strict"] or not re.fullmatch(r"[A-Za-z]{1,3}", match["value"]))
+
+
+def privacy_sources(args, *stores):
     terms = {"denylist": denylist_terms(args.denylist) if args.denylist else [],
              "git_author": [], "private_repo": set(), "captured_credential": set()}
     histories = [*args.git_repo, *([args.release_check_repo] if args.public and args.release_check_repo else [])]
@@ -846,18 +897,25 @@ def privacy_sources(args, store):
             raise ColdfixError("privacy Git authors unavailable") from None
         require(names.strip(), "privacy Git history has no authors")
         terms["git_author"].extend(name.strip() for name in names.split("\x00") if name.strip())
+    for store in stores:
+        for record in [*store["failures"].values(), *store["receipts"].values()]:
+            terms["private_repo"].update(repository_terms(record["repo"]))
+        terms["captured_credential"].update(captured_credentials(store))
+    return terms
+
+
+def captured_credentials(store):
+    captured = set()
     for failure in store["failures"].values():
-        terms["private_repo"].update(repository_terms(failure["repo"]))
         for value in failure.values():
             if isinstance(value, str):
-                terms["captured_credential"].update(match[1] for match in CREDENTIAL.finditer(value))
+                captured.update(blocking_captures(value))
     # Replay diagnostics are private evidence too, including unrelated receipts.
     for receipt in store["receipts"].values():
-        terms["private_repo"].update(repository_terms(receipt["repo"]))
-        for row in (receipt["before"], receipt["after"]):
+        for row in (receipt["before"], receipt["after"], receipt.get("reversed") or {}):
             for field in ("stdout", "stderr"):
-                terms["captured_credential"].update(match[1] for match in CREDENTIAL.finditer(row[field]))
-    return terms
+                captured.update(blocking_captures(row.get(field, "")))
+    return captured
 
 
 def privacy_counts(value, terms=None, *, provenance=False, filename_exempt=False):
@@ -949,7 +1007,7 @@ def privacy_literal_counts(value, terms=None, *, provenance=False, filename_exem
     counts["hostname"] = sum(1 for match in PRIVACY_PATTERNS["hostname"].finditer(hostname_value)
                              if private_host(match[0], hostname_value[max(0, match.start() - 40):match.start()],
                                              hostname_value[match.end():match.end() + 1]))
-    counts["credential"] += len(CREDENTIAL.findall(value))
+    counts["credential"] += len(credential_matches(value))
     counts["ip"] = 0
     phone_parts = []
     last_address_end = 0
@@ -1454,15 +1512,48 @@ CONFIG_PATHS = set(CONFIG_KEYS) - {"format", "timeout"}
 FORMATS = ("jsonl", "agentfleet", "cold-review", "cold-verify", "coldbox", "run-result")
 
 
+def doctor():
+    import replay_isolation
+    name = fleet_cli()
+    value = dict(replay_isolation.require_sandbox(),
+                 fleet_cli=f"{name}: {FLEET_CLI_USE}" if name else f"off: set COLDFIX_FLEET_CLI to the command that {FLEET_CLI_USE}")
+    print(f"coldfix: private_hosts: {private_hosts_status()}", file=sys.stderr)
+    return value
+
+
+def ask(question):
+    if not sys.stdin.isatty():
+        return ""
+    print(question, end="", file=sys.stderr, flush=True)
+    return sys.stdin.readline().strip()
+
+
 def init_config(args):
+    for key, value in doctor().items():
+        print(f"coldfix: {key}: {value}", file=sys.stderr)
+    path = ordinary_path(args.store) / "config.json"
+    replace = args.force
+    if path.exists() and not replace:
+        if args.yes:
+            print(f"coldfix: kept existing {path}; rerun with --force to replace it", file=sys.stderr)
+            try:
+                return json.loads(read_text(path), object_pairs_hook=unique_object)
+            except (ValueError, TypeError, RecursionError):
+                raise ColdfixError("invalid config JSON") from None
+        replace = ask(f"{path} exists. Overwrite it? [y/N] ").lower() in ("y", "yes")
+        require(replace, "destination already exists; left unchanged")
     config = {key: getattr(args, key) for key in CONFIG_KEYS if getattr(args, key) is not None}
     require(args.timeout is None or math.isfinite(args.timeout) and args.timeout > 0, "invalid config key: timeout")
     if "repo" not in config:
-        config["repo"] = privacy_git(Path.cwd(), "rev-parse", "--show-toplevel").decode("utf-8").strip()
+        try:
+            config["repo"] = privacy_git(Path.cwd(), "rev-parse", "--show-toplevel").decode("utf-8").strip()
+        except ColdfixError:
+            config["repo"] = "" if args.yes else ask("Repository checkout to learn from: ")
+            require(config["repo"], "not inside a Git repository: run init in your repository or pass --repo")
     for key in CONFIG_PATHS & config.keys():
         if not (key == "input" and config[key] == "-" or key == "release_check" and os.sep not in config[key]):
             config[key] = str(ordinary_path(config[key]))
-    atomic_create(ordinary_path(args.store) / "config.json", encoded(config), replace=args.force)
+    atomic_create(path, encoded(config), replace=replace)
     return config
 
 
@@ -1778,6 +1869,14 @@ def check_problem(row, expected_failure):
     return f"check exited {row['exit']} with {shape}"
 
 
+def incomplete_cause(stderr, store):
+    causes = [line.removeprefix("INCOMPLETE: ").strip() for line in stderr.split("\n") if line.startswith("INCOMPLETE: ")]
+    if not causes or not causes[-1]:
+        return ""
+    terms = {"captured_credential": captured_credentials(store)}
+    return "cause withheld by the privacy screen" if privacy_counts(causes[-1], terms, filename_exempt=True) else causes[-1][:300]
+
+
 def incomplete_reason(rows, expected_failure):
     problems = [f"{side} {check_problem(row, expected_failure)}" for side, row in rows.items() if row["status"] == "INCOMPLETE"]
     return "; ".join(problems) + ". " + CHECK_CONTRACT.replace("<expected_failure>", expected_failure)
@@ -1795,8 +1894,10 @@ def check_status(exit_code, output, expected_failure):
     return "INCOMPLETE"
 
 
-def process(command, cwd=None, timeout=None, *, input=None, env=None):
-    with subprocess.Popen(command, cwd=cwd, stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL, stdout=subprocess.PIPE,
+def process(command, cwd=None, timeout=None, *, input=None, env=None, stdin=None):
+    if stdin is None:
+        stdin = subprocess.PIPE if input is not None else subprocess.DEVNULL
+    with subprocess.Popen(command, cwd=cwd, stdin=stdin, stdout=subprocess.PIPE,
                           stderr=subprocess.PIPE, start_new_session=True, env=env) as child:
         try:
             stdout, stderr = child.communicate(input=input, timeout=timeout)
@@ -1812,11 +1913,11 @@ def process(command, cwd=None, timeout=None, *, input=None, env=None):
         return subprocess.CompletedProcess(command, child.returncode, stdout, stderr)
 
 
-def replay_tree(repo, revision, scratch, command, expected_failure, timeout, reverse_patch=None, *, isolated=False):
+def replay_tree(repo, revision, scratch, command, expected_failure, timeout, reverse_patch=None, *, isolated=False, deadline=None):
     row = dict(commit="", tree="", status="INCOMPLETE", exit=None, stdout="", stderr="")
     try:
         for field, suffix in (("commit", "commit"), ("tree", "tree")):
-            result = process(["git", "-C", str(repo), "rev-parse", "--verify", "--end-of-options", (revision if field == "commit" else row["commit"]) + "^{" + suffix + "}"], timeout=timeout)
+            result = process(["git", "-C", str(repo), "rev-parse", "--verify", "--end-of-options", (revision if field == "commit" else row["commit"]) + "^{" + suffix + "}"], timeout=remaining_timeout(timeout, deadline))
             if result.returncode:
                 row.update(exit=result.returncode, stderr=result.stderr.decode("utf-8", errors="backslashreplace"))
                 return row
@@ -1826,18 +1927,18 @@ def replay_tree(repo, revision, scratch, command, expected_failure, timeout, rev
                           ["git", "-C", str(scratch), "fetch", "--quiet", "--no-tags", "--", str(repo), row["commit"]],
                           ["git", "-C", str(scratch), "-c", "core.hooksPath=" + os.devnull,
                            "checkout", "--quiet", "--detach", row["commit"]]):
-            result = process(operation, timeout=timeout)
+            result = process(operation, timeout=remaining_timeout(timeout, deadline))
             if result.returncode:
                 row.update(exit=result.returncode, stderr=result.stderr.decode("utf-8", errors="backslashreplace"))
                 return row
         if reverse_patch is not None:
             for operation in (["git", "-C", str(scratch), "apply", "-R", "--whitespace=nowarn", str(reverse_patch)],
                               ["git", "-C", str(scratch), "add", "-A"]):
-                result = process(operation, timeout=timeout)
+                result = process(operation, timeout=remaining_timeout(timeout, deadline))
                 if result.returncode:
                     row.update(exit=result.returncode, stderr=result.stderr.decode("utf-8", errors="backslashreplace"))
                     return row
-            result = process(["git", "-C", str(scratch), "write-tree"], timeout=timeout)
+            result = process(["git", "-C", str(scratch), "write-tree"], timeout=remaining_timeout(timeout, deadline))
             if result.returncode:
                 row.update(exit=result.returncode, stderr=result.stderr.decode("utf-8", errors="backslashreplace"))
                 return row
@@ -1845,9 +1946,9 @@ def replay_tree(repo, revision, scratch, command, expected_failure, timeout, rev
         if isolated:
             import replay_isolation
             argv, check = replay_isolation.check_command(command)
-            result = process(replay_isolation.sandbox(scratch, argv, check), timeout=timeout)
+            result = replay_isolation.run(scratch, argv, check, timeout, deadline)
         else:
-            result = process(command if isinstance(command, list) else ["sh", "-c", command], cwd=scratch, timeout=timeout)
+            result = process(command if isinstance(command, list) else ["sh", "-c", command], cwd=scratch, timeout=remaining_timeout(timeout, deadline))
         row.update(exit=result.returncode, stdout=result.stdout.decode("utf-8", errors="backslashreplace"),
                    stderr=result.stderr.decode("utf-8", errors="backslashreplace"))
         row["status"] = check_status(row["exit"], row["stdout"], expected_failure)
@@ -1923,10 +2024,15 @@ def replay(args, root, store):
             if not check_unchanged(check, previous["check_script"]):
                 row = dict(commit="", tree="", status="INCOMPLETE", exit=None, stdout="", stderr="Authored check changed")
             else:
-                executor = replay_isolation.replay_tree if coldpass_pair is not None else getattr(args, "replay_executor", replay_tree)
+                import replay_isolation
+                configured = coldpass_pair is not None or replay_isolation.runner() is not None
+                executor = replay_isolation.replay_tree if configured else getattr(args, "replay_executor", replay_tree)
                 row = executor(repo, revision, scratch / name, command, previous["expected_failure"], args.timeout, reverse)
                 if not check_unchanged(check, previous["check_script"]):
                     row["status"] = "INCOMPLETE"
+            cause = incomplete_cause(row["stderr"], store) if row["status"] == "INCOMPLETE" else ""
+            if cause:
+                row["stderr"] = "INCOMPLETE: " + cause + "\n"
             rows[name] = row
         before, after, reverted = rows["before"], rows["after"], rows.get("reversed")
     if coldpass_pair is not None:
@@ -2107,6 +2213,8 @@ def export_lessons(args, root, store):
 
 
 LIBRARY_SECTIONS = {"store": "## Repository-specific lessons", "transcript": "## Agent conduct lessons"}
+LIBRARY_PROOF = {"store": "replayed", "transcript": "judged (opinion)"}
+UNRERUNNABLE = ("judged", *LIBRARY_PROOF.values())
 
 
 def library_rule_texts(library):
@@ -2118,17 +2226,20 @@ def library_rule_texts(library):
     return known
 
 
-def library_candidates(args, root, store):
+def library_candidates(args, stores):
     from flakiness import detect
     import transcript_delivery
 
-    flaky = detect(store)[1]
-    invalidations = read_invalidations(root)
-    for row in sorted(latest_lessons(store).values(), key=lambda item: item["lesson_id"]):
-        if (row["status"] not in LIVE or row["verification"] != "proven" or flaky.intersection(row["evidence"])
-                or invalidations.get(row["lesson_id"]) == row["id"]):
-            continue
-        yield "store", row["title"], row["rule"], row["rule"]
+    def proven(root, store, terms):
+        flaky = detect(store)[1]
+        invalidations = read_invalidations(root)
+        for row in sorted(latest_lessons(store).values(), key=lambda item: item["lesson_id"]):
+            if (row["status"] not in LIVE or row["verification"] != "proven" or flaky.intersection(row["evidence"])
+                    or invalidations.get(row["lesson_id"]) == row["id"]):
+                continue
+            yield "store", row["title"], row["rule"], row["rule"], terms
+
+    yield from proven(*stores[0])
     if args.lessons:
         folder = ordinary_path(Path(args.lessons).expanduser())
         for name, meta in transcript_delivery.lessons(folder).items():
@@ -2138,7 +2249,9 @@ def library_candidates(args, root, store):
             rule = transcript_delivery.current_rule(content)
             verify = re.search(r"^## Verify[ \t]*\n(.*?)(?=^## |\Z)", content, re.M | re.S)
             body = rule + (f"\n\n## How to check\n\n{verify[1].strip()}" if verify else "")
-            yield "transcript", meta["title"], rule, body
+            yield "transcript", meta["title"], rule, body, stores[0][2]
+    for oss in stores[1:]:
+        yield from proven(*oss)
 
 
 def add_library_row(index, section, row):
@@ -2148,32 +2261,47 @@ def add_library_row(index, section, row):
     return index[:head] + index[head:end].rstrip("\n") + "\n" + row + "\n" + index[end:]
 
 
-def library_row(title, name):
+def library_row(title, name, proof):
     cell = re.sub(r"([\\|\[\]])", r"\\\1", title)
-    return f"| [{cell}]({name}/rule.md) | judged |"
+    return f"| [{cell}]({name}/rule.md) | {proof} |"
+
+
+def library_proof(text):
+    match = re.search(r"^proof: (.*)$", text.split("\n---\n", 1)[0], re.M)
+    return match[1] if match else None
 
 
 CHECK_ORDER = ("FAIL", "INCOMPLETE", "PASS", "NO_PORTABLE_CHECK")
 LIBRARY = Path(__file__).resolve().parent / "library"
 
 
-def check_library():
+def rule_fix(rule):
+    body = rule.split("\n## Fix\n", 1)[1] if "\n## Fix\n" in rule else rule.split("\n# ", 1)[-1].split("\n", 1)[-1]
+    return next((part.strip().replace("\n", " ") for part in body.split("\n\n") if part.strip()), "")
+
+
+def check_library(tree="."):
     spec = importlib.util.spec_from_file_location("library_rerun", LIBRARY / "rerun.py")
     rerun = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(rerun)
+    tree = Path(tree).resolve()
+    require(tree.is_dir(), "check needs a directory to scan")
     results = []
     for lesson in sorted(path for path in LIBRARY.iterdir() if (path / "rule.md").is_file()):
-        title = re.search(r"^title: (.+)$", read_text(lesson / "rule.md"), re.M)
+        rule = read_text(lesson / "rule.md")
+        title = re.search(r"^title: (.+)$", rule, re.M)
         result = {"lesson": lesson.name, "title": title[1] if title else lesson.name, "status": "NO_PORTABLE_CHECK", "hits": []}
         if (lesson / "scan.py").is_file():
             try:
-                report, reason = rerun.run_check(str(lesson / "scan.py"), os.getcwd()), None
+                report, reason = rerun.run_check(str(lesson / "scan.py"), str(tree)), None
             except rerun.Incomplete as error:
                 report, reason = None, error.args[0] if error.args else None
             hits = report.get("hits") if report else None
             hits_match = isinstance(hits, list) and all(isinstance(hit, str) for hit in hits) and bool(hits) == (report["status"] == "FAIL")
             if hits_match:
                 result.update(status=report["status"], hits=hits)
+                if hits:
+                    result["fix"] = report["fix"] if isinstance(report.get("fix"), str) and report["fix"] else rule_fix(rule)
             else:
                 result.update(status="INCOMPLETE", reason=str(reason or "the scan did not report a valid PASS or FAIL"))
         results.append(result)
@@ -2191,34 +2319,55 @@ def export_library(args, root, store):
     require(root != library and root not in library.parents, "export must be outside the private store")
     require(not args.public, "library export has no release-check gate; run release-check on the library separately")
     terms = privacy_sources(args, store)
+    stores = [(root, store, terms)]
+    oss_source = args.oss_store or os.environ.get("COLDFIX_OSS_STORE")
+    if oss_source:
+        oss = ordinary_path(Path(oss_source).expanduser())
+        require(oss.is_dir(), "OSS store not found")
+        oss_root, oss_store = load_store(oss)
+        require(oss_root != library and oss_root not in library.parents, "export must be outside the OSS store")
+        terms = privacy_sources(args, store, oss_store)
+        stores[0] = (root, store, terms)
+        stores.append((oss_root, oss_store, terms))
     known = library_rule_texts(library)
     index = read_text(library / "README.md")
     require(all(heading + "\n" in index for heading in LIBRARY_SECTIONS.values()), "library README lacks a lesson section")
     added, excluded, present = [], {}, 0
-    for section, title, rule, body in list(library_candidates(args, root, store)):
+    for section, title, rule, body, screen in list(library_candidates(args, stores)):
         if rule.strip() in known:
             present += 1
             name = known[rule.strip()]
+            path = library / name / "rule.md"
+            proof = library_proof(read_text(path))
+            if proof == "judged":
+                proof = LIBRARY_PROOF[section]
+                atomic_create(path, read_text(path).replace("\nproof: judged\n", f"\nproof: {proof}\n", 1), replace=True)
+                index = index.replace(f"]({name}/rule.md) | judged |", f"]({name}/rule.md) | {proof} |")
+                atomic_create(library / "README.md", index, replace=True)
             if f"]({name}/rule.md)" not in index:
-                index = add_library_row(index, section, library_row(title, name))
+                counts = privacy_counts(title, screen)
+                if counts:
+                    excluded[name] = "privacy screen: " + ", ".join(sorted(counts))
+                    continue
+                index = add_library_row(index, section, library_row(title, name, proof))
                 atomic_create(library / "README.md", index, replace=True)
             continue
         name = transcript_delivery.slug(title)
         if not name or (library / name).exists():
             excluded[name or title] = "slug already used by another library lesson"
             continue
-        counts = privacy_counts("\n".join([name, title, body]), terms)
+        counts = privacy_counts("\n".join([name, title, body]), screen)
         if counts:
             excluded[name] = "privacy screen: " + ", ".join(sorted(counts))
             continue
-        atomic_create(library / name / "rule.md", f"---\nid: {name}\ntitle: {title}\nproof: judged\n---\n# {title}\n\n{body}\n")
-        index = add_library_row(index, section, library_row(title, name))
+        atomic_create(library / name / "rule.md", f"---\nid: {name}\ntitle: {title}\nproof: {LIBRARY_PROOF[section]}\n---\n# {title}\n\n{body}\n")
+        index = add_library_row(index, section, library_row(title, name, LIBRARY_PROOF[section]))
         atomic_create(library / "README.md", index, replace=True)
         known[rule.strip()] = name
         added.append(name)
     result = {"already_in_library": present, "added": added, "excluded": excluded}
     if args.proofs:
-        result.update(prove_library_lessons(library, ordinary_path(Path(args.proofs).expanduser()), terms))
+        result.update(prove_library_lessons(library, ordinary_path(Path(args.proofs).expanduser()), stores[-1][2]))
     return result
 
 
@@ -2273,8 +2422,9 @@ def prove_library_lessons(library, proofs, terms):
     for draft in sorted(path for path in proofs.iterdir() if path.is_dir()):
         name, rule = draft.name, library / draft.name / "rule.md"
         text = read_text(rule) if rule.is_file() else ""
-        if "\nproof: judged\n" not in text.split("\n---\n", 1)[0] + "\n":
-            refused[name] = "not a judged library lesson"
+        proof = library_proof(text)
+        if proof not in UNRERUNNABLE:
+            refused[name] = "not a judged or replayed library lesson"
             continue
         with tempfile.TemporaryDirectory() as staging:
             snapshot = Path(staging) / "proof"
@@ -2285,9 +2435,10 @@ def prove_library_lessons(library, proofs, terms):
             shutil.rmtree(library / name / "fixtures", ignore_errors=True)
             shutil.copytree(snapshot / "fixtures", library / name / "fixtures", symlinks=True)
             shutil.copy(snapshot / "check.py", library / name / "check.py")
-        index = index.replace(f"]({name}/rule.md) | judged |", f"]({name}/rule.md) | rerunnable |")
+        rerunnable = "rerunnable (opinion)" if proof == LIBRARY_PROOF["transcript"] else "rerunnable"
+        index = index.replace(f"]({name}/rule.md) | {proof} |", f"]({name}/rule.md) | {rerunnable} |")
         atomic_create(library / "README.md", index, replace=True)
-        atomic_create(rule, text.replace("\nproof: judged\n", "\nproof: rerunnable\n", 1), replace=True)
+        atomic_create(rule, text.replace(f"\nproof: {proof}\n", f"\nproof: {rerunnable}\n", 1), replace=True)
         proved.append(name)
     return {"proved": proved, "proof_refused": refused}
 
@@ -2336,7 +2487,7 @@ def explain_transcript(name, root):
     lesson = lead.get("lesson", {})
     return dict(
         lesson=dict(id="transcript:" + key, title=lesson.get("title", ""), rule=lesson.get("rule", ""), kind=lesson.get("kind", ""),
-                    status=lead["status"], reason=lead.get("reason", ""), delivered_as=number or "",
+                    status=lead["status"], verification="judged (opinion)", reason=lead.get("reason", ""), delivered_as=number or "",
                     delivery=chain[0]["status"] if chain else ""),
         scope="transcript",
         evidence=[dict(id="transcript:" + other, source_ref=row.get("source_ref", ""))
@@ -2351,6 +2502,7 @@ def export(args, root, store):
     if args.format == "library":
         require(args.proposal is None and args.lesson is None, "library export adds every eligible lesson; omit --lesson")
         return export_library(args, root, store)
+    require(not args.oss_store, "--oss-store is for the library format")
     if args.proposal is None:
         return export_lessons(args, root, store)
     require(args.format == "coldlocker", "legacy proposals cannot enter the briefing")
@@ -2378,7 +2530,8 @@ def parser():
     result = Parser(description=__doc__)
     result.add_argument("--store", default=".coldfix", help="private local store (default: .coldfix in the current directory)")
     commands = result.add_subparsers(dest="action", required=True)
-    command = commands.add_parser("check", help="run the library's static portable checks on the current directory and list each hit as file:line")
+    command = commands.add_parser("check", help="run the library's static portable checks on a directory and list each hit as file:line with its fix")
+    command.add_argument("path", nargs="?", default=".", help="tree to scan (default: the current directory)")
     command.add_argument("--json", action="store_true", help="emit the results as JSON")
     commands.add_parser("doctor", help="check that the replay sandbox (bubblewrap) can run here and print the fix if not")
     command = commands.add_parser("setup", help="check the automatic loop's prerequisites and run its first pass")
@@ -2418,11 +2571,13 @@ def parser():
     command = commands.add_parser("measure", help="write private immutable outcomes and a per-run evidence report")
     command.add_argument("--input", help="private JSON labels, activation, coverage and run evidence; optional")
     command.add_argument("--window-days", type=int, default=30, help="equal before/after spans in days (default: 30)")
-    command = commands.add_parser("init", help="save stable learning settings")
+    command = commands.add_parser("init", help="run doctor, then save learning settings with defaults (repo: this Git checkout)")
     for key in CONFIG_KEYS:
         options = {"type": float} if key == "timeout" else {"choices": FORMATS} if key == "format" else {}
         command.add_argument("--" + key.replace("_", "-"), **options)
-    command.add_argument("--force", action="store_true")
+    overwrite = command.add_mutually_exclusive_group()
+    overwrite.add_argument("--force", action="store_true", help="replace an existing config without asking")
+    overwrite.add_argument("--yes", action="store_true", help="never prompt: keep an existing config and require a Git checkout or --repo")
     for action in ("ingest-and-propose", "learn"):
         command = commands.add_parser(action, help="ingest, draft, replay, and deliver proof-gated lessons")
         command.add_argument("--format", choices=FORMATS)
@@ -2492,6 +2647,9 @@ def parser():
     command.add_argument("--fix", required=True, help="nonsecret description of the repair")
     command.add_argument("--kind", choices=KINDS, default="test")
     command.add_argument("--timeout", type=float)
+    command.add_argument("--flagged-path", help="review finding: repository-relative file the finding flags")
+    command.add_argument("--flagged-start", type=int, help="review finding: first flagged line in the before revision")
+    command.add_argument("--flagged-end", type=int, help="review finding: last flagged line in the before revision")
     command = commands.add_parser("recheck", help="rerun every delivered lesson's witness, withdraw any that fail and list the rest as unchecked with a reason")
     command.add_argument("--repo", help="recheck only the deliveries to this repository (default: every delivery target)")
     command.add_argument("--lessons", help="shared lessons folder: re-judge its judged lessons with COLDFIX_MODEL_CMD judge or Jev (JEV_API_KEY) and look up the stated replay evidence of the rest")
@@ -2503,6 +2661,7 @@ def parser():
     source.add_argument("--lesson", help="lesson ID (uses its latest revision) or the latest revision ID")
     command.add_argument("--format", choices=("coldlocker", "briefing", "library"), default="coldlocker")
     command.add_argument("--lessons", help="library format: transcript lesson folder whose judged lessons join the library")
+    command.add_argument("--oss-store", help="library format: also read proven lessons from this open-source store, read-only")
     command.add_argument("--proofs", help="library format: folder of <lesson id>/check.py and fixtures/{bad,good}; a judged lesson becomes rerunnable when its check fails on bad and passes on good")
     command.add_argument("--output", required=True)
     command.add_argument("--reviewed", action="store_true", help=argparse.SUPPRESS)
@@ -2529,21 +2688,19 @@ def main(argv=None):
             print(install(args))
             return 0
         elif args.action == "check":
-            value = check_library()
+            value = check_library(args.path)
             if not args.json:
                 for result in value["lessons"]:
                     print(f"{result['status']}: {result['lesson']} ({result['title']})")
                     for hit in result["hits"] + ([result["reason"]] if "reason" in result else []):
                         print("  " + hit)
+                    if "fix" in result:
+                        print("  fix: " + result["fix"])
                 counts = [sum(result["status"] == status for result in value["lessons"]) for status in CHECK_ORDER]
                 print("{} with hits, {} incomplete, {} passed, {} with no portable check".format(*counts))
                 return value["_exit"]
         elif args.action == "doctor":
-            import replay_isolation
-            name = fleet_cli()
-            value = dict(replay_isolation.require_sandbox(),
-                         fleet_cli=f"{name}: {FLEET_CLI_USE}" if name else f"off: set COLDFIX_FLEET_CLI to the command that {FLEET_CLI_USE}")
-            print(f"coldfix: private_hosts: {private_hosts_status()}", file=sys.stderr)
+            value = doctor()
         elif args.action == "setup":
             from loop_setup import setup
             value = setup(args)

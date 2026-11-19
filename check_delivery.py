@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Deliver replay-proven CI lessons as checks in their source repository. A lesson whose proving test is on the
-default branch is recorded as delivered; its rule reaches agents there through `coldfix agents`. A generated proving test goes to a private repository as a one-file pull
+default branch is recorded as delivered; its rule reaches agents there through `coldfix agents`. A generated proving test goes to a private repository in a batched pull
 request built in a fresh clone, and is merged only when that repository's required checks are green. The proving test is
 the one named in the lesson's diagnostic, found at its recorded path or, when it moved, anywhere on the default branch.
 A lesson in an archived repository is retired. With --issues, each lesson still waiting 24 hours after it was proven gets
@@ -8,8 +8,9 @@ one issue in that private repository, closed once the lesson is delivered or ret
 stall check reads its `overdue` count, which leaves out retired and tracked lessons."""
 import argparse
 import ast
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -20,6 +21,7 @@ import tempfile
 from urllib.parse import quote
 
 import coldfix as c
+from failure_ingest import LOG_COLOR
 from learn_daily import LEDGER
 import learn_replay
 import regression_adapter
@@ -80,7 +82,7 @@ def proven(root, store, ledger):
     moved = replay_repos.load(root)
     latest = c.latest_lessons(store)
     invalidations = c.read_invalidations(root)
-    found = {}
+    found, failed = {}, set()
     for entry in ledger["drafts"].values():
         state = entry.get("replay", {})
         if state.get("status") not in ("proven", "delivered"):
@@ -91,9 +93,12 @@ def proven(root, store, ledger):
                 or invalidations.get(current["lesson_id"]) == current["id"]
                 or any(current[key] != lesson[key] for key in DELIVERED_FIELDS)):
             continue
+        receipt = store["receipts"][lesson["receipt"]]
+        if state["proof"].get("full_suite", {}).get("status") == "FAIL":
+            failed.add((lesson["lesson_id"], receipt["before"]["commit"], receipt["after"]["commit"]))
+            continue
         slugs = [moved.get(ref) or store["failures"][ref]["repo"] for ref in lesson["evidence"]]
         checkout = Path(state["repo"]).name.casefold()
-        receipt = store["receipts"][lesson["receipt"]]
         try:
             payload = regression_adapter.payload(lesson["check_script"])
         except ValueError:
@@ -101,9 +106,11 @@ def proven(root, store, ledger):
         found[lesson["lesson_id"]] = dict(
             lesson_id=lesson["lesson_id"], id=lesson["id"], created=lesson["created"], title=lesson["title"],
             rule=lesson["rule"], failure=lesson["failure"], fix=lesson["fix"], payload=payload,
+            cause=entry.get("draft", {}).get("cause", ""), prevention=entry.get("draft", {}).get("prevention", ""),
+            full_suite=state["proof"].get("full_suite"), drafter=entry.get("drafter", ""),
             scope=c.lesson_scope(lesson, store), before=receipt["before"]["commit"], after=receipt["after"]["commit"],
             repo=next((slug for slug in slugs if slug.split("/")[-1].casefold() == checkout), slugs[0]))
-    return list(found.values())
+    return [row for row in found.values() if (row["lesson_id"], row["before"], row["after"]) not in failed]
 
 
 def waiting(reason, **extra):
@@ -121,14 +128,27 @@ def require_private(slug):
         raise Unavailable(slug + " is no longer private, so Coldfix will not push or open a pull request there")
 
 
+def required_checks(slug, info):
+    branch = quote(info["defaultBranchRef"]["name"], safe="")
+    required = gh("api", f"repos/{slug}/branches/{branch}/protection/required_status_checks", "--jq", ".contexts[]")
+    if required.returncode and "HTTP 404" in required.stderr:
+        return set()
+    return set(done(required, "required checks lookup").splitlines()) - {""}
+
+
+def required_rollup(slug, info, rollup):
+    names = required_checks(slug, info)
+    found = [item for item in rollup if (item.get("name") or item.get("context")) in names]
+    missing = names - {item.get("name") or item.get("context") for item in found}
+    return found + [dict(name=name, state="PENDING") for name in sorted(missing)]
+
+
 def unwritable(slug, info):
     if info["isArchived"]:
         return "repository is archived"
     if info["visibility"] != "PRIVATE":
         return "public repository needs the owner's approval"
-    branch = quote(info["defaultBranchRef"]["name"], safe="")
-    required = gh("api", f"repos/{slug}/branches/{branch}/protection/required_status_checks", "--jq", ".contexts | length")
-    if required.returncode and "HTTP 404" in required.stderr or int(done(required, "required checks lookup")) == 0:
+    if not required_checks(slug, info):
         return "repository has no required checks"
     return None
 
@@ -194,111 +214,274 @@ def verdict(rollup):
     return "green" if "SUCCESS" in results and GREEN.issuperset(results) else "pending"
 
 
-def pull_request_body(lesson, path):
-    return "\n".join([
-        "Coldfix proved this lesson by replay. This adds its regression test so the same mistake fails this "
-        "repository's checks before it can land again.",
-        "",
-        "- **Lesson:** " + lesson["rule"],
-        "- **What went wrong:** " + lesson["failure"],
-        "- **Fix that passed:** " + lesson["fix"] + " (`" + lesson["after"][:12] + "`)",
-        "- **Proof:** the test fails on `" + lesson["before"][:12] + "` and passes on `" + lesson["after"][:12]
-        + "` (lesson `" + lesson["lesson_id"] + "`).",
-        "",
-        "## Testing",
-        "",
-        "This pull request's own checks run the new test on the default branch. Coldfix merges it only when every "
-        "check is green, and closes it when a check fails.",
-        "",
-        "## Risk",
-        "",
-        "Normal: adds one test file and changes no product code.",
-        "",
-        "## How to revert",
-        "",
-        "Delete `" + path + "`.",
-        "",
-    ])
+def lesson_path(key):
+    return "tests/test_coldfix_lesson_" + key[:12] + ".py"
 
 
-def pull_request(root, slug, base, lesson, source):
-    short = lesson["lesson_id"][:12]
-    head, path = "coldfix/lesson-" + short, "tests/test_coldfix_lesson_" + short + ".py"
-    prior = {row["state"]: row for row in gh_json("pr", "list", "--repo", slug, "--head", head, "--state", "all",
-                                                    "--json", "number,state,url,headRefOid,baseRefName,files")}
-    adopted = prior.get("OPEN") or prior.get("MERGED")
-    if adopted:
-        if adopted["state"] == "OPEN" and (adopted["baseRefName"] != base
-                                           or [row["path"] for row in adopted["files"]] != [path]
-                                           or file_at(slug, path, adopted["headRefOid"]) != source):
-            return waiting("a pull request on the lesson branch is not the lesson test", route="bot-pr", url=adopted["url"])
-        return dict(state="open", route="bot-pr", pr=adopted["number"], url=adopted["url"],
-                    head=adopted["headRefOid"], path=path)
-    if "CLOSED" in prior:
-        return waiting("bot pull request was closed unmerged", route="bot-pr", url=prior["CLOSED"]["url"])
-    title = "test: " + lesson["title"]
+def pull_request_body(lessons):
+    lines = ["Coldfix proved these lessons by replay. Each regression test failed before its fix and passed after it.", ""]
+    for lesson in lessons:
+        key = lesson["lesson_id"]
+        lines.append(f'- `{lesson_path(key)}` ({key}): {lesson["rule"]} '
+                     f'(red `{lesson["before"][:12]}`, green `{lesson["after"][:12]}`)')
+    builders = sorted({lesson["drafter"] for lesson in lessons if lesson.get("drafter")})
+    return "\n".join([*lines, "", *(f"Builder-Model: {model}" for model in builders), "", "## Claim", "",
+                      "Test-only regression pins for fixes already on main. No bug-fix claim; "
+                      "a base-fail repro is not expected.", "", "## Testing", "",
+                      "The repository checks run the added tests. Coldfix requires green checks before merging.",
+                      "Later additions cite their replay commits in the commit message.",
+                      "", "## Risk", "", "Normal. Adds regression tests.", "",
+                      "## How to revert", "", "Revert the squash commit.", ""])
+
+
+PR_FIELDS = "number,state,url,headRefName,headRefOid,baseRefName,isCrossRepository,changedFiles,files"
+LESSON_REF = re.compile(r"coldfix/lesson-[0-9a-f]{12}")
+
+
+def open_lesson_prs(slug):
+    return [pr for pr in gh_json("pr", "list", "--repo", slug, "--state", "open", "--limit", "1000", "--json", PR_FIELDS)
+            if LESSON_REF.fullmatch(pr["headRefName"]) and not pr["isCrossRepository"]]
+
+
+def pr_record(pr, key, batch):
+    return dict(state="open", route="bot-pr", pr=pr["number"], url=pr["url"],
+                head=pr["headRefOid"], path=lesson_path(key), batch=batch)
+
+
+def clone_branch(slug, branch, work, expected=None):
+    clone = Path(work) / "clone"
+    git("clone", "--quiet", "--depth", "1", "--branch", branch, "--", CLONE_URL.format(slug), clone)
+    if expected and git("-C", clone, "rev-parse", "HEAD").strip() != expected:
+        raise Unavailable("lesson pull request head moved")
+    return clone
+
+
+def push_tests(clone, slug, head, paths, title, expected):
+    identity = gh_json("api", f"repos/{slug}/commits?committer=web-flow&per_page=1", "--jq", ".[0].commit.committer")
+    if not identity:
+        raise Unavailable("repository has no GitHub automation commit to supply its identity")
+    git("-C", clone, "add", "--", *paths)
+    git("-C", clone, "-c", "user.name=" + identity["name"], "-c", "user.email=" + identity["email"],
+        "commit", "--quiet", "-m", title)
+    sha = git("-C", clone, "rev-parse", "HEAD").strip()
+    require_private(slug)
+    if expected is None:
+        tree = git("-C", clone, "rev-parse", "HEAD^{tree}").strip()
+        for branch in (head, "coldfix/lesson-" + tree[:12]):
+            ref = "refs/heads/" + branch
+            if not git("-C", clone, "ls-remote", "origin", ref):
+                head = branch
+                break
+            git("-C", clone, "fetch", "--quiet", "--depth", "1", "origin", ref)
+            if git("-C", clone, "rev-parse", "FETCH_HEAD^{tree}").strip() == tree:
+                return git("-C", clone, "rev-parse", "FETCH_HEAD").strip(), branch
+        else:
+            raise Unavailable("existing lesson branches have different files")
+    ref = "refs/heads/" + head
+    git("-C", clone, "push", "--quiet", "--force-with-lease=" + ref + ":" + (expected or ""),
+        "origin", "HEAD:" + ref)
+    return sha, head
+
+
+def lesson_branch(lesson):
+    key = lesson["lesson_id"]
+    if lesson.get("retry_closed"):
+        key = hashlib.sha256(("batch:" + key).encode()).hexdigest()
+    return "coldfix/lesson-" + key[:12]
+
+
+def publish(root, slug, base, candidates, sources, pr, known_empty=False):
+    rows, members = {}, {}
+    if pr:
+        if pr["changedFiles"] != len(pr["files"]):
+            raise Unavailable("lesson pull request file list is incomplete")
+        by_path = {lesson_path(key): key for key in sources}
+        for file in pr["files"]:
+            path = file["path"]
+            key = by_path.get(path)
+            if (pr["baseRefName"] != base or key is None or file.get("deletions", 0)
+                    or file_at(slug, path, pr["headRefOid"]) != sources[key]):
+                break
+            members[key] = sources[key]
+        else:
+            if members:
+                rows.update({key: pr_record(pr, key, len(members) > 1) for key in members})
+        if not rows and not (known_empty and not pr["files"] and pr["baseRefName"] == base):
+            return {key: waiting("a pull request on the lesson branch is not the lesson test",
+                                 route="bot-pr", url=pr["url"]) for key in candidates}
+    pending = {}
+    for key in candidates:
+        if key in rows:
+            continue
+        if not pr:
+            head = lesson_branch(candidates[key])
+            prior = {row["state"]: row for row in gh_json("pr", "list", "--repo", slug, "--head", head,
+                                                        "--state", "all", "--json", PR_FIELDS)}
+            if "OPEN" in prior:
+                raise Unavailable("a lesson pull request opened during delivery")
+            if "MERGED" in prior:
+                rows[key] = pr_record(prior["MERGED"], key, False)
+                continue
+            if "CLOSED" in prior:
+                rows[key] = waiting("bot pull request was closed unmerged", route="bot-pr", url=prior["CLOSED"]["url"])
+                continue
+        pending[key] = sources[key]
+    if not pending:
+        return rows
+    head = pr["headRefName"] if pr else lesson_branch(candidates[next(iter(pending))])
+    expected = pr["headRefOid"] if pr else None
+    title = "test: add Coldfix lesson regression tests"
     with tempfile.TemporaryDirectory(prefix=".check-delivery-", dir=root) as work:
-        clone = Path(work) / "clone"
-        git("clone", "--quiet", "--depth", "1", "--branch", base, "--", CLONE_URL.format(slug), clone)
-        target = c.ordinary_path(clone / path)
-        if not target.parent.is_dir() or target.exists():
-            return waiting("repository has no free tests/ path for the lesson test")
-        target.write_text(source, encoding="utf-8")
-        git("-C", clone, "add", "--", path)
-        git("-C", clone, "-c", "user.name=Coldfix", "-c", "user.email=coldfix@users.noreply.github.com",
-            "commit", "--quiet", "-m", title)
-        sha = git("-C", clone, "rev-parse", "HEAD").strip()
-        require_private(slug)
-        git("-C", clone, "push", "--quiet", "origin", "+HEAD:refs/heads/" + head)
-        body = Path(work) / "body.md"
-        body.write_text(pull_request_body(lesson, path), encoding="utf-8")
-        require_private(slug)
-        url = done(gh("pr", "create", "--repo", slug, "--base", base, "--head", head, "--title", title,
-                      "--body-file", str(body)), "gh pr create").strip().split("\n")[-1]
-    return dict(state="open", route="bot-pr", pr=int(url.rsplit("/", 1)[1]), url=url, head=sha, path=path)
+        clone = clone_branch(slug, head if pr else base, work, expected)
+        added = []
+        for key, source in pending.items():
+            path = lesson_path(key)
+            target = c.ordinary_path(clone / path)
+            if not target.parent.is_dir() or target.exists():
+                rows[key] = waiting("repository has no free tests/ path for the lesson test")
+                continue
+            target.write_text(source, encoding="utf-8")
+            members[key] = source
+            added.append(path)
+        if not added:
+            return rows
+        message = title
+        if pr:
+            message += "\n\n" + "\n".join(
+                f'{lesson_path(key)}: red {candidates[key]["before"]}, green {candidates[key]["after"]}'
+                for key in pending if lesson_path(key) in added)
+        sha, head = push_tests(clone, slug, head, added, message, expected)
+        if pr:
+            pr = dict(pr, headRefOid=sha)
+        else:
+            body = Path(work) / "body.md"
+            body.write_text(pull_request_body([candidates[key] for key in members]), encoding="utf-8")
+            require_private(slug)
+            url = done(gh("pr", "create", "--repo", slug, "--base", base, "--head", head, "--title", title,
+                          "--body-file", str(body)), "gh pr create").strip().split("\n")[-1]
+            pr = dict(number=int(url.rsplit("/", 1)[1]), url=url, headRefOid=sha)
+    rows.update({key: pr_record(pr, key, known_empty or len(members) > 1) for key in members})
+    return rows
 
 
-def settle(record, lesson, write, now):
+def check_output(slug, head, name):
+    runs = gh_json("api", f"repos/{slug}/commits/{head}/check-runs?check_name={quote(name)}&filter=latest&per_page=100")
+    return "\n".join(f'{(run.get("output") or {}).get("summary") or ""}\n{(run.get("output") or {}).get("text") or ""}'
+                     for run in runs["check_runs"] if run.get("conclusion") == "failure")
+
+
+def failed_paths(slug, rollup, paths, head):
+    failed = set()
+    for check in rollup:
+        conclusion = (check.get("conclusion") or "").upper()
+        if conclusion in {"CANCELLED", "TIMED_OUT"}:
+            print(f"check_delivery {slug}: skipped {conclusion.lower()} check {check.get('name')}: "
+                  "not a lesson test failure", file=sys.stderr)
+            continue
+        if conclusion not in {"FAILURE", "ERROR"}:
+            continue
+        job = re.fullmatch(r"https://github\.com/" + re.escape(slug) + r"/actions/runs/\d+/job/(\d+)",
+                           check.get("detailsUrl") or "", re.I)
+        if job:
+            output = done(gh("run", "view", "--repo", slug, "--job", job[1], "--log-failed"), "failed check log")
+            failure = r"(?m)(?:^|\s)(?:FAILED|ERROR|FAIL):? .*\b{}\b"
+        else:
+            output = check_output(slug, head, check["name"])
+            failure = r"could not discover unittest cases in \S*\b{0}\.py\b|\b{0}\.py::[\w.]+: base=\d+ head=[1-9]\d* \(regression\)"
+        output = LOG_COLOR.sub("", output)
+        for path in paths:
+            if re.search(failure.format(re.escape(Path(path).stem)), output):
+                failed.add(path)
+    return failed
+
+
+def obsolete_members(members, lessons):
+    return {key for key, row in members.items() if key not in lessons or row["revision"] != lessons[key]["id"]}
+
+
+def pull_status(slug, number):
+    return gh_json("pr", "view", str(number), "--repo", slug, "--json",
+                   "state,headRefOid,headRefName,baseRefName,mergeCommit,mergeStateStatus,statusCheckRollup,createdAt")
+
+
+def settle(root, members, lessons, write, now, pr=None, failed=None):
+    record = next(iter(members.values()))
     number, slug = str(record["pr"]), record["repo"]
     info = repository(slug, {})
-    pr = gh_json("pr", "view", number, "--repo", slug, "--json",
-                 "state,headRefOid,mergeCommit,mergeStateStatus,statusCheckRollup,createdAt")
+    pr = pr or pull_status(slug, number)
     if pr["state"] == "MERGED":
-        proving = PROVING_TEST.fullmatch(lesson["payload"]["diagnostic"])
-        if on_default_branch(slug, info["defaultBranchRef"]["name"], record["path"], proving):
-            return dict(record, state="delivered", commit=pr["mergeCommit"]["oid"])
-        return record
-    if pr["state"] != "OPEN":
-        return waiting("bot pull request was closed unmerged", route="bot-pr", url=record["url"])
-    if pr["headRefOid"] != record["head"] or not write:
-        return record
-    blocked = unwritable(slug, info)
-    if (not blocked or blocked == "repository has no required checks") and now - c.time_key(pr["createdAt"]) >= STALE:
-        done(gh("pr", "close", number, "--repo", slug, "--delete-branch", "--comment",
-                "This lesson test made no progress for 7 days, so Coldfix is closing it without merging."), "gh pr close")
-        return waiting("bot pull request made no progress for 7 days", route="bot-pr", url=record["url"])
-    if blocked:
-        return record
-    checks = verdict(pr["statusCheckRollup"])
-    if checks == "red":
-        done(gh("pr", "close", number, "--repo", slug, "--delete-branch", "--comment",
-                "A check failed on the lesson test, so Coldfix is closing this without merging."), "gh pr close")
-        return waiting("repository checks failed on the lesson test", route="bot-pr", url=record["url"])
-    if checks != "green" or pr["mergeStateStatus"] != "CLEAN":
-        return record
-    done(gh("pr", "merge", number, "--repo", slug, "--squash", "--delete-branch",
-            "--match-head-commit", record["head"]), "gh pr merge")
-    return record
+        for key, row in members.items():
+            if key in lessons:
+                proving = PROVING_TEST.fullmatch(lessons[key]["payload"]["diagnostic"])
+                if on_default_branch(slug, info["defaultBranchRef"]["name"], row["path"], proving):
+                    members[key] = dict(row, state="delivered", commit=pr["mergeCommit"]["oid"])
+            else:
+                members[key] = waiting("lesson is no longer proven", route="bot-pr", url=row["url"])
+        return members
+    reason = "bot pull request was closed unmerged"
+    if pr["state"] == "OPEN":
+        if not write or any(row["head"] != pr["headRefOid"] for row in members.values()):
+            return members
+        batch = any(row.get("batch") for row in members.values())
+        on_default = pr["baseRefName"] == info["defaultBranchRef"]["name"]
+        if batch and not on_default:
+            return members
+        blocked = unwritable(slug, info)
+        required = required_rollup(slug, info, pr["statusCheckRollup"])
+        checks = verdict(required)
+        obsolete = obsolete_members(members, lessons)
+        if not blocked and on_default and (obsolete or batch and checks == "red"):
+            rejected = {key: "lesson replay proof changed" for key in obsolete}
+            if checks == "red":
+                if failed is None:
+                    failed = failed_paths(slug, required, [row["path"] for row in members.values()], pr["headRefOid"])
+                for key, row in members.items():
+                    if row["path"] in failed:
+                        rejected[key] = "repository checks failed on the lesson test"
+            if not rejected:
+                return members
+            head = pr["headRefName"]
+            if not LESSON_REF.fullmatch(head):
+                raise Unavailable("unexpected lesson pull request branch")
+            paths = sorted(members[key]["path"] for key in rejected)
+            with tempfile.TemporaryDirectory(prefix=".check-delivery-", dir=root) as work:
+                clone = clone_branch(slug, head, work, pr["headRefOid"])
+                for path in paths:
+                    c.ordinary_path(clone / path).unlink()
+                sha, _ = push_tests(clone, slug, head, paths, "test: drop Coldfix lesson tests", pr["headRefOid"])
+            return {key: waiting(rejected[key], route="bot-pr", url=row["url"], rejected_revision=row["revision"],
+                                 pr=row["pr"], head=sha) if key in rejected else dict(row, head=sha)
+                    for key, row in members.items()}
+        if obsolete:
+            return members
+        if (not batch and (not blocked or blocked == "repository has no required checks")
+                and now - c.time_key(pr["createdAt"]) >= STALE):
+            reason = "bot pull request made no progress for 7 days"
+            comment = "This lesson pull request made no progress for 7 days, so Coldfix is closing it without merging."
+        elif blocked or not on_default:
+            return members
+        elif checks == "red":
+            reason = "repository checks failed on the lesson test"
+            comment = "A check failed on the lesson test, so Coldfix is closing this without merging."
+        else:
+            if checks == "green" and pr["mergeStateStatus"] in ("CLEAN", "UNSTABLE"):
+                done(gh("pr", "merge", number, "--repo", slug, "--squash", "--delete-branch",
+                        "--match-head-commit", record["head"]), "gh pr merge")
+            return members
+        done(gh("pr", "close", number, "--repo", slug, "--delete-branch", "--comment", comment), "gh pr close")
+    return {key: dict(waiting(reason, route="bot-pr", url=row["url"]),
+                      **({"rejected_revision": row["revision"]} if row.get("batch") else {}))
+            for key, row in members.items()}
 
 
-def attempt(root, lesson, write, repositories, clones):
+def attempt(root, lesson, write, repositories, clones, previous):
     payload = lesson["payload"]
     if lesson["scope"] == "global":
         return waiting("cross-repo lesson needs a Coldverify check", route="coldverify")
     test = PROVING_TEST.fullmatch(payload.get("diagnostic", ""))
     if not payload.get("path") or not test:
         return waiting("lesson has no test to deliver")
-    slug = lesson["repo"]
+    slug = lesson["repo"].casefold()
     info = repository(slug, repositories)
     branch = (info["defaultBranchRef"] or {}).get("name")
     if not branch:
@@ -314,10 +497,19 @@ def attempt(root, lesson, write, repositories, clones):
         return dict(state="retired", reason="repository is archived")
     if source is None:
         return waiting("proving test is missing from the default branch")
+    rejected = previous.get("rejected_revision")
+    if rejected == lesson["id"]:
+        return {key: value for key, value in previous.items() if key != "day"}
+    if previous.get("route") == "bot-pr" and not rejected and previous.get("reason") in (
+            "bot pull request was closed unmerged", "repository checks failed on the lesson test",
+            "bot pull request made no progress for 7 days"):
+        return waiting("bot pull request was closed unmerged", route="bot-pr", url=previous["url"])
     blocked = unwritable(slug, info) or (None if write else "bot pull requests are not enabled")
     if blocked:
+        if previous.get("retry_closed"):
+            return waiting(blocked, retry_closed=True)
         return waiting(blocked)
-    return pull_request(root, slug, branch, lesson, source)
+    return dict(state="candidate", source=source)
 
 
 def issue_body(lesson, row):
@@ -385,34 +577,121 @@ def deliver(root, lessons, now, write=False, only=None, issues=None):
     rows = records(root)
     today = now.date().isoformat()
     repositories, clones, errors = {}, {}, 0
-    for lesson in lessons:
-        key = lesson["lesson_id"]
+    by_id = {lesson["lesson_id"]: lesson for lesson in lessons}
+    candidates = defaultdict(dict)
+    sources_by_repo = defaultdict(dict)
+
+    def save(changes):
+        for key, row in changes.items():
+            old = rows.get(key, {})
+            lesson = by_id.get(key)
+            if row == old:
+                continue
+            if row["state"] == "open" and old.get("batch") and old.get("pr") == row["pr"]:
+                row = dict(row, batch=True)
+            revision, repo = (lesson["id"], lesson["repo"]) if lesson else (old["revision"], old["repo"])
+            new = dict(row, revision=revision, repo=repo,
+                       **{name: old[name] for name in ("issue", "issue_repo", "issue_closed") if name in old})
+            if new["state"] == "delivered":
+                new["at"] = now.isoformat()
+            if new["state"] == "waiting":
+                new["day"] = today
+            rows[key] = new
+        c.atomic_create(path, c.encoded(rows), replace=True)
+
+    def report(key, error):
+        nonlocal errors
+        errors += 1
+        print("check_delivery " + key + ": " + str(error), file=sys.stderr)
+
+    recoverable = (Unavailable, c.ColdfixError, OSError, ValueError, KeyError, TypeError)
+    for key, lesson in by_id.items():
         old = rows.get(key, {})
         state = old.get("state")
-        if only not in (None, key):
+        if state == "open" or only not in (None, key) or state in SETTLED:
+            continue
+        if state == "waiting":
+            resumed = old["reason"] == "bot pull requests are not enabled"
+            replaced = old["reason"] == "lesson replay proof changed"
+            if old["day"] == today and not only and not (write and (resumed or replaced)):
+                continue
+        try:
+            new = attempt(root, lesson, write, repositories, clones, old)
+            if new["state"] == "candidate":
+                slug = lesson["repo"].casefold()
+                candidates[slug][key] = dict(lesson, retry_closed=old.get("retry_closed", False))
+                sources_by_repo[slug][key] = new["source"]
+            else:
+                save({key: new})
+        except recoverable as error:
+            report(key, error)
+
+    opened = defaultdict(dict)
+    for key, row in rows.items():
+        if row["state"] == "open":
+            opened[row["repo"].casefold(), row["pr"]][key] = row
+
+    updated = set()
+    checked = {}
+    for slug, pending in candidates.items():
+        try:
+            prs = open_lesson_prs(slug)
+            if len(prs) > 1:
+                raise Unavailable("multiple open lesson pull requests need consolidation")
+            pr = prs[0] if prs else None
+            sources = sources_by_repo[slug]
+            if pr:
+                ref = (slug, pr["number"])
+                members = opened.get(ref, {})
+                obsolete = obsolete_members(members, by_id)
+                if obsolete or any(row.get("batch") for row in members.values()):
+                    status = pull_status(slug, pr["number"])
+                    failed = None
+                    required = required_rollup(slug, repositories[slug], status["statusCheckRollup"])
+                    if status["headRefOid"] == pr["headRefOid"] and verdict(required) == "red":
+                        failed = failed_paths(slug, required, [row["path"] for row in members.values()],
+                                              status["headRefOid"])
+                    checked[ref] = (status, failed)
+                    if failed or obsolete:
+                        continue
+                paths = {file["path"] for file in pr["files"]}
+                for key, lesson in by_id.items():
+                    payload = lesson["payload"]
+                    if (key not in sources and lesson["repo"].casefold() == slug and lesson_path(key) in paths
+                            and lesson["scope"] != "global" and payload.get("path")
+                            and PROVING_TEST.fullmatch(payload.get("diagnostic", ""))):
+                        source = generated_source(payload)
+                        if source is not None:
+                            sources[key] = source
+            known_empty = bool(pr and not pr["files"] and any(
+                row.get("rejected_revision") and row["repo"].casefold() == slug
+                and row.get("pr") == pr["number"] and row.get("head") == pr["headRefOid"] for row in rows.values()))
+            changes = publish(root, slug, repositories[slug]["defaultBranchRef"]["name"], pending, sources, pr, known_empty)
+            updated.update((slug, row["pr"]) for row in changes.values() if row["state"] == "open")
+            save(changes)
+        except recoverable as error:
+            report(slug, error)
+
+    for ref, members in opened.items():
+        if ref in updated or (only is not None and only not in members and ref not in checked):
             continue
         try:
-            new = old
-            if not (state in SETTLED or state == "waiting" and old["day"] == today and not only):
-                new = settle(old, lesson, write, now) if state == "open" else \
-                    attempt(root, lesson, write, repositories, clones)
-                new = dict(new, revision=lesson["id"], repo=lesson["repo"],
-                           **{name: old[name] for name in ("issue", "issue_repo", "issue_closed") if name in old})
-                if new["state"] == "delivered":
-                    new["at"] = now.isoformat()
-                if new["state"] == "waiting":
-                    new["day"] = today
-                rows[key] = new
-                c.atomic_create(path, c.encoded(rows), replace=True)
-            if issues:
-                tracked_row = track(lesson, new, now, issues, repositories)
-                if tracked_row != new:
+            save(settle(root, members, by_id, write, now, *checked.get(ref, ())))
+        except recoverable as error:
+            report(str(ref), error)
+
+    if issues:
+        for key, lesson in by_id.items():
+            row = rows.get(key)
+            if not row or only not in (None, key):
+                continue
+            try:
+                tracked_row = track(lesson, row, now, issues, repositories)
+                if tracked_row != row:
                     rows[key] = tracked_row
                     c.atomic_create(path, c.encoded(rows), replace=True)
-        except (Unavailable, c.ColdfixError, OSError, ValueError, KeyError, TypeError) as error:
-            errors += 1
-            print("check_delivery " + key + ": " + str(error), file=sys.stderr)
-            continue
+            except recoverable as error:
+                report(key, error)
     live = {lesson["lesson_id"] for lesson in lessons}
     for key, row in list(rows.items()):
         if issues and only is None and key not in live and tracked(row):

@@ -15,6 +15,7 @@ import coldfix as c
 import failure_ingest as ingest
 import learn_candidates
 import learn_daily
+import learn_replay
 import learn_report
 
 
@@ -50,7 +51,8 @@ class LearnDailyTests(unittest.TestCase):
         self.calls.append(model["model"])
         cases = json.loads(prompt[prompt.index("\n") + 1:])
         if shape is learn_daily.DRAFTS:
-            return dict(drafts=[dict(fingerprint=case["fingerprint"], kind="test", title="Keep " + case["headline"],
+            return dict(drafts=[dict(fingerprint=case["fingerprint"], kind="test", cause="c", prevention="p",
+                                     title="Keep " + case["headline"],
                                      rule="Run the tests for " + case["headline"] + ".", check_command="python3 -m unittest")
                                 for case in cases])
         return dict(reviews=[dict(fingerprint=draft["fingerprint"], verdict="PASS" if index == 0 else "FAIL",
@@ -105,6 +107,27 @@ class LearnDailyTests(unittest.TestCase):
         self.assertEqual(fixed["fix"], "-VALUE = -1\n+VALUE = 1\n")
         self.assertEqual(fixed["excerpts"], [dict(command="PR review finding", error=body + "Totals go negative.")])
         self.assertEqual(sum("fix" in case for case in cases), 1)
+
+    def test_review_pairs_passing_the_flagged_lines_precondition_are_drafted_first_and_failing_ones_not_at_all(self):
+        refs = {}
+        for name, text in (("inline", "Totals go negative."), ("eligible", "Exports drop rows."),
+                           ("ineligible", "Imports skip headers.")):
+            ref = f"https://github.com/example/project/pull/1#cold-review-{'a' * 40}-{c.digest(name)}"
+            if name == "inline":
+                ref = "https://github.com/example/project/pull/2#discussion_r2"
+            review = c.event_record(dict(kind="review", command="review", error=text, repo="example/project",
+                                         agent="reviewer", source_ref=ref, occurred="2026-10-20T12:00:00Z"), "cold-review")
+            c.save(self.store, "failures", review)
+            refs[name] = ref
+        (self.store / "backlog-pairs.json").write_text(json.dumps(dict(results=[
+            dict(repo="example/project", finding_url=refs["inline"], before="a" * 40, after="b" * 40)])))
+        (self.store / learn_replay.REVIEW_PAIRS).write_text(json.dumps({
+            "e": dict(repo="example/project", finding_url=refs["eligible"], before="a" * 40, after="c" * 40, flagged_only=True),
+            "i": dict(repo="example/project", finding_url=refs["ineligible"], before="a" * 40, after="d" * 40, flagged_only=False)}))
+        store = c.load_store(self.store)[1]
+        rows = learn_daily.waiting(store, dict(drafts={}), learn_daily.fix_pairs(self.store))
+        self.assertEqual([store["failures"][row["evidence"][0]]["source_ref"] for row in rows if row["replayable"]],
+                         [refs["eligible"], refs["inline"]])
 
     def test_a_later_run_on_the_same_day_drafts_only_new_candidates_within_the_cap(self):
         drafted = []
@@ -222,7 +245,7 @@ class LearnDailyTests(unittest.TestCase):
                         "body = json.loads(prompt[prompt.index(chr(10)) + 1:])\n"
                         "open(" + repr(str(seen)) + ", 'a').write(json.dumps([role, shape['required']]) + chr(10))\n"
                         "if role == 'drafter':\n"
-                        "    print(json.dumps(dict(drafts=[dict(fingerprint=case['fingerprint'], kind='test', title='Keep ' + case['headline'],\n"
+                        "    print(json.dumps(dict(drafts=[dict(fingerprint=case['fingerprint'], kind='test', cause='c', prevention='p', title='Keep ' + case['headline'],\n"
                         "        rule='Run the tests for ' + case['headline'] + '.', check_command='python3 -m unittest') for case in body])))\n"
                         "else:\n"
                         "    print(json.dumps(dict(reviews=[dict(fingerprint=d['fingerprint'], verdict='PASS', reason='checked') for d in body['drafts']])))\n")
@@ -307,45 +330,6 @@ class LearnDailyTests(unittest.TestCase):
         with patch("learn_daily.subprocess.run", return_value=subprocess.CompletedProcess([], 0, stdout=failed)):
             with self.assertRaisesRegex(c.ColdfixError, "no structured output"):
                 learn_daily.ask(model, "prompt", learn_daily.DRAFTS, work)
-
-    def test_review_replay_runs_once_per_day(self):
-        for outcome, expected in ((({'counts': {'proven': 0}}, self.store), [0, 0]), (KeyboardInterrupt(), None)):
-            with self.subTest(outcome=type(outcome).__name__):
-                (self.store / learn_daily.LEDGER).unlink(missing_ok=True)
-                effect = outcome if isinstance(outcome, BaseException) else None
-                with patch.object(learn_daily.c, 'on_replay_host', return_value=True), \
-                        patch('codex_review_source.resume', return_value=outcome, side_effect=effect) as resume, \
-                        redirect_stdout(io.StringIO()):
-                    codes = []
-                    for _ in range(2):
-                        try:
-                            codes.append(learn_daily.main(['--store', str(self.store)]))
-                        except KeyboardInterrupt:
-                            pass
-                self.assertEqual(codes, expected or [0])
-                resume.assert_called_once()
-
-    def test_review_replay_summary_reports_skips_by_class(self):
-        classes = dict(no_fix_pair=dict(NO_LATER_COMMIT=2), retry_pending=dict(REPLAY_TIMEOUT=1))
-        output = io.StringIO()
-        with patch.object(learn_daily.c, 'on_replay_host', return_value=True), \
-                patch('codex_review_source.resume', return_value=({'counts': {'skipped': 3}, 'skipped_by_class': classes},
-                                                                  self.store)), \
-                redirect_stdout(output):
-            learn_daily.main(['--store', str(self.store)])
-        self.assertEqual(json.loads(output.getvalue())['review_replay'], dict(skipped=3, skipped_by_class=classes))
-
-    def test_review_replay_cut_by_its_budget_continues_on_the_next_run(self):
-        outcomes = iter([({'counts': {}, 'deferred': 2}, self.store), ({'counts': {}, 'deferred': 0}, self.store)])
-        output = io.StringIO()
-        with patch.object(learn_daily.c, 'on_replay_host', return_value=True), \
-                patch('codex_review_source.resume', side_effect=lambda args: next(outcomes)) as resume, \
-                redirect_stdout(output):
-            for _ in range(3):
-                learn_daily.main(['--store', str(self.store)])
-        self.assertEqual(resume.call_count, 2)
-        self.assertTrue(all(getattr(call.args[0], 'budget', None) for call in resume.call_args_list))
-        self.assertEqual(json.loads(output.getvalue().splitlines()[0])['review_replay'], dict(deferred=2))
 
     def test_balanced_routes_on_one_model_fall_back_to_the_primary_bulk_models(self):
         self.recurring("a")
@@ -525,7 +509,7 @@ class LearnDailyTests(unittest.TestCase):
             cases = json.loads(prompt[prompt.index("\n") + 1:])
             if shape is learn_daily.DRAFTS:
                 rules = ["Use a fresh destination.", "use a  FRESH destination.", "Retired rule."]
-                return dict(drafts=[dict(fingerprint=case["fingerprint"], kind="test", title="t", rule=rule,
+                return dict(drafts=[dict(fingerprint=case["fingerprint"], kind="test", cause="c", prevention="p", title="t", rule=rule,
                                          check_command="python3 -m unittest") for case, rule in zip(cases, rules)])
             reviewed.extend(draft["rule"] for draft in cases["drafts"])
             return dict(reviews=[dict(fingerprint=draft["fingerprint"], verdict="PASS", reason="checked")
@@ -543,7 +527,7 @@ class LearnDailyTests(unittest.TestCase):
             self.calls.append(model["model"])
             cases = json.loads(prompt[prompt.index("\n") + 1:])
             if shape is learn_daily.DRAFTS:
-                return dict(drafts=[dict(fingerprint=case["fingerprint"], kind="test", title="t", rule="retired RULE.",
+                return dict(drafts=[dict(fingerprint=case["fingerprint"], kind="test", cause="c", prevention="p", title="t", rule="retired RULE.",
                                          check_command="python3 -m unittest") for case in cases])
             self.fail("a duplicate of a passing draft must not be reviewed")
         with patch.object(learn_daily.c, "latest_lessons", return_value={}):
@@ -559,7 +543,7 @@ class LearnDailyTests(unittest.TestCase):
         def ask(model, prompt, shape, work):
             self.assertIs(shape, learn_daily.DRAFTS)
             cases = json.loads(prompt[prompt.index("\n") + 1:])
-            return dict(drafts=[dict(fingerprint=case["fingerprint"], kind="test", title="t",
+            return dict(drafts=[dict(fingerprint=case["fingerprint"], kind="test", cause="c", prevention="p", title="t",
                                      rule="Existing LIVE rule.", check_command="python3 -m unittest")
                                 for case in cases])
         summary = learn_daily.run(self.store, "2026-11-07", route=self.route, ask=ask,
@@ -574,7 +558,7 @@ class LearnDailyTests(unittest.TestCase):
         def ask(model, prompt, shape, work):
             cases = json.loads(prompt[prompt.index("\n") + 1:])
             if shape is learn_daily.DRAFTS:
-                return dict(drafts=[dict(fingerprint=case["fingerprint"], kind="test", title="t", rule="Same rule.",
+                return dict(drafts=[dict(fingerprint=case["fingerprint"], kind="test", cause="c", prevention="p", title="t", rule="Same rule.",
                                          check_command="python3 -m unittest") for case in cases])
             return dict(reviews=[dict(fingerprint=draft["fingerprint"], verdict="FAIL" if index == 0 else "PASS",
                                       reason="checked") for index, draft in enumerate(cases["drafts"])])
@@ -586,11 +570,31 @@ class LearnDailyTests(unittest.TestCase):
         self.recurring("a")
         def ask(model, prompt, shape, work):
             self.calls.append(model["model"])
-            return dict(drafts=[dict(fingerprint="unknown", kind="test", title="t", rule="r", check_command="x")])
+            return dict(drafts=[dict(fingerprint="unknown", kind="test", cause="c", prevention="p", title="t", rule="r", check_command="x")])
         summary = self.daily(ask=ask)
         self.assertEqual((summary["calls"], summary["drafted"]), (1, 0))
         self.assertEqual(self.ledger()["drafts"], {})
         self.assertEqual(self.daily("2026-11-07")["passed"], 1)
+
+    def test_a_draft_keeps_its_one_line_cause_and_prevention_and_a_multiline_or_missing_one_is_dropped(self):
+        self.recurring("alpha")
+        self.recurring("multi")
+        self.recurring("bare")
+        self.assertIn("cause", learn_daily.DRAFTS["properties"]["drafts"]["items"]["required"])
+
+        def ask(model, prompt, shape, work):
+            if shape is not learn_daily.DRAFTS:
+                return self.ask(model, prompt, shape, work)
+            self.assertIn("one-line cause", prompt)
+            cases = json.loads(prompt[prompt.index("\n") + 1:])
+            return dict(drafts=[dict(fingerprint=case["fingerprint"], kind="test", title="Keep " + case["headline"],
+                                     cause="Why " + case["headline"] + ("\nbroke" if "multi" in case["headline"] else ""),
+                                     rule="Run the tests for " + case["headline"] + ".", check_command="python3 -m unittest",
+                                     **({} if "bare" in case["headline"] else dict(prevention="Check " + case["headline"] + " first.")))
+                                for case in cases])
+        self.assertEqual(self.daily(ask=ask)["drafted"], 1)
+        draft, = [row["draft"] for row in self.ledger()["drafts"].values()]
+        self.assertEqual((draft["cause"].startswith("Why "), draft["prevention"].startswith("Check ")), (True, True))
 
     def test_drafts_the_reviewer_skips_are_retried_the_next_day(self):
         self.recurring("a")
@@ -609,20 +613,6 @@ class LearnDailyTests(unittest.TestCase):
                                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["calls"], 0)
-
-    def test_daily_review_replay_accepts_an_arbitrary_store_path(self):
-        import github_sources
-        root = self.store.parent / 'custom-store'
-        root.mkdir(mode=0o700)
-        def resume(args):
-            github_sources.private_store(args.store)
-            return {'counts': {'proven': 0}}, root
-        output = io.StringIO()
-        with patch.object(learn_daily.c, 'on_replay_host', return_value=True), \
-                patch('codex_review_source.resume', side_effect=resume), redirect_stdout(output):
-            code = learn_daily.main(['--store', str(root)])
-        self.assertEqual(code, 0)
-        self.assertEqual(json.loads(output.getvalue())['review_replay'], {'proven': 0})
 
     def test_daily_replays_transcript_code_leads_and_reports_their_counts(self):
         output = io.StringIO()
@@ -672,15 +662,43 @@ class LearnDailyTests(unittest.TestCase):
             not_provable={"recorded failure has no commit": 1},
             privacy_screen={"privacy screen: hostname": 1})))
 
-    def test_review_replay_failure_is_recorded_in_the_daily_report(self):
-        output = io.StringIO()
+    def test_replay_line_splits_out_review_drafts_and_skips_the_frozen_snapshot_replay(self):
+        def review(number):
+            row = c.event_record(dict(kind="review", command="PR review finding", error=f"Finding {number}",
+                                      repo="example/project", agent="codex-review", occurred="2026-10-20T12:00:00Z",
+                                      source_ref=f"https://github.com/example/project/pull/{number}#discussion_r{number}"),
+                                 "github")
+            c.save(self.store, "failures", row)
+            return row["id"]
+        drafts = {key: dict(day="2026-11-06", verdict="PASS", evidence=[ref])
+                  for key, ref in (("a" * 32, review(1)), ("b" * 32, review(2)), ("c" * 32, review(3)))}
+        drafts["d" * 32] = dict(day="2026-11-06", verdict="PASS", evidence=["f" * 32])
+        drafts["e" * 32] = dict(day="2026-11-06", verdict="PASS", evidence=[review(4)])
+        drafts["f" * 32] = dict(day="2026-11-06", verdict="PASS", evidence=[review(5)],
+                                replay=dict(status="rejected", reason="replay budget exhausted"))
+        (self.store / learn_daily.LEDGER).write_text(json.dumps(dict(runs=[], drafts=drafts)))
+        def replay(root, ledger, projects=None):
+            rows = ledger["drafts"]
+            rows["a" * 32]["replay"] = dict(status="proven", proof=dict(receipt_id="r" * 32))
+            rows["b" * 32]["replay"] = dict(status="rejected", reason="no changed unittest matches the recorded failure")
+            rows["b" * 32]["replay_attempts"] = [dict(day="2026-11-07", reason="no changed unittest matches the recorded failure")]
+            rows["d" * 32]["replay"] = dict(status="proven", proof=dict(receipt_id="r" * 32))
+            rows["c" * 32]["replay_attempts"] = [dict(day="2026-11-07", reason="replay budget exhausted")] * 2
+            rows["c" * 32]["replay_resume"] = dict(keys=[])
+            rows["e" * 32]["replay"] = dict(status="rejected", reason="no fix exists: FLAGGED_HUNK_UNCHANGED")
+            rows["f" * 32]["replay_attempts"] = [dict(day="2026-11-07", reason="no changed unittest matches the recorded failure")]
+            rows["f" * 32]["replay_resume"] = dict(keys=[])
+            return dict(proven=2, rejected=3, deferred=1)
+        output, errors = io.StringIO(), io.StringIO()
         with patch.object(learn_daily.c, 'on_replay_host', return_value=True), \
-                patch('codex_review_source.resume', side_effect=c.ColdfixError('replay unavailable')), \
-                redirect_stdout(output):
+                patch('codex_review_source.resume', return_value=({'counts': {}}, self.store)) as snapshot, \
+                patch('learn_replay.run', side_effect=replay), patch('learn_replay.transcript_run', return_value={}), \
+                redirect_stdout(output), patch.object(sys, 'stderr', errors):
             code = learn_daily.main(['--store', str(self.store)])
-        self.assertEqual(code, 2)
-        self.assertEqual(json.loads(output.getvalue())['error'], 'review replay: replay unavailable')
-        self.assertEqual(learn_report.report(self.store, datetime.now(timezone.utc))['daily_runs_failed'], 1)
+        self.assertEqual(code, 0, output.getvalue())
+        snapshot.assert_not_called()
+        line = next(row for row in errors.getvalue().split("\n") if row.startswith("learn_daily replay "))
+        self.assertEqual(json.loads(line[len("learn_daily replay "):])["review"], dict(proven=1, rejected=2, waiting=2))
 
 
 class ReplayHostTests(unittest.TestCase):

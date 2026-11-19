@@ -250,8 +250,42 @@ def deliver(args, root, store, requests):
     return delivered, pending
 
 
+RUNS = "recheck-runs.jsonl"
+MONTHLY_AFTER = 3
+MONTHLY = datetime.timedelta(weeks=4) - datetime.timedelta(days=1)
+
+
+def recheck_history(root):
+    path = c.ordinary_path(root / RUNS)
+    history = {}
+    for line in c.read_text(path).split("\n") if path.exists() else ():
+        try:
+            run = json.loads(line)
+            at = datetime.datetime.fromisoformat(run["at"])
+            results = [((row["lesson"], row.get("target")), row["result"]) for row in run["lessons"]]
+            c.require(at.tzinfo is not None, "naive run time")
+        except (ValueError, TypeError, KeyError, AttributeError, c.ColdfixError):
+            continue
+        for key, result in results:
+            if result != "skipped":
+                streak = history.get(key, (0, at))[0]
+                history[key] = (streak + 1 if result == "passed" else 0, at)
+    return history
+
+
+def deferral(history, now):
+    def deferred(lesson, target=None):
+        streak, at = history.get((lesson, target), (0, now))
+        if streak >= MONTHLY_AFTER and now - at < MONTHLY:
+            return f"passed {streak} rechecks in a row; next monthly check after {(at + MONTHLY).date()}"
+        return None
+    return deferred
+
+
 def recheck(args, root, store):
     import coldrecall as recall
+    now = datetime.datetime.now(datetime.timezone.utc)
+    deferred = deferral(recheck_history(root), now)
     records = read_records(c.ordinary_path(root / "deliveries.json"), store)
     if args.repo:
         targets = [c.ordinary_path(recall.git(c.ordinary_path(args.repo), "rev-parse", "--show-toplevel"))]
@@ -259,7 +293,7 @@ def recheck(args, root, store):
         targets = sorted({c.ordinary_path(row["target"]) for row in records.values()})
     rows, withdrawn, complete = [], 0, True
     for repo in targets:
-        checked, removed, done = recheck_repo(args, root, records, repo)
+        checked, removed, done = recheck_repo(args, root, records, repo, deferred)
         rows += checked
         withdrawn += removed
         complete = complete and done
@@ -267,17 +301,23 @@ def recheck(args, root, store):
         import transcript_delivery
         folder = c.ordinary_path(args.lessons)
         c.require(folder.is_dir(), "lessons folder not found")
-        rows += transcript_delivery.recheck(root, store, folder, transcript_delivery.env_jev())
+        judged = transcript_delivery.recheck(root, store, folder, transcript_delivery.env_jev(),
+                                             deferred=deferred, withdraw_at=now.isoformat())
+        withdrawn += sum(row["result"] == "withdrawn" for row in judged)
+        rows += judged
     incomplete = not complete or any(row["result"] == "unchecked" and row["reason"] != "no witness" for row in rows)
     regressed = sum(row["result"] == "regression" for row in rows)
-    return dict(delivered=len(rows), passed=sum(row["result"] == "passed" for row in rows), withdrawn=withdrawn,
-                regression=regressed, retired=sum(row["result"] == "retired" for row in rows),
-                unchecked=sum(row["result"] == "unchecked" for row in rows), gone=sum(bool(row.get("gone")) for row in rows),
-                lessons=rows,
-                _exit=2 if incomplete else 1 if withdrawn or regressed else 0)
+    value = dict(delivered=len(rows), passed=sum(row["result"] == "passed" for row in rows), withdrawn=withdrawn,
+                 regression=regressed, retired=sum(row["result"] == "retired" for row in rows),
+                 unchecked=sum(row["result"] == "unchecked" for row in rows), gone=sum(bool(row.get("gone")) for row in rows),
+                 lessons=rows)
+    fd = os.open(c.ordinary_path(root / RUNS), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    with os.fdopen(fd, "a", encoding="utf-8") as stream:
+        stream.write(json.dumps(dict(value, at=now.isoformat()), sort_keys=True) + "\n")
+    return dict(value, _exit=2 if incomplete or regressed else 1 if withdrawn else 0)
 
 
-def recheck_repo(args, root, records, repo):
+def recheck_repo(args, root, records, repo, deferred=lambda lesson, target: None):
     import coldrecall as recall
     mine = {key for key, row in records.items() if c.ordinary_path(row["target"]) == repo}
     unconfirmed = sorted(records[key]["lesson_id"] for key in mine
@@ -293,14 +333,18 @@ def recheck_repo(args, root, records, repo):
     except (c.ColdfixError, OSError, UnicodeError, ValueError, RecursionError):
         found, head = {}, None
         missing = "repository or rule registry unreadable" if repo.exists() else "repository gone"
-    runs = {ref: recall.run_witness(repo, found[ref], head, args.timeout) for ref in sorted(delivered) if ref in found}
+    later = {ref: deferred(delivered[ref], str(repo)) for ref in delivered if ref in found}
+    runs = {ref: recall.run_witness(repo, found[ref], head, args.timeout) for ref in sorted(delivered)
+            if ref in found and not later[ref]}
     failed = sorted(delivered[ref] for ref in delivered if runs.get(ref, {}).get("result") == "regression")
     interrupted = {records[key]["lesson_id"] for key in mine if records[key]["state"] == "withdrawing"}
     outcomes = {lesson: withdraw(args, root, records, lesson, keys=mine) for lesson in sorted(set(failed) | interrupted)}
     rows = []
     for ref, lesson in sorted(delivered.items()):
         run = runs.get(ref)
-        if run is None:
+        if run is None and later.get(ref):
+            row = dict(result="skipped", reason=later[ref])
+        elif run is None:
             row = dict(result="unchecked", reason=missing, **(dict(gone=[str(repo)]) if missing == "repository gone" else {}))
         elif run["result"] == "pass":
             row = dict(result="passed", reason="witness passed")

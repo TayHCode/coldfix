@@ -1,7 +1,7 @@
 ---
 id: worker-lifecycle-and-receipts
 title: Use the documented worker lifecycle and receipt wake path
-proof: judged
+proof: judged (opinion)
 ---
 # Use the documented worker lifecycle and receipt wake path
 

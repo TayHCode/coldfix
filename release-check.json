@@ -9,6 +9,13 @@
   "docs",
   "evals",
   "scripts",
+  "speed/bench.sh",
+  "speed/investigate.py",
+  "speed/monthly.sh",
+  "speed/parse.py",
+  "speed/pilot.py",
+  "speed/run-specs.sh",
+  "speed/weekly.py",
   "systemd",
   "AGENTS.md",
   "STATE.md",
@@ -25,10 +32,13 @@
   "tests/test_registered_lessons.py",
   "tests/test_repository_records.py",
   "tests/test_review_eval.py",
+  "tests/test_lesson_scan_eval.py",
   "tests/test_stats_page.py",
   "tests/test_sync_lessons_copies.py",
   "tests/test_agentlocker_import.py",
-  "tests/test_workflow_runners.py"
+  "tests/test_workflow_runners.py",
+  "tests/test_speed_parse.py",
+  "checks/lesson-checks.json"
  ],
  "quickstart": [
   {
@@ -2668,7 +2678,7 @@
    "kind": "export-path-review",
    "path": "public-export.txt",
    "reason": "Public file list of this export; the layout, environment-literal and packaging tests read it at the export root.",
-   "source_sha256": "f999f4a591ba51702111193f37bde3f289c77e8c7f2e7f00f1ee7fd17375566f"
+   "source_sha256": "4625820a942705ba4e0c9026dec7f62878838efa38a4d0bd6e086c8e6523cf45"
   },
   {
    "scope": "tree",
@@ -2697,6 +2707,13 @@
    "path": "library/state-safety/fixtures/good/store.py",
    "reason": "Synthetic passing fixture of the public state-safety lesson; the directory name is the lesson id, not a STATE notes file.",
    "source_sha256": "016bd4ff29cdbc393c170fbddb24a1afd8e841d0cb0c96b48abc42069b4b44b8"
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "tests/test_failure_ingest.py",
+   "fingerprint": "4c1029697ee35871",
+   "reason": "Generic unused tuple variable in a synthetic test fixture, not a personal identity. The current tree uses an underscore."
   }
  ]
 }

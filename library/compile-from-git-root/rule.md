@@ -1,7 +1,7 @@
 ---
 id: compile-from-git-root
 title: Resolve the Git root before compiling from a subdirectory
-proof: judged
+proof: replayed
 ---
 # Resolve the Git root before compiling from a subdirectory
 

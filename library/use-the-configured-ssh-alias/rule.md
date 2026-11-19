@@ -1,7 +1,7 @@
 ---
 id: use-the-configured-ssh-alias
 title: Use the configured SSH alias
-proof: judged
+proof: judged (opinion)
 ---
 # Use the configured SSH alias
 

@@ -76,6 +76,9 @@ def vm02_jobs(root, data):
                 if stable(record) != stable(legacy) and stable(known.get(record["id"], {})) == stable(legacy):
                     total["deduped"] += 1
                     continue
+                if record["id"] in known and stable(known[record["id"]]) == stable(record):
+                    total["deduped"] += 1
+                    continue
                 result = fi.import_records(root, [record])
                 total["imported"] += result["imported"]
                 total["deduped"] += result["skipped"]
@@ -132,7 +135,8 @@ def collect(root, config):
                 total.update(imported=result['imported'], deduped=result['skipped'])
             elif source['format'] == 'coldpass-runs':
                 reasons = Counter()
-                records, _ = coldpass_sources.collect(data, on_reject=lambda reason: reasons.update([reason]))
+                records, summary = coldpass_sources.collect(data, on_reject=lambda reason: reasons.update([reason]))
+                coldpass_sources.save_rechecks(root, summary)
                 result = fi.import_records(root, records)
                 total.update(imported=result['imported'], deduped=result['skipped'])
                 if reasons:

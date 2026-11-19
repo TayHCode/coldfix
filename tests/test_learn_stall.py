@@ -39,6 +39,10 @@ else:
 json.dump(issues, open(db, "w"))
 """
 
+FAKE_SYSTEMCTL = """#!/bin/sh
+case " $FAKE_SYSTEMCTL_REMOVED " in *" $6 "*) echo not-found ;; *) echo loaded ;; esac
+"""
+
 
 def entry(hours_ago, unit, message):
     when = datetime.now(timezone.utc) - timedelta(hours=hours_ago)
@@ -78,6 +82,12 @@ class LearnStallTests(unittest.TestCase):
 
     def check(self, text, deliver=None, issues=(), env=None):
         command = deliver or ["sh", "-c", 'cat >> "$0"', str(self.note)]
+        systemd = self.root / "systemd"
+        systemd.mkdir(exist_ok=True)
+        (systemd / "systemctl").write_text(FAKE_SYSTEMCTL)
+        (systemd / "systemctl").chmod(0o755)
+        env = dict(env or os.environ)
+        env["PATH"] = f"{systemd}{os.pathsep}{env['PATH']}"
         return subprocess.run([sys.executable, str(SCRIPT), "--state", str(self.state), *issues, "--", *command],
                               input=text, text=True, capture_output=True, env=env)
 
@@ -189,6 +199,19 @@ class LearnStallTests(unittest.TestCase):
         state = {issue["title"]: issue["state"] for issue in self.issues()}
         self.assertEqual(state, {prefix + "failed:coldfix-transcripts": "closed", prefix + "failed:coldfix-deploy": "open",
                                  prefix + "failed:coldfix-lessons-sync": "open"})
+
+    def test_a_failed_unit_alert_recovers_once_systemd_no_longer_has_the_unit(self):
+        env, issues = self.gh_env(), ["--issues", "example/repo"]
+        healthy = journal(25, imported=1, proven=1, scanned=4, github_failed=(0,), coldbox_missing=False)
+        failed = healthy + result(.5, "coldfix-before-after.service", "failed") + "\n"
+        self.assertEqual(self.check(failed, issues=issues, env=env).returncode, 0)
+        self.assertEqual([issue["state"] for issue in self.issues()], ["open"])
+        self.assertEqual(self.check(healthy, issues=issues, env=env).returncode, 0)
+        self.assertEqual([issue["state"] for issue in self.issues()], ["open"])
+        env["FAKE_SYSTEMCTL_REMOVED"] = "coldfix-before-after.service"
+        self.assertEqual(self.check(failed, issues=issues, env=env).returncode, 0)
+        self.assertEqual([issue["state"] for issue in self.issues()], ["closed"])
+        self.assertIn("RECOVERED", self.notes())
 
     def test_issue_tracking_retries_after_a_failed_gh_call_and_replaces_a_closed_issue(self):
         issues = ["--issues", "example/repo"]

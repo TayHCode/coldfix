@@ -1,7 +1,7 @@
 ---
 id: verify-the-bottleneck-first
 title: Verify the bottleneck before prescribing an architecture
-proof: judged
+proof: judged (opinion)
 ---
 # Verify the bottleneck before prescribing an architecture
 

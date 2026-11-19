@@ -1,7 +1,7 @@
 ---
 id: proportionate-diagnostics
 title: Keep diagnostic requests proportionate
-proof: judged
+proof: judged (opinion)
 ---
 # Keep diagnostic requests proportionate
 

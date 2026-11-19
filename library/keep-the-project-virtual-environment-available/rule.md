@@ -1,7 +1,7 @@
 ---
 id: keep-the-project-virtual-environment-available
 title: Keep the project virtual environment available in snapshots
-proof: judged
+proof: replayed
 ---
 # Keep the project virtual environment available in snapshots
 
