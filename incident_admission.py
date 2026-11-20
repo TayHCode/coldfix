@@ -49,6 +49,19 @@ def same_test(before, after, name):
         return False
 
 
+def hunks(diff):
+    for old_start, old_count, new_start, new_count in re.findall(
+            r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", diff, flags=re.M):
+        old_count, new_count = int(old_count or 1), int(new_count or 1)
+        i1, j1 = int(old_start) - (old_count > 0), int(new_start) - (new_count > 0)
+        yield i1, i1 + old_count, j1, j1 + new_count
+
+
+def confined(hunk, start, end):
+    i1, i2, j1, j2 = hunk
+    return start <= i1 + 1 and i2 <= end and j2 - j1 <= i2 - i1
+
+
 def flagged_revert(args, repo):
     flagged = getattr(args, "flagged", None) or dict(path=getattr(args, "flagged_path", None),
                                                      start_line=getattr(args, "flagged_start", None),
@@ -64,16 +77,12 @@ def flagged_revert(args, repo):
     old, new = [re.split(r"(?<=\n)(?=.)", c.privacy_git(repo, "show", revision + ":" + flagged["path"],
                                                          timeout=budget()).decode("utf-8"),
                          flags=re.S) for revision in (args.before, args.after)]
-    hunks = re.findall(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", c.privacy_git(
-        repo, "diff", "-U0", "--no-color", "--no-ext-diff", "--no-textconv", args.before, args.after, "--", ":(literal)" + flagged["path"],
-        timeout=budget()).decode("utf-8", "replace"), flags=re.M)
     reverted, changed, kept = [], False, 0
-    for old_start, old_count, new_start, new_count in hunks:
-        old_count, new_count = int(old_count or 1), int(new_count or 1)
-        i1, j1 = int(old_start) - (old_count > 0), int(new_start) - (new_count > 0)
-        i2, j2 = i1 + old_count, j1 + new_count
+    for i1, i2, j1, j2 in hunks(c.privacy_git(
+            repo, "diff", "-U0", "--no-color", "--no-ext-diff", "--no-textconv", args.before, args.after, "--",
+            ":(literal)" + flagged["path"], timeout=budget()).decode("utf-8", "replace")):
         hit = i2 > i1 and i1 + 1 <= end and i2 >= start
-        c.require(not hit or start <= i1 + 1 and i2 <= end and j2 - j1 <= i2 - i1,
+        c.require(not hit or confined((i1, i2, j1, j2), start, end),
                   "the fix's edit of the finding's flagged lines also adds or changes unflagged lines")
         changed = changed or hit
         reverted += new[kept:j1] + (old[i1:i2] if hit else new[j1:j2])
@@ -394,7 +403,7 @@ def admit(args, root, store):
     replay_isolation.require_sandbox()
     executor = None if argv else replay_isolation.replay_tree
     options = dict(lesson=unproven["id"], repo=args.repo, before=args.before, after=args.after,
-                   status="active", timeout=args.timeout)
+                   status="active", timeout=args.timeout, deadline=getattr(args, "deadline", None))
     if executor:
         options['replay_executor'] = executor
     result = c.replay(argparse.Namespace(**options), root, store)

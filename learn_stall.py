@@ -16,6 +16,18 @@ import sys
 
 UNITS = {"coldfix-collect.service", "coldfix-daily.service", "coldfix-transcripts.service"}
 BACKLOGS = {"coldfix-backlog.service", "coldfix-oss.service"}
+SYNC_EVENTS = {
+    "coldfix-lessons-sync.service": ("synced ", "sync skipped, retry next run: "),
+    "coldfix-transcripts.service": ("transcript pull synced ", "transcript pull skipped, retry next run: "),
+}
+SOURCE_LABELS = {
+    "coldfix-collect.service": "Hourly collection",
+    "coldfix-backlog.service": "Own-repository CI backlog",
+    "coldfix-oss.service": "OSS",
+    "coldfix-transcripts.service": "Transcripts",
+    "coldfix-lessons-sync.service": "Lessons sync",
+}
+SYNC_ALERT_AGE = timedelta(hours=24)
 STREAK = 3
 LABEL = "stall-alert"
 FAILED = ("failed", "unavailable", "missing", "error", "errors", "discovery_failed", "unlisted")
@@ -68,6 +80,65 @@ def pause(entry):
     return None
 
 
+def sync_events(journal):
+    observations = {}
+    for stamp, entry in journal:
+        unit, message = entry.get("_SYSTEMD_USER_UNIT"), entry.get("MESSAGE")
+        if unit not in SYNC_EVENTS or not isinstance(message, str):
+            continue
+        success, skipped = SYNC_EVENTS[unit]
+        for prefix in (success, skipped):
+            if message.startswith(prefix):
+                host = message.removeprefix(prefix)
+                key = unit, host
+                last_success, first_skip = observations.get(key, (None, None))
+                observations[key] = (stamp, None) if prefix == success else (last_success, first_skip or stamp)
+                break
+    return observations
+
+
+def source_status(journal):
+    units = [unit for service in SOURCE_LABELS for unit in (service, service.removesuffix(".service") + ".timer")]
+    show = subprocess.run(["systemctl", "--user", "show", "--all", "-p", "Id", "-p", "ActiveState", "-p", "SubState", *units],
+                          check=True, text=True, capture_output=True, timeout=30)
+    states = {}
+    for block in show.stdout.strip().split("\n\n"):
+        fields = dict(line.split("=", 1) for line in block.splitlines() if "=" in line)
+        if "Id" in fields:
+            states[fields["Id"]] = fields
+    pauses = dict(state for state in map(pause, (entry for _, entry in journal)) if state)
+    syncs = sync_events(journal)
+    sources = {}
+    for unit, label in SOURCE_LABELS.items():
+        timer = unit.removesuffix(".service") + ".timer"
+        service = states.get(unit, {})
+        state = service.get("ActiveState")
+        timer_state = states.get(timer, {}).get("ActiveState")
+        if service.get("SubState", "").startswith("auto-restart"):
+            current = "Idle. Restart scheduled"
+        elif state in ("active", "activating", "reloading"):
+            current = "Running"
+        elif pauses.get(unit):
+            current = "Paused" + pauses[unit].removeprefix("paused")
+        elif state == "failed":
+            current = "Idle. Last run failed"
+        elif timer_state == "inactive":
+            current = "Paused. Timer stopped"
+        elif timer_state == "active":
+            current = "Idle. Waiting for the next run"
+        else:
+            current = "Idle. Timer state unavailable"
+        hosts = {host: first_skip for (service, host), (_, first_skip) in syncs.items() if service == unit}
+        if unit != "coldfix-lessons-sync.service" or not hosts:
+            sources[label] = current
+        for host, first_skip in sorted(hosts.items()):
+            name = "Transcript pull" if unit == "coldfix-transcripts.service" else label
+            sources[f"{name} ({host})"] = (
+                "Idle. Host unreachable. Skipped, retry next run" if first_skip else current
+            )
+    return sources
+
+
 def finished(journal):
     outcomes, lines = {}, {}
     for entry in journal:
@@ -96,6 +167,9 @@ def stalls(journal, now):
         return sum(count(k, row) for time, k, row in rows if k in kinds and time >= now - timedelta(hours=hours))
 
     found, judged = {}, set()
+    syncs = sync_events(journal)
+    pulls_skipped = any(first_skip for (unit, _), (_, first_skip) in syncs.items()
+                        if unit == "coldfix-transcripts.service")
     for key, kinds, hours, count, message in (
             ("imports", ("collect", "transcripts"), 6,
              lambda kind, row: sum(part.get("imported", 0) for part in parts(kind, row).values()),
@@ -105,6 +179,8 @@ def stalls(journal, now):
             ("transcripts", ("transcripts",), 6, lambda kind, row: row["scanned"], "0 transcripts scanned in 6 h"),
             ("transcript_proven", ("transcripts",), 24, lambda kind, row: row.get("proven", 0),
              "0 transcript lessons proven in 24 h")):
+        if pulls_skipped and key in ("transcripts", "transcript_proven"):
+            continue
         if now - covered >= timedelta(hours=hours):
             judged.add(key)
             if total(kinds, hours, count) == 0:
@@ -130,6 +206,14 @@ def stalls(journal, now):
         judged.add(key)
         if outcome != "done":
             found[key] = f"{unit.removesuffix('.service')} failed its last run; its last line: {line[:300]}"
+    for (unit, target), (last_success, first_skip) in syncs.items():
+        key = f"unreachable:{unit.removesuffix('.service')}:{target}"
+        if first_skip and now - (last_success or first_skip) > SYNC_ALERT_AGE:
+            judged.add(key)
+            source = "Transcript pull" if unit == "coldfix-transcripts.service" else SOURCE_LABELS[unit]
+            found[key] = f"{source} ({target}): host unreachable, no successful transfer in 24 h"
+        elif last_success:
+            judged.add(key)
     latest = dict(state for state in map(pause, (entry for _, entry in journal)) if state)
     for unit, reason in latest.items():
         key = "paused:" + unit.removesuffix(".service")
@@ -186,14 +270,20 @@ def track(repo, found, judged, stamp, path):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--state", type=Path, required=True)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--state", type=Path)
+    mode.add_argument("--sources", action="store_true")
     parser.add_argument("--issues", metavar="OWNER/REPO")
     parser.add_argument("deliver", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
+    journal = sorted(entries(sys.stdin), key=lambda item: item[0])
+    if args.sources:
+        print(json.dumps(source_status(journal)))
+        return 0
     deliver = args.deliver[1:] if args.deliver[:1] == ["--"] else args.deliver
     now = datetime.now(timezone.utc)
     active = json.loads(args.state.read_text()).get("active", {}) if args.state.exists() else {}
-    found, judged = stalls(sorted(entries(sys.stdin), key=lambda item: item[0]), now)
+    found, judged = stalls(journal, now)
     gone = {key for key in found.keys() | active.keys() if removed(key)}
     judged |= gone
     found.update({key: message for key, message in active.items() if key not in judged})

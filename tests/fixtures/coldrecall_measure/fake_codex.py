@@ -23,7 +23,7 @@ def fire(home, event, **payload):
         if event == "PreToolUse" and not re.fullmatch(group["matcher"], payload["tool_name"]):
             continue
         for hook in group["hooks"]:
-            subprocess.run(hook["command"], shell=True, input=json.dumps(dict(hook_event_name=event, session_id="fixture", cwd=str(Path.cwd()), **payload)),
+            subprocess.run(shlex.split(hook["command"]), input=json.dumps(dict(hook_event_name=event, session_id="fixture", cwd=str(Path.cwd()), **payload)),
                            capture_output=True, text=True)
 
 

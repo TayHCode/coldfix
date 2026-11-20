@@ -444,6 +444,15 @@ class CheckTests(unittest.TestCase):
                 row = self.lessons()[1]["tests-must-test"]
                 self.assertEqual((row["status"], row["hits"]), expected)
 
+    def test_runnable_commands_pass_literal_arguments(self):
+        self.write({
+            "README.md": '```sh\npython3 tool.py "two words" *.txt\n```\n',
+            "tool.py": "import sys\nraise SystemExit(sys.argv[1:] != ['two words', '*.txt'])\n",
+            "example.txt": "",
+        })
+        check = ROOT / "library" / "runnable-commands" / "check.py"
+        self.assertEqual(rerun.run_check(str(check), str(self.tree)), {"status": "PASS"})
+
     def test_scans_never_run_the_tree_under_test(self):
         sentinel = Path(self.tree.parent) / "ran"
         touch = f"open({str(sentinel)!r}, 'w').close()\n"

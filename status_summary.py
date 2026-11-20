@@ -2,6 +2,10 @@
 
 import json
 import re
+import shlex
+import shutil
+import sqlite3
+import subprocess
 
 import coldfix as c
 
@@ -48,7 +52,45 @@ def completion(root, store):
     return dict(time=report["created"], basis="measurement_report_created", status=report["status"])
 
 
+def transcripts(root):
+    ledger = root / "transcript-scan.sqlite"
+    if not ledger.is_file():
+        return dict(analyzed=0, judged=0)
+    db = sqlite3.connect(ledger.as_uri() + "?mode=ro", uri=True)
+    try:
+        analyzed, judged = db.execute("SELECT count(*), count(score) FROM scans").fetchone()
+    except sqlite3.Error:
+        analyzed = judged = 0
+    finally:
+        db.close()
+    return dict(analyzed=analyzed, judged=judged)
+
+
+def next_run(root):
+    import loop_setup
+    service = loop_setup.unit_folder() / (loop_setup.UNIT + ".service")
+    if shutil.which("systemctl") and service.is_file() and loop_setup.systemd_quote(str(root)) in service.read_text():
+        reply = subprocess.run(["systemctl", "--user", "show", loop_setup.UNIT + ".timer", "-p", "NextElapseUSecRealtime", "--value"],
+                               capture_output=True, text=True)
+        if reply.returncode == 0 and reply.stdout.strip() not in ("", "n/a"):
+            return reply.stdout.strip()
+    if shutil.which("crontab"):
+        reply = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+        entry = [line for line in reply.stdout.splitlines() if line.endswith(loop_setup.CRON_TAG)
+                 and " --store " + shlex.quote(str(root)) + " " in line] if reply.returncode == 0 else []
+        if entry:
+            return "cron " + " ".join(entry[0].split()[:5])
+    return None
+
+
 def status(path):
+    value = summary(path)
+    value["transcripts"] = transcripts(c.ordinary_path(path))
+    value["next_scheduled_run"] = next_run(c.ordinary_path(path).resolve())
+    return value
+
+
+def summary(path):
     try:
         root, store = c.load_store(path)
         scope = "direct_store"
@@ -112,8 +154,9 @@ def summarize(store, scope, completed):
         tally("outcomes", linked(refs))
     top = [dict(signature=key, events=len(refs), sources=linked(refs))
            for key, refs in sorted(groups.items(), key=lambda item: (-len(item[1]), item[0])) if len(refs) >= 2][:5]
+    ci = sum(1 for ref, row in failures.items() if sources[ref] == "github" and row.get("kind") == "ci")
     return dict(scope=scope, totals=dict(events=len(failures), groups=len(groups), lessons=len(lessons),
-                                        outcomes=len(store["outcomes"])), by_source=by_source,
+                                        outcomes=len(store["outcomes"])), by_source=by_source, ci_failures=ci,
                 attribution="Groups, latest lessons, and outcomes count once per linked source; source totals may overlap.",
                 top_recurring_groups=top, latest_lessons=states, last_completed_run=completed)
 
@@ -136,6 +179,9 @@ def terminal(value):
                  for row in value["latest_lessons"])
     if not value["latest_lessons"]:
         lines.append("  none")
+    lines.append("Transcripts analyzed: {analyzed} ({judged} judged by the model)".format(**value["transcripts"]))
+    lines.append("CI failures collected: " + str(value["ci_failures"]))
+    lines.append("Next scheduled run: " + (value["next_scheduled_run"] or "none (run coldfix init --yes)"))
     done = value["last_completed_run"]
     lines.append("Last completed run: " + (done["time"] + " (measurement report creation; " + done["status"] + ")"
                                             if done else "unknown (no completion marker in scope)"))

@@ -12,6 +12,7 @@ import unittest
 SCRIPT = Path(__file__).resolve().parents[1] / "learn_stall.py"
 COLLECT, DAILY, TRANSCRIPTS = "coldfix-collect.service", "coldfix-daily.service", "coldfix-transcripts.service"
 BACKLOG, OSS = "coldfix-backlog.service", "coldfix-oss.service"
+SYNC = "coldfix-lessons-sync.service"
 FAKE_GH = """
 import json, os, sys
 words, db = sys.argv[1:], os.environ["FAKE_GH_DB"]
@@ -140,6 +141,63 @@ class LearnStallTests(unittest.TestCase):
                                     + "\n").returncode, 0)
         self.assertIn("RECOVERED", self.notes()[len(before):])
         self.assertEqual(json.loads(self.state.read_text())["active"], {})
+
+    def test_unreachable_hosts_alert_only_after_24_hours_without_success(self):
+        healthy = journal(25, imported=1, proven=1, scanned=4, github_failed=(0,), coldbox_missing=False)
+        skip = [entry(.1, SYNC, "sync skipped, retry next run: mac"),
+                entry(.1, SYNC, "synced windows"),
+                entry(.1, TRANSCRIPTS, "transcript pull skipped, retry next run: compute to vm")]
+        recent = [entry(23, SYNC, "synced mac"), entry(23, TRANSCRIPTS, "transcript pull synced compute to vm")]
+        old = [entry(24.1, SYNC, "synced mac"),
+               entry(24.1, TRANSCRIPTS, "transcript pull skipped, retry next run: compute to vm")]
+        self.assertEqual(self.check(healthy + "\n".join(recent + skip) + "\n").returncode, 0)
+        self.assertEqual(self.notes(), "")
+        overdue = healthy + "\n".join(old + skip) + "\n"
+        self.assertEqual(self.check(overdue).returncode, 0)
+        self.assertEqual(self.notes().count("STALLED"), 2)
+        self.assertIn("Lessons sync (mac): host unreachable", self.notes())
+        self.assertIn("Transcript pull (compute to vm): host unreachable", self.notes())
+        self.assertNotIn("Lessons sync (windows)", self.notes())
+        self.assertEqual(self.check(overdue).returncode, 0)
+        self.assertEqual(self.notes().count("STALLED"), 2)
+        recover = [entry(.01, SYNC, "synced mac"), entry(.01, TRANSCRIPTS, "transcript pull synced compute to vm")]
+        self.assertEqual(self.check(overdue + "\n".join(recover) + "\n").returncode, 0)
+        self.assertEqual(self.notes().count("RECOVERED"), 2)
+
+    def test_skipped_pull_does_not_raise_the_six_hour_scan_alert(self):
+        base = journal(25, imported=1, proven=1, scanned=0, github_failed=(0,), coldbox_missing=False)
+        self.assertEqual(self.check(base + entry(.1, TRANSCRIPTS, "transcript pull skipped, retry next run: compute")
+                                    + "\n").returncode, 0)
+        self.assertEqual(self.notes(), "")
+
+    def test_source_status_uses_transfer_events_and_the_service_substate(self):
+        fake = self.root / "systemctl"
+        fake.write_text(f"""#!/bin/sh
+cat <<'EOF'
+Id={COLLECT}
+ActiveState=activating
+SubState=auto-restart
+
+Id={TRANSCRIPTS}
+ActiveState=activating
+SubState=start
+
+Id=coldfix-oss.timer
+ActiveState=inactive
+SubState=dead
+EOF
+""")
+        fake.chmod(0o755)
+        events = [entry(.1, SYNC, "sync skipped, retry next run: mac"),
+                  entry(.2, OSS, "ci-backlog paused: 10 consecutive batches proved 0 lessons")]
+        result = subprocess.run([sys.executable, str(SCRIPT), "--sources"], input="\n".join(events), text=True,
+                                capture_output=True, check=True,
+                                env={**os.environ, "PATH": f"{self.root}{os.pathsep}{os.environ['PATH']}"})
+        values = json.loads(result.stdout)
+        self.assertEqual(values["Hourly collection"], "Idle. Restart scheduled")
+        self.assertEqual(values["Transcripts"], "Running")
+        self.assertEqual(values["OSS"], "Paused: 10 consecutive batches proved 0 lessons")
+        self.assertEqual(values["Lessons sync (mac)"], "Idle. Host unreachable. Skipped, retry next run")
 
     def test_a_paused_transcript_backlog_or_oss_run_alerts_until_a_later_run_is_not_paused(self):
         held = [entry(.5, TRANSCRIPTS, dict(paused="3 batches in a row proved nothing; resumes at 2026-11-09T00:00:00+00:00")),

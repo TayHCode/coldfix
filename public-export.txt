@@ -251,9 +251,11 @@ oss-repos.json
 oss_replay.py
 private_run.py
 public-export.txt
+pylock.toml
 pyproject.toml
 regression_adapter.py
 release-check.json
+replay_env.py
 replay_isolation.py
 replay_repos.py
 repo_install.py
@@ -376,6 +378,7 @@ tests/test_lesson_withdrawal.py
 tests/test_library.py
 tests/test_library_export.py
 tests/test_live_e2e.py
+tests/test_loop_init.py
 tests/test_measurements.py
 tests/test_oss_replay.py
 tests/test_private_hosts.py
@@ -384,6 +387,7 @@ tests/test_proof_record.py
 tests/test_readme.py
 tests/test_real_lesson.py
 tests/test_replay_backends.py
+tests/test_replay_env.py
 tests/test_review_import.py
 tests/test_run_result_ingest.py
 tests/test_settle_codex_lessons.py

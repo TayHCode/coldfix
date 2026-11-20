@@ -153,18 +153,15 @@ class TranscriptDeliveryTests(unittest.TestCase):
         with mock.patch.object(d, "TOOL", ""), self.assertRaises(d.c.ColdfixError):
             d.deliver(self.f.root, self.f.folder)
 
-    def test_delivery_publishes_sorted_unique_held_back_project_slugs(self):
+    def test_delivery_clears_the_legacy_project_holdout(self):
         published = self.f.folder / "held-back-projects.txt"
+        published.write_text("example/gamma\nexample/iota\n")
+        row = c.new_record()
+        row.update(repo="example/gamma", agent="claude", command="test", error="failed", thread="", source="argument")
+        row["group_id"] = c.group_id(row)
+        c.save(self.f.root, "failures", row)
         self.assertEqual(self.cli("deliver")[0], 0)
-        self.assertTrue(published.is_file())
         self.assertEqual(published.read_text(), "")
-        for repo in ("Example/Iota", "example/alpha", "Example/Gamma", "example/gamma", "unknown"):
-            row = c.new_record()
-            row.update(repo=repo, agent="claude", command="test", error="failed", thread="", source="argument")
-            row["group_id"] = c.group_id(row)
-            c.save(self.f.root, "failures", row)
-        self.assertEqual(self.cli("deliver")[0], 0)
-        self.assertEqual(published.read_text(), "example/gamma\nexample/iota\n")
 
     def test_delivers_proven_lessons_with_ledger_numbers_and_skips_duplicates(self):
         self.f.ledger(dict(
@@ -1396,7 +1393,7 @@ class LessonEffectTests(unittest.TestCase):
         (self.folder / "L2-check-the-requested-device-first.md").write_text(JUDGED)
         (self.root / d.DELIVERIES).write_text(json.dumps(dict(leads=dict(
             a=dict(status="delivered", lesson="L2", delivered="2026-11-07T00:00:00+00:00")))))
-        self.store = dict(failures=dict(a=failure("2026-11-05T10:00:00Z")))
+        self.store = dict(failures=dict(a=failure("2026-11-05T10:00:00Z")), lessons={}, receipts={})
 
     def ledger(self, **leads):
         (self.root / d.LEDGER).write_text(json.dumps(dict(leads=dict(a=lead("t", "r"), **leads), batches=[])))
@@ -1526,6 +1523,39 @@ class LessonEffectTests(unittest.TestCase):
         self.evidence_lesson(evidence="evidence: replay example/fleet@main:x\n")
         self.assertEqual(recheck(), dict(lesson="L1", result="unchecked", reason="no witness"))
 
+    def test_recheck_checks_a_proven_lesson_without_an_evidence_line_against_its_replay_proof(self):
+        self.ledger()
+        key = "c" * 32
+
+        def store(status="active", after="PASS"):
+            return dict(failures={}, lessons={key: dict(lesson_id=key, id=key, previous=None, status=status,
+                                                        verification="proven", receipt="r")},
+                        receipts=dict(r=dict(before=dict(status="FAIL"), after=dict(status=after))))
+        (self.folder / "L1-docs-sync.md").write_text(L1.replace("source: owner-request", "source: coldfix-proven:" + key))
+        recheck = lambda **kw: {r["lesson"]: r for r in d.recheck(self.root, self.store, self.folder, None, None, **kw)}["L1"]
+        self.assertEqual(recheck(), dict(lesson="L1", result="unchecked", reason="replay proof not in the store"))
+        self.assertEqual(recheck(backlog=(store(), {})), dict(lesson="L1", result="passed",
+                                                              reason="replay proof present: before FAIL, after PASS"))
+        self.assertEqual(recheck(backlog=(store(), {key: key})), dict(
+            lesson="L1", result="unchecked", reason="replay proof invalidated: awaiting revalidation"))
+        self.store.update(store())
+        (self.root / "invalidations.json").write_text(json.dumps({key: key}))
+        self.assertEqual(recheck()["reason"], "replay proof invalidated: awaiting revalidation")
+        (self.root / "invalidations.json").unlink()
+        self.store["failures"] = dict(a=failure("2026-11-05T10:00:00Z"))
+        self.store.update(lessons=store()["lessons"], receipts=store(after="FAIL")["receipts"])
+        self.assertEqual(recheck(), dict(lesson="L1", result="unchecked",
+                                         reason="replay proof incomplete: proven, before FAIL, after FAIL"))
+        self.store["lessons"][key]["verification"] = "unproven"
+        self.assertEqual(recheck(withdraw_at="2026-11-19T00:00:00+00:00"), dict(
+            lesson="L1", result="unchecked", reason="replay proof incomplete: unproven, before FAIL, after FAIL"))
+        self.assertIn("status: active", (self.folder / "L1-docs-sync.md").read_text())
+        self.store.update(lessons=store("retired")["lessons"])
+        self.assertEqual(recheck(), dict(lesson="L1", result="regression", reason="replay proof is retired"))
+        self.evidence_lesson("proposed", evidence="")
+        self.assertEqual(recheck(), dict(lesson="L1", result="skipped",
+                                         reason="proposed: not delivered until the owner approves it"))
+
     def test_recheck_reports_ended_states_as_retired_without_judging_them(self):
         self.ledger()
         self.evidence_lesson("superseded")
@@ -1599,7 +1629,7 @@ if __name__ == "__main__":
 def proven_lesson(key, repo, created, title, rule="Run the packaging test on Python 3.10.", failure="tomllib import failed"):
     return dict(lesson_id=key, id="r1-" + key, created=created, title=title, rule=rule, failure=failure,
                 fix="parse pyproject without tomllib", repo=repo, before="a" * 40, after="b" * 40, kind="ci",
-                replayed=("FAIL", "PASS", "FAIL"))
+                replayed=("FAIL", "PASS", "FAIL"), source="coldfix-proven:")
 
 
 class ProvenLessonDeliveryTests(unittest.TestCase):
@@ -1614,9 +1644,49 @@ class ProvenLessonDeliveryTests(unittest.TestCase):
         with mock.patch.object(d, "replay_proven", lambda root: list(self.proven), create=True):
             return self.f.deliver()
 
+    def test_a_transcript_replay_delivers_its_proven_lesson_once_to_its_repo(self):
+        import check_delivery
+        from test_learn_replay import TranscriptCodeLeadReplayTests
+
+        replay = TranscriptCodeLeadReplayTests()
+        workspace = Path(self.directory.name) / "replay"
+        workspace.mkdir()
+        store, failure, before, after = replay.lead(workspace, "Fixed in https://github.com/{repo}/pull/7")
+        counts, _, routes = replay.replay(workspace, store)
+        self.assertEqual(counts["proven"], 1)
+        self.f.root = store
+        route = routes[failure["id"]]
+        lesson_id = route["lesson_id"]
+        routes["unrelated"] = route
+        (store / "transcript-replay.json").write_text(json.dumps(routes))
+
+        saved = c.load_store(store)[1]
+        rows = check_delivery.proven(store, saved, dict(drafts={}))
+        self.assertEqual([(r["lesson_id"], r["repo"], r["before"], r["after"]) for r in rows],
+                         [(lesson_id, "example/project", before, after)])
+        with mock.patch.object(check_delivery, "gh", side_effect=AssertionError("transcript proof triggered GitHub")):
+            result = check_delivery.deliver(store, rows, c.time_key(BATCH), write=True,
+                                            issues="example/tracker")
+        self.assertEqual((result["proven"], check_delivery.records(store)), (0, {}))
+        draft = dict(replay=dict(status="proven", repo="project", proof=dict(id=rows[0]["id"])))
+        duplicates = check_delivery.proven(store, saved, dict(drafts={"draft": draft}))
+        self.assertEqual([(row["lesson_id"], row["from_transcript"]) for row in duplicates], [(lesson_id, False)])
+        self.assertEqual(self.f.deliver()["added"], ["L2"])
+        meta = d.frontmatter(self.f.file("L2-keep-values-positive.md"))
+        self.assertEqual((meta["source"], meta["status"], meta["repos"]),
+                         ("coldfix-transcript-proven:" + lesson_id, "active", ["example/project"]))
+        briefed = int(c.digest(lesson_id), 16) % 5 != 0
+        self.assertEqual("- **L2 keep-values-positive** (replayed)" in self.f.file("briefing.md"), briefed)
+        self.assertEqual(self.f.deliver()["added"], [])
+
+        (store / "invalidations.json").write_text(json.dumps({lesson_id: rows[0]["id"]}))
+        with mock.patch.object(d, "HOOK_READ_SECONDS", 0):
+            self.assertEqual(self.f.deliver()["removed"], ["L2"])
+        self.assertNotIn("L2 keep-values-positive", self.f.file("briefing.md"))
+
     def test_replay_proven_proven_lessons_are_written_scoped_to_their_repo_and_three_newest_per_repo_are_briefed(self):
         self.proven = [proven_lesson(f"{n:032x}", "Example/tool-private", f"2026-11-1{n}T00:00:00+00:00", f"Lesson {n}")
-                       for n in range(1, 5)] + [proven_lesson("e" * 32, "Example/other-private", "2026-11-10T00:00:00+00:00", "Other")]
+                       for n in range(1, 5)] + [proven_lesson("f" * 32, "Example/other-private", "2026-11-10T00:00:00+00:00", "Other")]
         self.assertEqual(self.deliver()["added"], ["L2", "L3", "L4", "L5", "L6"])
         body = self.f.file("L4-lesson-2.md")
         head = dict(re.findall(r"^(\w+): ?(.*)$", body.split("\n---\n")[0], re.M))
@@ -1629,6 +1699,37 @@ class ProvenLessonDeliveryTests(unittest.TestCase):
             L1_LINE, f"- **L2 other** (replayed): {rule}", f"- **L4 lesson-2** (replayed): {rule}",
             f"- **L5 lesson-3** (replayed): {rule}", f"- **L6 lesson-4** (replayed): {rule}"))
         self.assertEqual(self.deliver()["added"], [])
+
+    def test_holdout_stays_out_of_the_briefing_when_revised_and_preserves_checks(self):
+        date = "2026-11-11T00:00:00+00:00"
+        held = dict(proven_lesson("d" * 32, "example/project", date, "Held"), source=d.TRANSCRIPT_PROVEN_SOURCE)
+        checked = proven_lesson("e" * 32, "example/project", date, "Checked")
+        briefed = proven_lesson("a" * 32, "example/project", date, "Briefed")
+        named = Path(self.directory.name) / "lesson-checks.json"
+        named.write_text(json.dumps({checked["lesson_id"]: "library/example/scan.py"}))
+        self.proven = [held, checked, briefed]
+        with mock.patch.object(d, "LESSON_CHECKS", named):
+            self.assertEqual(self.deliver()["added"], ["L2", "L3", "L4"])
+            self.assertIn("lessons/L3-held.md", self.f.files())
+            self.assertIn("- **L2 briefed**", self.f.file("briefing.md"))
+            self.assertIn("- **L4 checked**", self.f.file("briefing.md"))
+            self.assertNotIn("- **L3 held**", self.f.file("briefing.md"))
+            self.proven[0] = dict(held, id="r2-" + held["lesson_id"], title="Revised",
+                                  created="2026-11-12T00:00:00+00:00", source=d.PROVEN_SOURCE)
+            self.assertEqual(self.deliver()["added"], [])
+            self.assertIn("lessons/L3-revised.md", self.f.files())
+            self.assertNotIn("- **L3 revised**", self.f.file("briefing.md"))
+
+    def test_a_coldpass_lesson_names_coldpass_and_an_existing_file_is_relabeled_in_place(self):
+        self.proven = [proven_lesson("a" * 32, "x/one", "2026-11-11T00:00:00+00:00", "First")]
+        self.assertEqual(self.deliver()["added"], ["L2"])
+        self.proven = [dict(self.proven[0], source="coldpass-proven:")]
+        result = self.deliver()
+        self.assertEqual((result["added"], result["removed"]), ([], []))
+        self.assertIn("source: coldpass-proven:" + "a" * 32 + "\n", self.f.file("L2-first.md"))
+        self.assertIn("- **L2 first** (replayed)", self.f.file("briefing.md"))
+        self.assertEqual(self.deliver()["added"], [])
+        self.assertEqual(sorted(self.f.files()), ["lessons/INDEX.md", "lessons/L1-docs-sync.md", "lessons/L2-first.md", "lessons/briefing.md"])
 
     def test_a_vetoed_or_no_longer_proven_proven_lesson_is_removed_and_never_re_added(self):
         self.proven = [proven_lesson("a" * 32, "x/one", "2026-11-11T00:00:00+00:00", "First"),
@@ -1663,10 +1764,26 @@ class ProvenLessonDeliveryTests(unittest.TestCase):
                 "none (no portable scan yet; proving test test_second_case not delivered: bot pull requests are not enabled)",
                 "none (withheld by the privacy screen)", "none (no portable scan yet and no named proving test)"])
             delivered = json.loads((self.f.root / d.DELIVERIES).read_text())["proven"]["b" * 32]["delivered"]
-            records.write_text(json.dumps({"b" * 32: dict(state="delivered", path="tests/test_second.py")}))
+            self.assertIn("status: active\n", self.f.file("L3-second.md"))
+            self.assertIn("- **L3 second**", self.f.file("briefing.md"))
+            row = dict(state="delivered", path="tests/test_second.py", revision="r1-" + "b" * 32, repo="x/one")
+            records.write_text(json.dumps({"b" * 32: row}))
             result = self.deliver()
             self.assertEqual((result["added"], self.check_line("L3-second.md")), ([], "x/one tests/test_second.py::test_second_case"))
             self.assertEqual(json.loads((self.f.root / d.DELIVERIES).read_text())["proven"]["b" * 32]["delivered"], delivered)
+            self.assertIn("status: enforced\n", self.f.file("L3-second.md"))
+            self.assertNotIn("L3 second", self.f.file("briefing.md"))
+            path = self.f.folder / "L3-second.md"
+            path.write_text(path.read_text().replace("status: enforced\n", "status: active\n"))
+            self.deliver()
+            self.assertIn("status: enforced\n", path.read_text())
+            records.write_text(json.dumps({"b" * 32: dict(row, revision="r0-" + "b" * 32)}))
+            self.deliver()
+            self.assertIn("status: active\n", path.read_text())
+            self.assertIn("- **L3 second**", self.f.file("briefing.md"))
+            records.write_text(json.dumps({"b" * 32: dict(row, repo="X/old-name")}))
+            self.deliver()
+            self.assertIn("status: enforced\n", path.read_text())
 
     def test_a_proven_lesson_file_carries_its_cause_prevention_and_full_suite_result(self):
         suite = dict(command="python3 -m unittest discover -s tests", status="PASS", new_failures=[],
@@ -1845,6 +1962,19 @@ class ProvenLessonDeliveryTests(unittest.TestCase):
             result = self.deliver()
         self.assertEqual((result["added"], result["withheld_incomplete_receipt"]), (["L2"], 1))
         self.assertIn("lessons/L2-review.md", self.f.files())
+
+    def test_replay_proven_labels_a_coldpass_admitted_lesson_as_coldpass(self):
+        import check_delivery
+        lessons = [proven_lesson("a" * 32, "x/one", "2026-11-11T00:00:00+00:00", "Coldpass"),
+                   proven_lesson("b" * 32, "x/one", "2026-11-11T00:00:00+00:00", "Other")]
+        store = dict(lessons={"r1-" + "a" * 32: dict(evidence=["f1"], receipt="p1", admission=dict(kind="verified_coldpass_incident")),
+                              "r1-" + "b" * 32: dict(evidence=["f1"], receipt="p1", admission=dict(kind="verified_incident"))},
+                     failures=dict(f1=dict(kind="ci")), receipts=dict(p1=dict(before=dict(status="FAIL"), after=dict(status="PASS"))))
+        with mock.patch.object(check_delivery, "proven", return_value=lessons), \
+                mock.patch.object(d.c, "load_store", return_value=(None, store)), \
+                mock.patch.object(check_delivery, "records", return_value={}):
+            found = d.replay_proven(self.f.root)
+        self.assertEqual([row["source"] for row in found], ["coldpass-proven:", "coldfix-proven:"])
 
     def test_proven_lessons_use_one_lowercase_repo_name_and_skip_lessons_retired_with_their_archived_repo(self):
         import check_delivery

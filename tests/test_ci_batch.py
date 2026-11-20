@@ -169,12 +169,12 @@ class RunTests(unittest.TestCase):
     def saved(self):
         return json.loads((self.root / ci_batch.LEDGER).read_text())
 
-    def run_batch(self, outcome):
+    def run_batch(self, outcome, **options):
         def learned(root, entry, *rest):
             entry.update(finished(entry["batch"], outcome.pop(0)))
         fresh = lambda root, ledger, *rest: dict(batch=len(ledger["batches"]) + 1, ids=[], fix_pairs=1, ingested=1, learned=False)
         with mock.patch.object(ci_batch, "ingest", side_effect=fresh), mock.patch.object(ci_batch, "learn", learned):
-            return ci_batch.run(self.root, "o", 100)
+            return ci_batch.run(self.root, "o", 100, **options)
 
     def test_an_unfinished_batch_is_learned_again_without_selecting_new_failures(self):
         unfinished = dict(batch=1, ids=["f1"], learned=False)
@@ -276,6 +276,34 @@ class RunTests(unittest.TestCase):
         self.assertEqual(len(self.run_batch([1])), 1)
         self.assertEqual(len(self.run_batch([0])), 1)
         self.assertNotIn("paused", self.saved())
+
+
+    def test_oss_pauses_on_the_tenth_consecutive_zero_proof_batch(self):
+        self.ledger(batches=[finished(1), finished(2, proven=1), *map(finished, range(3, 11))])
+        self.run_batch([0], public=["o/public"])
+        self.assertNotIn("reason", self.saved()["oss_pause"])
+        reason = "10 consecutive batches proved 0 lessons (batches 3-12)"
+        self.assertEqual(self.run_batch([0], public=["o/public"])[-1], f"ci-backlog paused: {reason}")
+        self.assertEqual(self.saved()["oss_pause"]["reason"], reason)
+        with mock.patch.object(ci_batch, "ingest") as ingest:
+            self.assertEqual(ci_batch.run(self.root, None, 100, public=["o/public"]), [f"ci-backlog paused: {reason}"])
+        ingest.assert_not_called()
+
+    def test_a_refreshed_oss_repo_list_starts_a_new_streak(self):
+        self.ledger(batches=list(map(finished, range(1, 11))))
+        self.assertIn("ci-backlog paused:", ci_batch.run(self.root, None, 100, public=["o/public"])[0])
+        lines = self.run_batch([0], public=["o/public", "o/new"])
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith("ci-backlog batch 11:"))
+        self.assertNotIn("reason", self.saved()["oss_pause"])
+        self.assertEqual(len(self.saved()["batches"]), 11)
+
+    def test_oss_pauses_an_existing_zero_proof_streak_before_ingesting(self):
+        self.ledger(batches=list(map(finished, range(1, 11))))
+        with mock.patch.object(ci_batch, "ingest") as ingest:
+            self.assertEqual(ci_batch.run(self.root, None, 100, public=["o/public"]),
+                             ["ci-backlog paused: 10 consecutive batches proved 0 lessons (batches 1-10)"])
+        ingest.assert_not_called()
 
 
 class DedupeTests(unittest.TestCase):
@@ -695,7 +723,7 @@ class OpenSourceTests(unittest.TestCase):
         self.assertEqual([(pair["finding_url"].rsplit("_r", 1)[1], pair["before"], pair.get("path"),
                            pair.get("start_line"), pair.get("end_line")) for pair in pairs],
                          [("10", "a" * 40, "pkg/core.py", 4, 6),
-                          ("11", "e" * 40, None, None, None),
+                          ("11", "b" * 40, "pkg/core.py", 7, 7),
                           ("12", "a" * 40, None, None, None),
                           ("13", "a" * 40, "pkg/core.py", 11, 11)])
 
@@ -725,6 +753,28 @@ class OpenSourceTests(unittest.TestCase):
         self.assertEqual(pairs, [dict(stored, path=recorded["path"], start_line=96, end_line=96)])
         self.assertEqual(github.calls.count(endpoint), 1)
         self.assertNotEqual(inputs(pairs), settled)
+
+    def test_a_stored_pair_moved_off_its_reviewed_commit_is_paired_on_that_commit_once(self):
+        def stored(number, before):
+            return dict(repo="o/a", before=before * 40, after="f" * 40, path=None,
+                        finding_url=f"https://github.com/o/a/pull/1#discussion_r{number}")
+        recorded = {number: dict(comment(number, reviewed), side="RIGHT", original_line=7)
+                    for number, reviewed in ((10, "a"), (11, "b"), (12, "c"))}
+        github = OpenSourceGitHub({}, {}, {"a" * 40 + "..." + "f" * 40: fixed([CODE, TEST]),
+                                           "b" * 40 + "..." + "f" * 40: dict(fixed([CODE, TEST]), status="diverged")})
+
+        def api(endpoint, missing=None):
+            number = int(endpoint.rsplit("/", 1)[1]) if "/pulls/comments/" in endpoint else None
+            return (github.calls.append(endpoint) or recorded[number]) if number else github(endpoint, missing)
+        pairs = [stored(10, "e"), stored(11, "e"), stored(12, "c"), dict(stored(13, "e"), path="pkg/core.py"),
+                 dict(stored(14, "e"), repo="o/out", finding_url="https://github.com/o/out/pull/1#discussion_r14")]
+        for _ in range(2):
+            ci_batch.refetch_flagged_lines(pairs, api, ["O/A"])
+        self.assertEqual([(row["before"][0], row["path"], row.get("start_line"), row.get("reviewed_commit", "")[:1])
+                          for row in pairs],
+                         [("a", "pkg/core.py", 7, ""), ("e", None, None, "b"),
+                          ("c", "pkg/core.py", 7, ""), ("e", "pkg/core.py", None, ""), ("e", None, None, "")])
+        self.assertEqual(sum("/pulls/comments/" in call for call in github.calls), 3)
 
     def test_each_batch_examines_a_bounded_share_of_merged_prs_per_repository(self):
         pulls = {repo: [pull(number, "f") for number in range(1, 120)] for repo in ("o/a", "o/b")}
@@ -783,7 +833,7 @@ class OpenSourceTests(unittest.TestCase):
             self.assertEqual(seen, [[["o/a"]], []])
             self.assertEqual(len(ci_batch.c.load_store(root)[1]["failures"]), 1)
 
-    def test_a_finding_is_judged_from_the_last_pr_commit_before_it_when_a_later_one_exists(self):
+    def test_a_finding_is_paired_on_the_commit_it_reviewed_even_when_a_merged_mainline_commit_predates_it(self):
         github = OpenSourceGitHub(
             pulls={"o/a": [pull(1, "f")]},
             comments={1: [comment(10, "a"), comment(11, "b")]},
@@ -794,7 +844,7 @@ class OpenSourceTests(unittest.TestCase):
         ledger = dict(seen={}, pages={}, batches=[])
         pairs = self.feature("review_findings")(ledger, ["o/a"], 10, github)[0]
         self.assertEqual([(row["finding_url"][-3:], row["before"]) for row in pairs],
-                         [("r10", "a" * 40), ("r11", "e" * 40)])
+                         [("r10", "a" * 40), ("r11", "b" * 40)])
 
     def test_a_repository_or_pr_github_no_longer_serves_is_skipped_without_stopping_the_batch(self):
         github = OpenSourceGitHub({"o/a": [pull(1, "f"), pull(2, "f")]}, {1: None, 2: [comment(10, "a")]},

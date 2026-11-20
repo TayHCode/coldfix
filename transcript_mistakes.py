@@ -21,7 +21,7 @@ import urllib.request
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 
-from coldfix import CHEAP_MODEL, ColdfixError, model_command, occurred as valid_occurred
+from coldfix import CHEAP_MODEL, PRIVACY_PATTERNS, ColdfixError, credential_matches, model_command, occurred as valid_occurred
 import learn_daily
 
 OWNER = os.environ.get('COLDFIX_OWNER_LABEL', 'owner')
@@ -116,8 +116,30 @@ def read_messages(path, raw):
     return native_messages(text, agent_name(path) == 'codex') if path.suffix == '.jsonl' else messages(text)
 
 
+PRIVATE_KEY = re.compile(r"-----BEGIN ((?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?)-----.*?(?:-----END \1-----|\Z)", re.S)
+YAML_BLOCK = re.compile(r"(?i)(?:key|token|secret|passw(?:or)?d|credential)\w*[\"']?[ \t]*:[ \t]*[|>][-+0-9]*[ \t]*\r?\n"
+                        r"((?:[ \t]+[^\r\n\x00]*(?:\r?\n|(?=\x00)|\Z))+)")
+ROW = "\x00"
+
+
+def redact(text):
+    spans = sorted([(m.start("value"), m.end("value")) for m in credential_matches(text)]
+                   + [m.span() for m in PRIVACY_PATTERNS["credential"].finditer(text)]
+                   + [m.span() for m in PRIVATE_KEY.finditer(text)]
+                   + [m.span(1) for m in YAML_BLOCK.finditer(text)])
+    kept, end = [], 0
+    for start, stop in spans:
+        if stop > end:
+            hidden = text[max(start, end):stop]
+            kept.append(text[end:max(start, end)] + ROW.join("[redacted]" for _ in hidden.split(ROW)))
+            end = stop
+    return "".join(kept) + text[end:]
+
+
 def excerpt(rows):
     rows = [row for row in rows if row['role'] != 'system']
+    texts = redact(ROW.join(row['text'].replace(ROW, '') for row in rows)).split(ROW)
+    rows = [dict(row, text=text) for row, text in zip(rows, texts)]
     hits = [i for i, row in enumerate(rows) if any(r.search(row['text']) for r in MISTAKE_TYPES.values())]
     if not hits or not any(r['role'] == 'assistant' for r in rows):
         return []
@@ -156,14 +178,27 @@ def command_judge(state, name, instructions, criteria):
     return probability(model_command('judge', judge_prompt(state, instructions, criteria), SCORE).get('score'))
 
 
-def role_judge():
-    chosen = learn_daily.route(FALLBACK_ROLE)
+class RoleJudge:
+    def __init__(self):
+        self.chosen = None
 
-    def call(state, name, instructions, criteria):
+    def route(self):
+        self.chosen = self.chosen or learn_daily.route(FALLBACK_ROLE)
+        return self.chosen
+
+    @property
+    def model(self):
+        return self.route()['model']
+
+    def __call__(self, state, name, instructions, criteria):
         with tempfile.TemporaryDirectory() as work:
             prompt = judge_prompt(state, instructions, criteria)
-            return probability(learn_daily.ask(chosen, prompt, SCORE, Path(work)).get('score'))
-    return call, chosen['model']
+            return probability(learn_daily.ask(self.route(), prompt, SCORE, Path(work)).get('score'))
+
+
+def role_judge():
+    call = RoleJudge()
+    return call, call.model
 
 
 class JevOrRole:
@@ -192,6 +227,8 @@ class JevOrRole:
 def judge(endpoint, model):
     if os.environ.get('COLDFIX_MODEL_CMD'):
         return command_judge, COMMAND_JUDGE + ' ' + hashlib.sha256(os.environ['COLDFIX_MODEL_CMD'].encode()).hexdigest()[:12]
+    if os.environ.get('COLDFIX_JUDGE') != 'jev':
+        return RoleJudge(), model
     key = os.environ.get('JEV_API_KEY')
     return (key and JevOrRole(lambda state, *rest: jev(state, *rest, endpoint, model, key), model)) or None, model
 
@@ -357,7 +394,7 @@ def main():
     args = parser.parse_args()
     judge_call, label = judge(args.endpoint, args.model)
     if not judge_call or not safe_endpoint(args.endpoint) or args.limit < 1 or args.max_calls < 1 or not 0 <= args.threshold <= 1:
-        parser.error('set COLDFIX_MODEL_CMD or JEV_API_KEY and provide positive limits and a threshold between 0 and 1')
+        parser.error('with COLDFIX_JUDGE=jev set JEV_API_KEY; provide positive limits and a threshold between 0 and 1')
     if not args.model.startswith('jev-') or not CHEAP_MODEL.fullmatch(args.model):
         parser.error('the transcript scan runs only on a Jev model')
     if not all(root.is_dir() for root in args.roots):

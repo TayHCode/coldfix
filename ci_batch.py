@@ -3,6 +3,7 @@
 import argparse
 from collections import Counter
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 import json
 import math
 from pathlib import Path
@@ -27,6 +28,7 @@ WINDOW = timedelta(days=7)
 DIAGNOSTIC = re.compile(r"(?:FAIL|ERROR): test\w*")
 RUN_ID = re.compile(r"/actions/runs/(\d+)")
 ZERO_STREAK = 3
+OSS_ZERO_STREAK = 10
 PAUSE_HOURS = 12
 FETCH_TRIES = 3
 DRAFT_TRIES = 3
@@ -249,15 +251,26 @@ def flagged_lines(comment, before):
     return {}
 
 
-def refetch_flagged_lines(pairs, api):
-    found = 0
+def pairable(diff, comment):
+    return (diff.get("status") == "ahead" and adds_test(diff) and not only_tests(diff, True)
+            and comment.get("path") in {row.get("filename") for row in diff.get("files", [])})
+
+
+def refetch_flagged_lines(pairs, api, public):
+    found, allowed = 0, {repo.casefold() for repo in public}
     for pair in pairs:
         finding = learn_replay.FINDING.fullmatch(str(pair.get("finding_url", "")))
-        if not finding or "path" in pair:
+        if (not finding or finding[1].casefold() not in allowed or isinstance(pair.get("path"), str)
+                or "reviewed_commit" in pair):
             continue
         try:
-            comment = api(f"repos/{finding[1]}/pulls/comments/{finding[3]}", missing="HTTP 404")
-            pair.update(flagged_lines(comment or {}, pair.get("before")) or dict(path=None))
+            comment = api(f"repos/{finding[1]}/pulls/comments/{finding[3]}", missing="HTTP 404") or {}
+            reviewed = comment.get("original_commit_id")
+            if (isinstance(reviewed, str) and reviewed != pair.get("before")
+                    and pairable(compare(finding[1], reviewed, pair.get("after"), api), comment)):
+                pair["before"] = reviewed
+            lines = flagged_lines(comment, pair.get("before"))
+            pair.update(lines or dict(path=None, reviewed_commit=reviewed))
         except failure_ingest.SOURCE_ERRORS:
             continue
         found += isinstance(pair["path"], str)
@@ -297,14 +310,7 @@ def review_findings(ledger, repos, size, api=api):
                         continue
                     if before not in compares:
                         compares[before] = compare(repo, before, head, api)
-                    earlier = [row["sha"] for row in compares[before].get("commits", [])
-                               if row["commit"]["committer"]["date"] <= comment["created_at"]]
-                    before = earlier[-1] if earlier and earlier[-1] != head else before
-                    if before not in compares:
-                        compares[before] = compare(repo, before, head, api)
-                    diff = compares[before]
-                    if (diff.get("status") != "ahead" or not adds_test(diff) or only_tests(diff, True)
-                            or comment.get("path") not in {row.get("filename") for row in diff.get("files", [])}):
+                    if not pairable(compares[before], comment):
                         continue
                     pairs.append(dict(repo=repo, before=before, after=head, finding_url=comment["html_url"],
                                       **flagged_lines(comment, before)))
@@ -347,7 +353,7 @@ def ingest(root, ledger, owner, size, api, fetch, known=frozenset(), public=None
             del ledger["seen"][number]
     pairs_path = root / PAIRS
     pairs = json.loads(c.read_text(pairs_path)) if pairs_path.exists() else dict(results=[])
-    refetched = refetch_flagged_lines(pairs["results"], api) if public is not None else 0
+    refetched = refetch_flagged_lines(pairs["results"], api, public) if public is not None else 0
     pairs["results"] += kept + reviews
     c.atomic_create(pairs_path, c.encoded(pairs), replace=True)
     entry = dict(batch=batch, considered=considered, fix_pairs=len(picked), ingested=len(ids),
@@ -424,6 +430,22 @@ def journal(entry):
             + (f"; open-source PRs examined {entry['pulls_examined']}, review pairs {entry['review_pairs']}" if "review_pairs" in entry else ""))
 
 
+def oss_pause(ledger, repos):
+    repo_digest = sha256(c.encoded(sorted({repo_key(repo) for repo in repos})).encode()).hexdigest()
+    pause = ledger.setdefault("oss_pause", {})
+    if pause.get("reason") and pause["repos"] == repo_digest:
+        return "ci-backlog paused: " + pause["reason"]
+    pause.pop("reason", None)
+    recent = ledger["batches"][-OSS_ZERO_STREAK:]
+    if (len(recent) == OSS_ZERO_STREAK and recent[0]["batch"] > pause.get("after_batch", 0)
+            and all(row["learned"] and row.get("proven") == 0 for row in recent)):
+        reason = (f"{OSS_ZERO_STREAK} consecutive batches proved 0 lessons "
+                  f"(batches {recent[0]['batch']}-{recent[-1]['batch']})")
+        pause.update(reason=reason, after_batch=recent[-1]["batch"], repos=repo_digest)
+        return "ci-backlog paused: " + reason
+    return None
+
+
 def run(root, owner, size, *, api=api, fetch=failure_ingest.fetch, ask=learn_daily.ask, timeout=300, known=frozenset(), reserved_rules=None, public=None, now=None):
     for pattern in LEFTOVERS:
         for leftover in root.glob(pattern):
@@ -431,6 +453,9 @@ def run(root, owner, size, *, api=api, fetch=failure_ingest.fetch, ask=learn_dai
     path = root / LEDGER
     ledger = json.loads(c.read_text(path)) if path.exists() else dict(seen={}, pages={}, batches=[])
     save = lambda: c.atomic_create(path, c.encoded(ledger), replace=True)
+    if public is not None and (paused := oss_pause(ledger, public)):
+        save()
+        return [paused]
     if ledger.get("paused"):
         now = now or datetime.now(timezone.utc)
         until = ledger.setdefault("resume_after", (now + timedelta(hours=PAUSE_HOURS)).isoformat())
@@ -460,7 +485,11 @@ def run(root, owner, size, *, api=api, fetch=failure_ingest.fetch, ask=learn_dai
         learn(root, entry, owner, ask, timeout, reserved_rules, public)
     lines = [journal(entry)]
     streak = next((index for index, row in enumerate(reversed(ledger["batches"])) if row.get("proven")), len(ledger["batches"]))
-    if streak >= ZERO_STREAK:
+    if public is not None:
+        streak = min(streak, entry["batch"] - ledger["oss_pause"].get("after_batch", 0))
+    if public is not None and (paused := oss_pause(ledger, public)):
+        lines.append(paused)
+    elif streak >= ZERO_STREAK:
         lines.append(f"ci-backlog: {streak} batches in a row proved 0 (batches {ledger['batches'][-streak]['batch']}"
                      f"-{entry['batch']}); still running")
     save()

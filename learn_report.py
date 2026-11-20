@@ -3,8 +3,8 @@
 import argparse
 from collections import Counter
 from datetime import datetime, timedelta, timezone
+from itertools import chain
 import json
-from pathlib import Path
 import re
 import statistics
 import sys
@@ -107,77 +107,6 @@ def repeat_failures(store, start, end):
     return result
 
 
-def coldlocker_session_started(path):
-    try:
-        path = c.ordinary_path(path)
-        if not path.is_file():
-            return None
-        with path.open(encoding="utf-8", errors="replace") as stream:
-            for line in stream:
-                if '"hook_additional_context"' not in line or '"SessionStart"' not in line:
-                    continue
-                try:
-                    row = json.loads(line)
-                    attachment = row.get("attachment")
-                    if (row.get("type") == "attachment"
-                            and isinstance(attachment, dict) and attachment.get("type") == "hook_additional_context"
-                            and attachment.get("hookEvent") == "SessionStart"
-                            and isinstance(attachment.get("content"), list)
-                            and any(isinstance(part, str) and re.search(
-                                r"(?m)^Files: .*BRIEFING\.md, .*models\.yaml, .*skills/README\.md(?:,|$)", part)
-                                    for part in attachment["content"])):
-                        return c.time_key(row["timestamp"])
-                except (ValueError, AttributeError, TypeError, KeyError):
-                    continue
-    except (OSError, ValueError):
-        return None
-
-
-def repeat_mistake_cohorts(failures, folder, transcripts, start, end):
-    published = folder / transcript_delivery.HELD_BACK_PROJECTS
-    held_back = set(c.read_text(published).splitlines()) if published.exists() else None
-    result = dict(
-        status=("Provisional. Held-back projects can receive lessons until the Coldlocker hook reads the list. "
-                "Earlier sessions in the window can still reflect lesson exposure." if held_back is not None
-                else "Held-back project list has not been published."),
-        scope=("Native Claude sessions with recorded Coldlocker SessionStart attachments and a project on the "
-               "failure record. Codex Mac and Windows "
-               "global-instruction sessions are excluded from both groups."),
-        repeat_definition="A transcript correction carrying the existing repeat flag.",
-    )
-    for cohort in ("held_back", "with_lessons"):
-        result[cohort] = dict(mistakes=0, repeats=0, by_helper={}, by_project={})
-    if held_back is None:
-        return result
-    sessions = {}
-    for row in failures:
-        if row.get("kind") != "correction" or row["agent"] != "claude":
-            continue
-        at = happened(row)
-        if not start <= at <= end:
-            continue
-        repo = row["repo"].casefold()
-        source = row.get("source_ref", "")
-        name, marker, _ = source.removeprefix("transcript:").partition("#messages=")
-        path = Path(name)
-        if (not marker or not source.startswith("transcript:") or path.suffix != ".jsonl"
-                or not path.is_relative_to(transcripts) or not transcript_delivery.PROJECT_SLUG.fullmatch(repo)):
-            continue
-        if path not in sessions:
-            sessions[path] = coldlocker_session_started(path)
-        if sessions[path] is None or at < sessions[path]:
-            continue
-        cohort = result["held_back" if repo in held_back else "with_lessons"]
-        helper = cohort["by_helper"].setdefault(row["agent"], dict(mistakes=0, repeats=0))
-        project = cohort["by_project"].setdefault(repo, dict(mistakes=0, repeats=0))
-        types = flakiness.metadata(row).get("mistake_types")
-        repeat = isinstance(types, list) and "repeat" in types
-        for counts in (cohort, helper, project):
-            counts["mistakes"] += 1
-            counts["repeats"] += repeat
-    return result
-
-
 def first_proof(store, record):
     proven = None
     while record and record["verification"] == "proven":
@@ -186,23 +115,64 @@ def first_proof(store, record):
     return proven
 
 
-def ci_recurrence(store, rows):
+def ci_recurrence(store, rows, *, window=None, failures=None):
+    if not rows:
+        return []
     exact, normalized = {}, {}
-    for row in store["failures"].values():
+    for row in store["failures"].values() if failures is None else failures:
         if row["source"] == "ci-fix-learning-local-reproduction":
             continue
-        exact.setdefault(row["group_id"], []).append(happened(row))
-        normalized.setdefault(c.signature(row), []).append(happened(row))
+        at = happened(row)
+        if window and not window[0] <= at <= window[1]:
+            continue
+        repo = row["repo"].casefold() if window else None
+        exact.setdefault((repo, row["group_id"]), []).append(at)
+        normalized.setdefault((repo, c.signature(row)), []).append(at)
     latest, result = c.latest_lessons(store), []
     for lesson_id, delivery in sorted(rows.items()):
         record = latest.get(lesson_id)
         proven = record and first_proof(store, record)
         if not proven or record["status"] == "retired" or delivery.get("state") == "retired":
             continue
-        times = (exact if record["grouping"] == "exact" else normalized).get(record["group_id"], [])
+        repo = delivery["repo"].casefold() if window else None
+        times = (exact if record["grouping"] == "exact" else normalized).get((repo, record["group_id"]), [])
+        if window:
+            proof_at = c.time_key(proven)
+            if proof_at > window[1] or record["status"] in c.ENDED:
+                continue
+            times = [at for at in times if at > proof_at]
         delivered = delivery["at"] if delivery.get("state") == "delivered" else None
         result.append(dict(lesson=lesson_id, delivered=delivered, route=delivery.get("route") if delivered else None,
                            proven=proven, **transcript_delivery.around(delivered or proven, times)))
+    return result
+
+
+def briefing_cohorts(folder, store, now, backlog_store=None):
+    files = transcript_delivery.lessons(folder)
+    briefing = folder / "briefing.md"
+    published = set(re.findall(r"(?m)^- \*\*(L\d+)\b", c.read_text(briefing))) if briefing.is_file() else set()
+    result = {cohort: dict(lessons=0, repeats=0) for cohort in ("in_briefing", "held_back")}
+    rows, cohorts = {}, {}
+    for name in transcript_delivery.proven_candidates(files):
+        meta = files[name]
+        if not transcript_delivery.briefing_only(meta):
+            continue
+        held = transcript_delivery.held_back(meta)
+        if held == (meta["id"] in published):
+            continue
+        lesson_id = meta["source"].split(":", 1)[1]
+        rows[lesson_id] = dict(repo=meta["scope"].removeprefix("repo:"))
+        cohorts[lesson_id] = "held_back" if held else "in_briefing"
+
+    stores = (store,) if backlog_store is None else (store, backlog_store)
+    window = (now - timedelta(days=14), now)
+    for source in stores:
+        failures = chain.from_iterable(peer["failures"].values() for peer in stores)
+        for row in ci_recurrence(source, rows, window=window, failures=failures):
+            group = result[cohorts[row["lesson"]]]
+            group["lessons"] += 1
+            group["repeats"] += row["failures_since"] > 0
+            del rows[row["lesson"]]
     return result
 
 
@@ -217,7 +187,7 @@ def compared(rows, now):
     return result
 
 
-def report(root, now, days=7, folder=None, injections=None, oss_store=None, transcripts=None):
+def report(root, now, days=7, folder=None, injections=None, oss_store=None):
     first = now.date() - timedelta(days=days - 1)
     start = datetime(first.year, first.month, first.day, tzinfo=timezone.utc)
     since = first.isoformat()
@@ -271,9 +241,6 @@ def report(root, now, days=7, folder=None, injections=None, oss_store=None, tran
         result["readiness_reasons"] = reason_buckets(code for row in readiness
             for codes in row["readiness"]["evidence"].values() for code in codes)
     if folder:
-        if transcripts:
-            result["repeat_mistake_cohorts"] = repeat_mistake_cohorts(
-                store["failures"].values(), folder, transcripts, start, now)
         result["lesson_recurrence"], result["promote_to_check"] = transcript_delivery.recurrence(root, store, folder)
         tracked = transcript_delivery.load(folder / TRACKED, {})
         c.require(isinstance(tracked, dict) and all(re.fullmatch(r"L[1-9]\d*", k) and isinstance(v, str)
@@ -295,7 +262,6 @@ def main(argv=None):
     parser.add_argument("--lessons", help="shared lessons folder: add each lesson's failures before and after delivery")
     parser.add_argument("--injections", help="Coldrecall hook injections.jsonl: add the median bytes injected per session")
     parser.add_argument("--oss-store", help="read-only public-repository lesson store")
-    parser.add_argument("--transcripts", help="native transcript directory for the Coldlocker cohort counts; requires --lessons")
     args = parser.parse_args(argv)
     oss_store = args.oss_store and c.ordinary_path(args.oss_store)
     if oss_store and not oss_store.is_dir():
@@ -303,16 +269,10 @@ def main(argv=None):
     folder = args.lessons and c.ordinary_path(args.lessons)
     if folder and not folder.is_dir():
         parser.error("lessons folder not found")
-    transcripts = args.transcripts and c.ordinary_path(args.transcripts)
-    if transcripts and not folder:
-        parser.error("--transcripts requires --lessons")
-    if transcripts and not transcripts.is_dir():
-        parser.error("transcripts directory not found")
     injections = args.injections and c.ordinary_path(args.injections)
     if injections and not injections.is_file():
         parser.error("injections log not found")
-    print(json.dumps(report(c.ordinary_path(args.store), datetime.now(timezone.utc), args.days, folder, injections, oss_store,
-                            transcripts),
+    print(json.dumps(report(c.ordinary_path(args.store), datetime.now(timezone.utc), args.days, folder, injections, oss_store),
                      indent=2, sort_keys=True))
     return 0
 

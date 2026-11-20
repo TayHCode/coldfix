@@ -27,45 +27,12 @@ class LearnReportTests(unittest.TestCase):
         self.store = Path(temporary.name) / ".coldfix"
         self.store.mkdir(mode=0o700)
 
-    def test_cohorts_count_repeat_flags_only_after_a_recorded_coldlocker_session_start(self):
-        now = datetime(2026, 11, 18, 12, tzinfo=timezone.utc)
-        transcripts = self.store / "transcripts"
-        transcripts.mkdir()
-        folder = self.store / "lessons"
-        folder.mkdir()
-        (folder / "held-back-projects.txt").write_text("example/gamma\n")
-        hook = dict(type="hook_additional_context", hookEvent="SessionStart", content=[
-            "Files: /locker/BRIEFING.md, /locker/models.yaml, /locker/skills/README.md"])
-        for index, (repo, agent, context, hour, repeat) in enumerate((
-            ("Example/Gamma", "claude", hook, 10, True),
-            ("example/alpha", "claude", hook, 10, False),
-            ("example/gamma", "claude", hook, 8, True),
-            ("example/alpha", "claude", dict(hook, content=["global instructions"]), 10, True),
-            ("example/alpha", "codex", hook, 10, True),
-        )):
-            path = transcripts / f"session-{index}.jsonl"
-            path.write_text(json.dumps(dict(type="attachment", timestamp="2026-11-18T09:00:00", attachment=context)) + "\n")
-            event = dict(command="transcript correction", error=json.dumps(dict(mistake_types=["repeat"] if repeat else [])),
-                         repo=repo, agent=agent, kind="correction", source_ref=f"transcript:{path}#messages=a,b",
-                         occurred=f"2026-11-18T{hour:02}:00:00Z")
-            row = c.event_record(event, "transcript")
-            c.save(self.store, "failures", row)
-        result = learn_report.report(self.store, now, folder=folder, transcripts=transcripts)["repeat_mistake_cohorts"]
-        self.assertIn("Provisional", result["status"])
-        self.assertIn("Codex Mac and Windows", result["scope"])
-        self.assertEqual(result["held_back"], dict(mistakes=1, repeats=1,
-                         by_helper={"claude": dict(mistakes=1, repeats=1)},
-                         by_project={"example/gamma": dict(mistakes=1, repeats=1)}))
-        self.assertEqual(result["with_lessons"], dict(mistakes=1, repeats=0,
-                         by_helper={"claude": dict(mistakes=1, repeats=0)},
-                         by_project={"example/alpha": dict(mistakes=1, repeats=0)}))
-
-    def test_cohort_cli_reports_a_missing_transcripts_directory(self):
+    def test_cohort_cli_reports_a_missing_lessons_directory(self):
         process = subprocess.run(["python3", str(ROOT / "learn_report.py"), "--store", str(self.store),
-                                  "--lessons", str(self.store), "--transcripts", str(self.store / "missing")],
+                                  "--lessons", str(self.store / "missing")],
                                  capture_output=True, text=True)
         self.assertEqual(process.returncode, 2)
-        self.assertIn("transcripts directory not found", process.stderr)
+        self.assertIn("lessons folder not found", process.stderr)
 
     def test_counts_only_the_window_and_reads_runs_and_drafts_from_the_daily_ledger(self):
         for index in range(3):

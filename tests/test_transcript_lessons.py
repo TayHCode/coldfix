@@ -566,6 +566,13 @@ class TranscriptLessonsTests(unittest.TestCase):
             tl.main(["--store", str(self.store), "--coldlocker", str(self.coldlocker), "--scan-ledger", str(self.scans),
                      "--jev-model", "gpt-6.1-terra"])
 
+    def test_an_unavailable_bulk_role_stops_with_a_named_error(self):
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()) as err, mock.patch.dict(os.environ), \
+                mock.patch.object(tm.learn_daily, "route", side_effect=c.ColdfixError("models.yaml lacks bulk")):
+            os.environ.pop("COLDFIX_JUDGE", None)
+            tl.main(["--store", str(self.store), "--coldlocker", str(self.coldlocker), "--scan-ledger", str(self.scans)])
+        self.assertIn("models.yaml bulk judge is unavailable: ColdfixError", err.getvalue())
+
     def test_a_plain_http_jev_endpoint_is_refused(self):
         with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()), mock.patch.dict(os.environ, JEV_API_KEY="example-key"):
             tl.main(["--store", str(self.store), "--coldlocker", str(self.coldlocker), "--scan-ledger", str(self.scans),
@@ -573,7 +580,9 @@ class TranscriptLessonsTests(unittest.TestCase):
 
     def main(self, *extra):
         out = io.StringIO()
-        with redirect_stdout(out), mock.patch.dict(os.environ, JEV_API_KEY="example-key"):
+        with redirect_stdout(out), mock.patch.dict(os.environ, JEV_API_KEY="example-key"), \
+                mock.patch.object(tm.learn_daily, "route", return_value=dict(provider="claudeAgent", model="claude-haiku-5-5")):
+            os.environ.pop("COLDFIX_JUDGE", None)
             code = tl.main(["--store", str(self.store), "--coldlocker", str(self.coldlocker), "--scan-ledger", str(self.scans), *extra])
         return code, json.loads(out.getvalue())
 
@@ -586,6 +595,9 @@ class TranscriptLessonsTests(unittest.TestCase):
     def test_a_run_with_no_leads_left_logs_zero_proven(self):
         code, line = self.main()
         self.assertEqual((code, line["picked"], line["proven"], line["scanned"]), (0, 0, 0, 0))
+
+    def test_the_batch_line_names_the_models_yaml_judge(self):
+        self.assertEqual(self.main()[1]["judge"], "claude-haiku-5-5")
 
     def test_a_run_scans_the_next_transcripts_then_logs_scanned_flagged_and_proven(self):
         counts = dict(scanned=100, jev_flagged=30, errors=0)

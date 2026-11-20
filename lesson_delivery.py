@@ -301,8 +301,12 @@ def recheck(args, root, store):
         import transcript_delivery
         folder = c.ordinary_path(args.lessons)
         c.require(folder.is_dir(), "lessons folder not found")
+        backlog = None
+        if getattr(args, "backlog_store", None):
+            backlog_root, backlog_store = c.load_store(c.ordinary_path(args.backlog_store))
+            backlog = (backlog_store, c.read_invalidations(backlog_root))
         judged = transcript_delivery.recheck(root, store, folder, transcript_delivery.env_jev(),
-                                             deferred=deferred, withdraw_at=now.isoformat())
+                                             deferred=deferred, withdraw_at=now.isoformat(), backlog=backlog)
         withdrawn += sum(row["result"] == "withdrawn" for row in judged)
         rows += judged
     incomplete = not complete or any(row["result"] == "unchecked" and row["reason"] != "no witness" for row in rows)

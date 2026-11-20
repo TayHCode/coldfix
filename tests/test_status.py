@@ -71,6 +71,13 @@ class StatusTests(unittest.TestCase):
             self.assertEqual(self.store.exists(), existing)
             self.assertEqual(list(self.store.rglob("*")), [])
 
+    def test_ci_failures_count_only_github_ci_events(self):
+        self.ingest(self.event("https://github.com/o/r/actions/runs/2/job/3", kind="ci", command="ci"),
+                    self.event("https://github.com/o/r/issues/5", command="local"),
+                    self.event("https://github.com/o/r/pull/1#discussion_r2", kind="review", command="review"))
+        self.assertEqual(self.status()["ci_failures"], 1)
+        self.assertIn("CI failures collected: 1", self.cli("status").stdout)
+
     def test_sources_overlap_stale_groups_latest_revisions_and_outcomes_are_read_only(self):
         self.ingest(self.event("https://github.com/example/repo/pull/1#discussion_r2"),
                     self.event("t3:project:p:thread:t:item:i"), self.event("sample:unknown"))

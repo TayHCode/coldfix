@@ -16,8 +16,9 @@ import github_sources
 
 HERE = Path(__file__).resolve().parent
 SETTLE_SECONDS = 60
-PARSER = hashlib.sha256(b"".join((HERE / name).read_bytes() for name in ("coldfix.py", "failure_ingest.py"))).hexdigest()
+PARSER = hashlib.sha256(b"".join((HERE / name).read_bytes() for name in ("coldfix.py", "failure_ingest.py", "learn_replay.py"))).hexdigest()
 RECEIPT_ONLY_REJECTION = "coldbox receipt repo must be owner/repo; nothing imported"
+CONTENT_REJECTIONS = (RECEIPT_ONLY_REJECTION, "invalid coldbox receipt; nothing imported")
 
 
 def reviews(root, repos):
@@ -64,6 +65,25 @@ def provisional(path):
         return False
 
 
+def fingerprint(path):
+    try:
+        content = path.read_bytes()
+        digest = hashlib.sha256(content)
+        try:
+            log = path.with_name(json.loads(content)["id"] + ".log")
+        except (ValueError, TypeError, KeyError, RecursionError):
+            return digest.hexdigest()
+        if log.is_symlink() or log.exists() and not log.is_file():
+            return None
+        if log.exists():
+            with log.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1 << 20), b""):
+                    digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return None
+
+
 def receipts(root, directory, now=None, on_reject=None):
     now = time.time() if now is None else now
     ledger = root / "collected-receipts.json"
@@ -74,12 +94,18 @@ def receipts(root, directory, now=None, on_reject=None):
     for path in sorted(Path(directory).glob("*.json")):
         if seen.get(path.name) == "imported" or now - path.stat().st_mtime < SETTLE_SECONDS or provisional(path):
             continue
-        try:
-            invalid = dict(sha256=hashlib.sha256(path.read_bytes()).hexdigest(), parser=PARSER)
-        except OSError:
-            invalid = None
+        digest = fingerprint(path)
+        invalid = digest and dict(sha256=digest, parser=PARSER)
         if invalid and isinstance(seen.get(path.name), dict) and seen[path.name].get("invalid") == invalid:
             total["known_invalid"] += 1
+            continue
+        try:
+            empty = not c.input_records(c.read_text(path), "coldbox", str(c.ordinary_path(path)))
+        except (c.ColdfixError, OSError, UnicodeError):
+            empty = False
+        if empty:
+            seen[path.name] = "imported"
+            c.atomic_create(ledger, c.encoded(seen), replace=True)
             continue
         done = subprocess.run([sys.executable, str(HERE / "coldfix.py"), "--store", str(root), "ingest",
                                "--format", "coldbox", "--input", str(path)], capture_output=True, text=True)
@@ -88,7 +114,7 @@ def receipts(root, directory, now=None, on_reject=None):
             if on_reject is not None:
                 on_reject(reason)
             total["rejected"] += 1
-            if invalid and reason == RECEIPT_ONLY_REJECTION:
+            if invalid and reason in CONTENT_REJECTIONS and fingerprint(path) == digest:
                 seen[path.name] = dict(reason=reason, invalid=invalid)
                 c.atomic_create(ledger, c.encoded(seen), replace=True)
             continue

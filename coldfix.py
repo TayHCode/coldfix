@@ -535,7 +535,8 @@ def check_pins(check_script, test_sha256, admission=None):
             names = sorted(set(regression_adapter.TEST_NAME.findall(data["patch"])))
             script, _, digest = regression_adapter.build(data["path"], data["patch"], names, data["diagnostic"])
             if check_script in {script.replace(regression_adapter.TEMPLATE, older)
-                                for older in (regression_adapter.LEGACY_TEMPLATE, regression_adapter.PREVIOUS_TEMPLATE)}:
+                                for older in (regression_adapter.LEGACY_TEMPLATE, regression_adapter.PREVIOUS_TEMPLATE,
+                                              regression_adapter.NO_SRC_TEMPLATE)}:
                 script = check_script
         return (script == check_script and digest == test_sha256 and data["names"] == names
                 and (admission is None or (admission["test_paths"] == [data["path"]]
@@ -642,8 +643,11 @@ def validate_receipt(record, stem):
     text(record["check_command"], "check command", single_line=True)
     for key in ("before", "after") + (("reversed",) if version == 2 else ()):
         row = record[key]
-        require(isinstance(row, dict) and set(row) == {"commit", "tree", "status", "exit", "stdout", "stderr"},
+        require(isinstance(row, dict) and set(row) - {"env", "env_error"} == {"commit", "tree", "status", "exit", "stdout", "stderr"},
                 "invalid replay result")
+        env = {field: row[field] for field in ("env", "env_error") if field in row}
+        require(env in ({}, {"env": "reconstructed"}) or set(env) == {"env", "env_error"} and env["env"] == "host-only"
+                and isinstance(env["env_error"], str), "invalid replay environment")
         require(row["status"] in ("PASS", "FAIL", "INCOMPLETE"), "invalid replay status")
         require(row["exit"] is None or type(row["exit"]) is int, "invalid replay exit")
         for field in ("commit", "tree", "stdout", "stderr"):
@@ -1913,7 +1917,7 @@ def process(command, cwd=None, timeout=None, *, input=None, env=None, stdin=None
         return subprocess.CompletedProcess(command, child.returncode, stdout, stderr)
 
 
-def replay_tree(repo, revision, scratch, command, expected_failure, timeout, reverse_patch=None, *, isolated=False, deadline=None):
+def replay_tree(repo, revision, scratch, command, expected_failure, timeout, reverse_patch=None, *, isolated=False, deadline=None, env=None):
     row = dict(commit="", tree="", status="INCOMPLETE", exit=None, stdout="", stderr="")
     try:
         for field, suffix in (("commit", "commit"), ("tree", "tree")):
@@ -1946,7 +1950,7 @@ def replay_tree(repo, revision, scratch, command, expected_failure, timeout, rev
         if isolated:
             import replay_isolation
             argv, check = replay_isolation.check_command(command)
-            result = replay_isolation.run(scratch, argv, check, timeout, deadline)
+            result = replay_isolation.run(scratch, argv, check, timeout, deadline, env)
         else:
             result = process(command if isinstance(command, list) else ["sh", "-c", command], cwd=scratch, timeout=remaining_timeout(timeout, deadline))
         row.update(exit=result.returncode, stdout=result.stdout.decode("utf-8", errors="backslashreplace"),
@@ -2027,7 +2031,9 @@ def replay(args, root, store):
                 import replay_isolation
                 configured = coldpass_pair is not None or replay_isolation.runner() is not None
                 executor = replay_isolation.replay_tree if configured else getattr(args, "replay_executor", replay_tree)
-                row = executor(repo, revision, scratch / name, command, previous["expected_failure"], args.timeout, reverse)
+                bound = {"deadline": args.deadline} if getattr(args, "deadline", None) is not None else {}
+                row = executor(repo, revision, scratch / name, command, previous["expected_failure"], args.timeout, reverse,
+                               **bound)
                 if not check_unchanged(check, previous["check_script"]):
                     row["status"] = "INCOMPLETE"
             cause = incomplete_cause(row["stderr"], store) if row["status"] == "INCOMPLETE" else ""
@@ -2055,7 +2061,7 @@ def replay(args, root, store):
     if (prior and read_invalidations(root).get(previous["lesson_id"]) != previous["id"]
             and previous["status"] == record["status"] and previous["verification"] == verification
             and previous["scope"] == record["scope"] and prior.get("repo_root") == root_id):
-        fields = ("commit", "tree", "status", "exit")
+        fields = ("commit", "tree", "status", "exit", "env", "env_error")
         same = lambda old, new: all(old.get(key) == new.get(key) for key in fields)
         if ((prior["repo"] == str(repo) or verification != "proven") and prior["status"] == status
                 and same(prior["before"], before) and same(prior["after"], after)
@@ -2535,8 +2541,8 @@ def parser():
     command.add_argument("--json", action="store_true", help="emit the results as JSON")
     commands.add_parser("doctor", help="check that the replay sandbox (bubblewrap) can run here and print the fix if not")
     command = commands.add_parser("setup", help="check the automatic loop's prerequisites and run its first pass")
-    command.add_argument("--owner", required=True, help="GitHub owner whose private repositories' CI failures to collect")
-    command.add_argument("--transcripts", required=True, help="folder of agent transcripts, e.g. ~/.claude/projects")
+    command.add_argument("--owner", help="GitHub owner whose private repositories' CI failures to collect (default: the gh login)")
+    command.add_argument("--transcripts", nargs="+", required=True, help="folders of agent transcripts, e.g. ~/.claude/projects")
     command.add_argument("--backend", choices=("local",), required=True, help="where replays run: local bubblewrap")
     command.add_argument("--limit", type=int, default=100, help="most transcripts scanned per run (default: 100)")
     command = commands.add_parser("status", help="summarize one private store or its latest completed run without writes")
@@ -2577,7 +2583,8 @@ def parser():
         command.add_argument("--" + key.replace("_", "-"), **options)
     overwrite = command.add_mutually_exclusive_group()
     overwrite.add_argument("--force", action="store_true", help="replace an existing config without asking")
-    overwrite.add_argument("--yes", action="store_true", help="never prompt: keep an existing config and require a Git checkout or --repo")
+    overwrite.add_argument("--yes", action="store_true", help="never prompt: keep an existing config and require a Git checkout or --repo, "
+                           "then detect gh and a model CLI, schedule the hourly setup pass and run it once")
     for action in ("ingest-and-propose", "learn"):
         command = commands.add_parser(action, help="ingest, draft, replay, and deliver proof-gated lessons")
         command.add_argument("--format", choices=FORMATS)
@@ -2655,6 +2662,7 @@ def parser():
     command.add_argument("--lessons", help="shared lessons folder: re-judge its judged lessons with COLDFIX_MODEL_CMD judge or Jev (JEV_API_KEY) and look up the stated replay evidence of the rest")
     command.add_argument("--timeout", type=float, default=300.0, help="per-witness timeout in seconds (default: 300)")
     command.add_argument("--notes", help="folder to write one Markdown note per proven lesson, with status and last re-check")
+    command.add_argument("--backlog-store", help="backlog store whose replay proofs also back lessons in --lessons")
     command = commands.add_parser("export", help="export complete proven lessons or diagnostic proposals")
     source = command.add_mutually_exclusive_group()
     source.add_argument("--proposal")
@@ -2680,6 +2688,9 @@ def main(argv=None):
     try:
         if args.action == "init":
             value = init_config(args)
+            if args.yes:
+                from loop_setup import init_loop
+                value = dict(config=value, loop=init_loop(args.store))
         elif args.action == "run":
             from private_run import run
             value = run(args)

@@ -250,6 +250,49 @@ class TranscriptMistakesTest(unittest.TestCase):
         self.assertEqual(result['repo'], 'unknown')
         self.assertEqual(result['thread'], '')
 
+    def test_excerpt_withholds_credentials_from_the_judge(self):
+        token = 'ghp_' + 'a' * 36
+        value = 'hunter' + '2xyz'
+        rows = tm.messages(conversation('Fixed. I used ' + token + ' and pass' + 'word=' + value))
+        state = json.dumps(tm.excerpt(rows))
+        self.assertNotIn(token, state)
+        self.assertNotIn(value, state)
+        self.assertIn('[redacted]', state)
+
+    def test_excerpt_withholds_a_whole_private_key_block(self):
+        body = 'b3BlbnNzaC1rZXktdjEAAAAABG5vbmU' + 'Q' * 40
+        label = 'OPENSSH ' + 'PRIVATE KEY-----'
+        for end in ('\n-----END ' + label + '\nthanks', ''):
+            with self.subTest(complete=bool(end)):
+                key = '-----BEGIN ' + label + '\n' + body + end
+                state = json.dumps(tm.excerpt(tm.messages(conversation('Fixed. I used ' + key))))
+                self.assertNotIn(body, state)
+                self.assertIn('[redacted]', state)
+
+    def test_excerpt_withholds_secret_blocks_in_every_shape(self):
+        body = 'cGF5bG9hZA' + 'Z' * 40
+        dash = '-' * 5
+
+        def block(kind, label):
+            return dash + kind + ' ' + label + ' ' + 'PRIVATE KEY' + (' BLOCK' if label == 'PGP' else '') + dash
+
+        cases = {
+            'pgp': ['Fixed. ' + block('BEGIN', 'PGP') + '\n' + body + '\n' + block('END', 'PGP') + ' done'],
+            'crlf indented': ['Fixed.\r\n    > ' + block('BEGIN', 'RSA') + '\r\n    > ' + body + '\r\n    > ' + block('END', 'RSA')],
+            'several': ['Fixed. ' + block('BEGIN', 'EC') + '\nx\n' + block('END', 'EC') + ' and '
+                        + block('BEGIN', 'DSA') + '\n' + body + '\n' + block('END', 'DSA')],
+            'mismatched end': ['Fixed. ' + block('BEGIN', 'OPENSSH') + '\nx\n' + block('END', 'RSA') + '\n' + body],
+            'across rows': ['Fixed. ' + block('BEGIN', 'OPENSSH') + '\nfirst', body + '\n' + block('END', 'OPENSSH') + ' ok'],
+            'yaml block': ['Fixed. config:\n  api_' + 'key: |\n    ' + body + '\n    more\nnext: 1'],
+        }
+        for name, texts in cases.items():
+            with self.subTest(name):
+                rows = [dict(role='assistant', text='I wrote the change.')] + [
+                    dict(role='assistant' if i else 'user', text=text) for i, text in enumerate(texts)]
+                state = json.dumps(tm.excerpt(rows))
+                self.assertIn('[redacted]', state)
+                self.assertNotIn(body, state)
+
     def test_repeated_identical_link_is_retained_as_evidence(self):
         url = 'https://github.com/a/one/pull/1'
         rows = tm.messages(conversation('Fixed. ' + url + ' ' + url))
@@ -332,8 +375,27 @@ class TranscriptMistakesTest(unittest.TestCase):
                     else:
                         self.assertEqual(tm.score([], call), .7)
         self.assertEqual((self.root / 'judge.py.role').read_text(), 'judge')
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.dict(os.environ, {'COLDFIX_JUDGE': 'jev'}, clear=True):
             self.assertEqual(tm.judge('https://jev.invalid', 'jev-latest'), (None, 'jev-latest'))
+
+    def test_the_bulk_role_judges_first_even_with_a_jev_key(self):
+        haiku = dict(provider='claudeAgent', model='claude-haiku-5-5', effort='default')
+        asked = []
+
+        def ask(model, prompt, shape, work):
+            asked.append(model['model'])
+            return dict(score=.8)
+        with patch.dict(os.environ, JEV_API_KEY='secret'), \
+                patch.object(tm, 'jev', side_effect=AssertionError('Jev called')), \
+                patch.object(tm.learn_daily, 'route', side_effect=lambda role: dict(haiku, role=role)) as route, \
+                patch.object(tm.learn_daily, 'ask', side_effect=ask):
+            for name in ('COLDFIX_MODEL_CMD', 'COLDFIX_JUDGE'):
+                os.environ.pop(name, None)
+            call, label = tm.judge('https://jev.invalid', 'jev-latest')
+            self.assertEqual([tm.score([], call), tm.score([], call)], [.8, .8])
+        route.assert_called_once_with('bulk')
+        self.assertEqual((label, call.model, getattr(call, 'fallen_back', False)), ('jev-latest', 'claude-haiku-5-5', False))
+        self.assertEqual(asked, ['claude-haiku-5-5'] * 2)
 
     def test_an_unreachable_jev_hands_the_rest_of_the_run_to_the_bulk_role(self):
         with socket.socket() as probe:
@@ -345,7 +407,7 @@ class TranscriptMistakesTest(unittest.TestCase):
         def ask(model, prompt, shape, work):
             asked.append((model, prompt, shape))
             return dict(score=.8)
-        with patch.dict(os.environ, JEV_API_KEY='secret'), \
+        with patch.dict(os.environ, JEV_API_KEY='secret', COLDFIX_JUDGE='jev'), \
                 patch.object(tm.learn_daily, 'route', side_effect=lambda role: dict(haiku, role=role)) as route, \
                 patch.object(tm.learn_daily, 'ask', side_effect=ask):
             os.environ.pop('COLDFIX_MODEL_CMD', None)

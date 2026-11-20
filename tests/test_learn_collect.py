@@ -88,13 +88,58 @@ class LearnCollectTests(unittest.TestCase):
         self.assertEqual(learn_collect.receipts(self.store, self.receipts), dict(imported=1, skipped=0, rejected=0, known_invalid=0))
         self.assertEqual(json.loads((self.store / "collected-receipts.json").read_text()), {"cbx-1.json": "imported"})
 
-    def test_receipt_rejected_for_its_log_is_retried_until_the_log_is_repaired(self):
+    def test_invalid_receipt_is_skipped_until_it_or_the_rejecting_code_or_rules_change(self):
+        self.write("cbx-1.json", dict(receipt("cbx-1700000000-a1b2c3"), sha=None))
+        self.assertEqual(learn_collect.receipts(self.store, self.receipts), dict(imported=0, skipped=0, rejected=1, known_invalid=0))
+        with patch.object(learn_collect.subprocess, "run", side_effect=AssertionError("parsed again")):
+            self.assertEqual(learn_collect.receipts(self.store, self.receipts), dict(imported=0, skipped=0, rejected=0, known_invalid=1))
+        with patch.object(learn_collect, "PARSER", "next rules version"):
+            self.assertEqual(learn_collect.receipts(self.store, self.receipts), dict(imported=0, skipped=0, rejected=1, known_invalid=0))
+        self.write("cbx-1.json", receipt("cbx-1700000000-a1b2c3"))
+        self.assertEqual(learn_collect.receipts(self.store, self.receipts), dict(imported=1, skipped=0, rejected=0, known_invalid=0))
+
+    def test_parser_identity_covers_the_rejecting_code_and_the_replay_rules(self):
+        import learn_replay
+        source = (learn_collect.HERE / "learn_replay.py").read_text()
+        self.assertIn(f"REPLAY_RULES = {learn_replay.REPLAY_RULES}", source)
+        names = ("coldfix.py", "failure_ingest.py", "learn_replay.py")
+        expected = learn_collect.hashlib.sha256(b"".join((learn_collect.HERE / name).read_bytes() for name in names)).hexdigest()
+        self.assertEqual(learn_collect.PARSER, expected)
+
+    def test_rejection_is_not_remembered_for_an_irregular_log_or_a_receipt_changed_during_ingest(self):
+        row = dict(receipt("cbx-1700000000-a1b2c3"), sha=None)
+        self.write("cbx-1.json", row)
+        log = self.receipts / (row["id"] + ".log")
+        log.mkdir()
+        for _ in range(2):
+            self.assertEqual(learn_collect.receipts(self.store, self.receipts), dict(imported=0, skipped=0, rejected=1, known_invalid=0))
+        log.rmdir()
+        run = learn_collect.subprocess.run
+
+        def ingest_then_change(*args, **kwargs):
+            done = run(*args, **kwargs)
+            self.write("cbx-1.json", receipt("cbx-1700000000-a1b2c3"))
+            return done
+
+        with patch.object(learn_collect.subprocess, "run", side_effect=ingest_then_change):
+            self.assertEqual(learn_collect.receipts(self.store, self.receipts), dict(imported=0, skipped=0, rejected=1, known_invalid=0))
+        self.assertEqual(learn_collect.receipts(self.store, self.receipts), dict(imported=1, skipped=0, rejected=0, known_invalid=0))
+
+    def test_receipt_without_failures_is_collected_without_an_ingest_run(self):
+        self.write("cbx-1.json", dict(receipt("cbx-1700000000-a1b2c3"), verdict="pass"))
+        with patch.object(learn_collect.subprocess, "run", side_effect=AssertionError("ingest run")):
+            self.assertEqual(learn_collect.receipts(self.store, self.receipts), dict(imported=0, skipped=0, rejected=0, known_invalid=0))
+        self.assertEqual(json.loads((self.store / "collected-receipts.json").read_text()), {"cbx-1.json": "imported"})
+        self.assertEqual(self.failures(), {})
+
+    def test_receipt_rejected_for_its_log_is_parsed_again_once_the_log_is_repaired(self):
         row = receipt("cbx-1700000000-a1b2c3")
         self.write("cbx-1.json", row)
         log = self.receipts / (row["id"] + ".log")
         log.write_bytes(b"failure\x00")
-        for _ in range(2):
-            self.assertEqual(learn_collect.receipts(self.store, self.receipts), dict(imported=0, skipped=0, rejected=1, known_invalid=0))
+        self.assertEqual(learn_collect.receipts(self.store, self.receipts), dict(imported=0, skipped=0, rejected=1, known_invalid=0))
+        with patch.object(learn_collect.subprocess, "run", side_effect=AssertionError("parsed again")):
+            self.assertEqual(learn_collect.receipts(self.store, self.receipts), dict(imported=0, skipped=0, rejected=0, known_invalid=1))
         log.write_text("failure")
         self.assertEqual(learn_collect.receipts(self.store, self.receipts), dict(imported=1, skipped=0, rejected=0, known_invalid=0))
 

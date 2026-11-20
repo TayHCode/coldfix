@@ -69,6 +69,14 @@ this Git checkout as `repo`. With `--yes` it never prompts: it keeps an existing
 or `--repo`. Without `--yes`, it asks before replacing an existing config and asks for the repository when you
 run it outside one.
 
+`--yes` then starts the [automatic loop](#run-the-automatic-loop). It needs `gh` signed in (`gh auth login`), the
+`claude` or `codex` CLI signed in and on `PATH`, and transcripts in `~/.claude/projects` or `~/.codex/sessions`.
+If one is missing, it names it and installs no wrapper or schedule. Otherwise it writes `.coldfix/model-cmd` (the
+`COLDFIX_MODEL_CMD` wrapper around that CLI), installs a `coldfix-loop` systemd user timer, or a cron entry when
+user systemd is unavailable, that runs `setup` hourly, and runs `setup` once now. Running it again replaces that
+timer or entry rather than adding one. `coldfix status` shows the transcripts analyzed, the CI failures collected and
+the next scheduled run.
+
 ## Check your repository
 
 `coldfix check` runs the library's static portable checks on the current directory. They only read files: they never run your code, your tests or your README's commands, and never use the network. Each hit names the lesson, the `file:line` and the fix, and the command exits 1 when anything is hit. `coldfix check <path>` scans another tree. The block below makes a repository with a test that unittest never collects; in your own repository, just run `coldfix check`.
@@ -186,6 +194,8 @@ On a fresh Ubuntu machine, after [Install](#install):
 ```sh
 coldfix setup --owner "$GITHUB_OWNER" --transcripts "$HOME/.claude/projects" --backend local
 ```
+
+`--owner` defaults to the `gh` login, and `--transcripts` takes more than one folder.
 
 `setup` checks each prerequisite and names the missing one. It then collects failed `verify` workflow runs from
 the owner's private repositories, scans up to 100 new transcripts (`--limit`) for mistakes a person, test or

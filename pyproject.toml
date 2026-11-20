@@ -58,6 +58,7 @@ py-modules = [
     "private_run",
     "public_admission",
     "regression_adapter",
+    "replay_env",
     "replay_isolation",
     "replay_repos",
     "repo_install",

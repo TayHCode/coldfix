@@ -25,6 +25,8 @@ import test_learn
 
 from datetime import datetime, timezone
 
+SPILLED = "the fix's edit of the finding's flagged lines also adds or changes unflagged lines"
+
 LOOPBACK = socket.inet_ntoa(socket.INADDR_LOOPBACK.to_bytes(4, 'big'))
 
 
@@ -883,6 +885,82 @@ class LearnReplayTests(unittest.TestCase):
             self.assertEqual(len(prepared), 3)
             self.assertEqual(ledger['drafts']['draft']['replay']['status'], 'rejected')
 
+    def test_the_same_withheld_rejection_on_four_days_settles_for_a_week(self):
+        withheld = 'incident not admitted; flagged lines reverted INCOMPLETE; expected FAIL; cause withheld by the privacy screen'
+
+        def prepare(*args, **kwargs):
+            raise c.ColdfixError(withheld)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ledger = self.settle_ledger(root)
+            entry = ledger['drafts']['draft']
+            calls = []
+            for day in ('2026-11-01', '2026-11-02', '2026-11-03', '2026-11-04', '2026-11-05', '2026-11-10'):
+                calls.append(self.settle_replays(root, ledger, day, prepare))
+                if day == '2026-11-03':
+                    self.assertFalse(entry['replay_settled']['confirmed'])
+            self.assertEqual(calls, [1, 1, 1, 1, 0, 0])
+            self.assertTrue(entry['replay_settled']['confirmed'])
+            self.assertEqual(entry['replay'], dict(status='rejected', reason=withheld))
+            self.assertEqual(self.settle_replays(root, ledger, '2026-11-11', prepare), 1)
+
+    def test_a_repeated_infrastructure_rejection_stays_unsettled(self):
+        for reason in ('replay sandbox unavailable',
+                       'incident not admitted; flagged lines reverted INCOMPLETE; expected FAIL; Check timed out',
+                       'incident not admitted; flagged lines reverted INCOMPLETE; expected FAIL'):
+            with self.subTest(reason=reason), tempfile.TemporaryDirectory() as directory:
+                def prepare(*args, **kwargs):
+                    raise c.ColdfixError(reason)
+                root = Path(directory)
+                ledger = self.settle_ledger(root)
+                self.assertEqual([self.settle_replays(root, ledger, day, prepare)
+                                  for day in ('2026-11-01', '2026-11-02', '2026-11-03', '2026-11-04', '2026-11-05')], [1, 1, 1, 1, 1])
+                self.assertFalse(ledger['drafts']['draft']['replay_settled']['confirmed'])
+
+    def test_a_changed_flagged_range_does_not_settle_on_its_first_attempt(self):
+        withheld = 'incident not admitted; flagged lines reverted INCOMPLETE; expected FAIL; cause withheld by the privacy screen'
+
+        def prepare(*args, **kwargs):
+            raise c.ColdfixError(withheld)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ledger = self.settle_ledger(root)
+            for day in ('2026-11-01', '2026-11-02', '2026-11-03'):
+                self.settle_replays(root, ledger, day, prepare)
+            ledger['drafts']['draft']['replay_settled']['inputs'] = 'an older flagged range'
+            self.assertEqual(self.settle_replays(root, ledger, '2026-11-04', prepare), 1)
+            self.assertFalse(ledger['drafts']['draft']['replay_settled']['confirmed'])
+
+    def test_a_repeated_rejection_from_a_new_pair_restarts_the_count(self):
+        withheld = 'incident not admitted; flagged lines reverted INCOMPLETE; expected FAIL; cause withheld by the privacy screen'
+        failure = dict(id='f' * 32, kind='ci')
+        afters = iter(['d' * 40] * 3 + ['c' * 40] * 4)
+
+        def candidates(*args, **kwargs):
+            return [(failure, dict(before='e' * 40, after=next(afters)))]
+
+        def prepare(*args, **kwargs):
+            raise c.ColdfixError(withheld)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ledger = self.settle_ledger(root)
+            days = ('2026-11-01', '2026-11-02', '2026-11-03', '2026-11-04', '2026-11-05', '2026-11-06', '2026-11-07', '2026-11-08')
+            self.assertEqual([self.settle_replays(root, ledger, day, prepare, candidates=candidates) for day in days],
+                             [1, 1, 1, 1, 1, 1, 1, 0])
+
+    def test_a_rejection_that_changes_between_days_stays_unsettled(self):
+        reasons = iter(['incident not admitted; flagged lines reverted INCOMPLETE; expected FAIL; NameError: name ' + repr(name)
+                        + ' is not defined' for name in ('a', 'b', 'a', 'b', 'a')])
+
+        def prepare(*args, **kwargs):
+            raise c.ColdfixError(next(reasons))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ledger = self.settle_ledger(root)
+            self.assertEqual([self.settle_replays(root, ledger, day, prepare)
+                              for day in ('2026-11-01', '2026-11-02', '2026-11-03', '2026-11-04', '2026-11-05')], [1, 1, 1, 1, 1])
+            self.assertFalse(ledger['drafts']['draft']['replay_settled']['confirmed'])
+
     def test_flagged_lines_that_arrive_the_same_day_reopen_a_review_rejection(self):
         url = 'https://github.com/datarobot-oss/datarobot-genai/pull/772#discussion_r4605753840'
         failure = dict(id='draft', kind='review', repo='datarobot-oss/datarobot-genai', source_ref=url, error='Finding')
@@ -1423,7 +1501,7 @@ class LearnReplayTests(unittest.TestCase):
             self.assertEqual(refreshed.call_count, 1)
 
     def test_replay_rules_change_with_the_terminal_sets(self):
-        snapshot = {1: '610de3b1', 2: '0ebec27d'}
+        snapshot = {1: '610de3b1', 2: '0ebec27d', 3: '0ebec27d', 4: '0ebec27d'}
         digest = hashlib.sha256(json.dumps([sorted(learn_replay.TERMINAL), sorted(learn_replay.NOT_PROVABLE)]).encode())
         self.assertEqual(digest.hexdigest()[:8], snapshot.get(learn_replay.REPLAY_RULES),
                          'TERMINAL or NOT_PROVABLE changed: bump learn_replay.REPLAY_RULES and add its snapshot here')
@@ -1892,6 +1970,54 @@ class LearnReplayTests(unittest.TestCase):
             receipt = json.loads((store / 'receipts' / (entry['replay']['proof']['receipt_id'] + '.json')).read_text())
             self.assertEqual([receipt[x]['status'] for x in ('before', 'after', 'reversed')], ['FAIL', 'PASS', 'FAIL'])
             self.assertEqual(receipt['command_argv'], expected_argv)
+
+    def correction_draft(self, root, lead=None, command='transcript correction'):
+        failure = c.event_record(dict(kind='correction', repo='example/project', command=command,
+            error=json.dumps(dict(type='transcript_correction', evidence='assistant [a1]: I copied the helper.')),
+            agent='codex', source_ref='transcript:fixture#messages=a1', occurred='2026-11-07T00:00:00Z'), 'transcripts')
+        c.save(root, 'failures', failure)
+        if lead is not None:
+            (root / 'transcript-lessons.json').write_text(json.dumps(dict(leads={failure['id']: lead}, batches=[])))
+        entry = dict(verdict='PASS', evidence=[failure['id']], headline='Use the shared helper.',
+                     draft=dict(kind='correction', title='Reuse helpers', rule='Reuse the shared helper.'))
+        ledger = dict(drafts={'candidate': entry}, runs=[])
+        (root / 'learn-drafts.json').write_text(json.dumps(ledger))
+        pairs = root / 'pairs.json'
+        pairs.write_text(json.dumps(dict(results=[])))
+        with patch.object(learn_replay, 'replay_candidates') as replayed:
+            results = []
+            for day in ('2026-11-08', '2026-11-09'):
+                with patch.object(learn_replay, 'utc_day', return_value=day):
+                    results.append(learn_replay.run(root, ledger, projects=root, pairs_path=pairs))
+        replayed.assert_not_called()
+        return entry, results
+
+    def test_transcript_correction_drafts_take_the_transcript_route_verdict(self):
+        cases = (('no_lesson', dict(status='no_lesson', reason='no_mistake')),
+                 ('unprovable', dict(status='unprovable', reason='code mistake needs repository replay')),
+                 ('duplicate', dict(status='duplicate', reason='coldlocker:lessons/L16-keep-going')),
+                 ('proven', dict(status='proven', proof=dict(replay_applies=0.86))))
+        prefix = 'not_replayable_correction_only'
+        for reason, lead, command in [(f'{prefix}: transcript {v}', lead, 'transcript correction') for v, lead in cases] + [
+                (prefix, None, 'correction'), (prefix, None, 'scope')]:
+            with self.subTest(reason, command=command), tempfile.TemporaryDirectory() as directory:
+                entry, results = self.correction_draft(Path(directory), lead, command)
+                self.assertEqual(results, [dict(proven=0, rejected=1), dict(proven=0, rejected=0)])
+                self.assertEqual(entry['replay'], dict(status='rejected', reason=reason))
+                self.assertTrue(entry['replay_settled']['confirmed'])
+                self.assertEqual([a['day'] for a in entry['replay_attempts']], ['2026-11-08'])
+
+    def test_transcript_correction_drafts_stay_open_until_the_transcript_route_settles(self):
+        cases = (('missing', None), ('retrying', dict(status='retry', attempts=1, reason='jev check failed')),
+                 ('needs approval', dict(status='needs_approval')),
+                 ('proven without replay', dict(status='proven', proof=dict())))
+        for name, lead in cases:
+            with self.subTest(name), tempfile.TemporaryDirectory() as directory:
+                entry, results = self.correction_draft(Path(directory), lead)
+                self.assertEqual(results, [dict(proven=0, rejected=1), dict(proven=0, rejected=1)])
+                self.assertEqual(entry['replay'], dict(status='rejected',
+                                                       reason='not_replayable_correction_only: transcript route pending'))
+                self.assertFalse(entry['replay_settled']['confirmed'])
 
     def test_transcript_correction_drafts_are_not_replayed_as_code(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2965,6 +3091,115 @@ class ReviewPairReplayTests(unittest.TestCase):
                 result = self.replay_review(root, store, ledger, pairs, github)
             self.assertEqual((result['proven'], ask.call_count, entry['proposed_fix']['status']), (1, 2, 'proven'))
 
+    def replay_spilled_fix(self, root, proposed_source, previous=None):
+        import learn_daily
+        import oss_replay
+        store, ledger, entry, failure, pairs, responses, calls, github = self.review_without_pair(root)
+        repo = root / 'project'
+        def git(*args):
+            return subprocess.check_output(['git', '-C', str(repo), *args], text=True).strip()
+        test_file = (repo / 'tests/test_value.py').read_text()
+        git('rm', '-rq', 'tests')
+        (repo / 'value.py').write_text('VALUE = -1\nA = 1\n')
+        git('commit', '-qam', 'Add a neighbour')
+        before = git('rev-parse', 'HEAD')
+        (repo / 'tests').mkdir()
+        (repo / 'tests/test_value.py').write_text(test_file)
+        (repo / 'value.py').write_text('VALUE = 1\nA = 2\n')
+        git('add', '.')
+        git('commit', '-qm', 'Keep the value positive and bump the neighbour')
+        after = git('rev-parse', 'HEAD')
+        pairs.write_text(json.dumps(dict(results=[dict(repo='example/project', finding_url=failure['source_ref'],
+            before=before, after=after, path='value.py', start_line=1, end_line=1)])))
+        if previous:
+            entry['proposed_fix'] = dict(previous, failure=failure['id'], finding=[before, 'value.py', 1, 1])
+            (store / 'learn-drafts.json').write_text(json.dumps(ledger))
+        test = ('import unittest\nfrom value import VALUE\nclass ProofTests(unittest.TestCase):\n'
+                '    def test_value_is_positive(self):\n        self.assertGreater(VALUE, 0)\n')
+        with patch.object(learn_daily, 'primaries', return_value=[dict(model='claude-haiku-5-5')]), \
+                patch.object(learn_daily, 'ask', return_value=dict(source=proposed_source)), \
+                patch.object(learn_replay, 'write_test', return_value=(test, 'claude-haiku-5-5')), \
+                patch.object(oss_replay, 'commit_fix', wraps=oss_replay.commit_fix) as committed:
+            result = self.collect(store, ledger, root, pairs)
+        return store, entry, result, committed
+
+    def test_a_real_fix_that_spills_past_the_flagged_lines_is_proven_by_a_proposed_fix_confined_to_them(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store, entry, result, committed = self.replay_spilled_fix(Path(directory), 'VALUE = 1\nA = 1\n')
+            self.assertIn(SPILLED, [attempt['reason'] for attempt in entry['replay_attempts']])
+            self.assertEqual((result['proven'], entry['replay']['status'], entry.get('proposed_fix', {}).get('status')),
+                             (1, 'proven', 'proven'), str(entry.get('proposed_fix')))
+            [lesson] = c.latest_lessons(c.load_store(store)[1]).values()
+            self.assertEqual(lesson['verification'], 'proven')
+
+    def test_a_proposed_fix_that_edits_outside_the_flagged_lines_is_refused_before_any_commit_or_replay(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store, entry, result, committed = self.replay_spilled_fix(Path(directory), 'VALUE = 1\nA = 2\n')
+            self.assertEqual((entry['replay']['status'], set(entry['replay']['reason'].split('; '))), ('rejected', {SPILLED}))
+            self.assertEqual(entry.get('proposed_fix', {}).get('reason'),
+                             "the proposed fix edits lines outside the finding's flagged lines")
+            committed.assert_not_called()
+            self.assertEqual(c.latest_lessons(c.load_store(store)[1]), {})
+
+    def test_a_resumed_deferred_fix_that_edits_outside_the_flagged_lines_is_refused_before_any_commit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            spilled = learn_replay.proposed_patch('value.py', 'VALUE = -1\nA = 1\n', 'VALUE = 1\nA = 2\n')
+            store, entry, result, committed = self.replay_spilled_fix(
+                Path(directory), 'VALUE = 1\nA = 1\n',
+                dict(status='deferred', patch=spilled, revision=learn_replay.code_revision()))
+            self.assertEqual((entry['replay']['status'], entry['proposed_fix'].get('reason')),
+                             ('rejected', "the proposed fix edits lines outside the finding's flagged lines"))
+            committed.assert_not_called()
+
+    def test_the_proposed_fix_check_measures_hunks_the_way_admission_does(self):
+        original = 'A = 1\nB = 2\nC = 3\n'
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertTrue(hasattr(learn_replay, 'require_flagged_only'))
+            root = Path(directory)
+            repo = root / 'repo'
+            (repo / 'pkg').mkdir(parents=True)
+            (repo / 'pkg/value.py').write_text(original)
+            (repo / 'pkg/opaque.py').write_text(original)
+            (repo / '.gitattributes').write_text('pkg/opaque.py -diff\n')
+            (repo / '.gitmodules').write_text('[submodule "sub"]\n\tpath = sub\n\turl = ./sub\n\tignore = all\n')
+            def git(*args):
+                return subprocess.check_output(['git', '-C', str(repo), *args], text=True).strip()
+            git('init', '-q')
+            git('add', '.')
+            git('update-index', '--add', '--cacheinfo', '160000,' + 'a' * 40 + ',sub')
+            git('-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'base')
+            before = git('rev-parse', 'HEAD')
+            def check(source, start, end, path='pkg/value.py'):
+                learn_replay.require_flagged_only(root, repo, before, path,
+                                                  learn_replay.proposed_patch(path, original, source), start, end, 30)
+            check('A = 1\nB = 9\nC = 3\n', 2, 2)
+            check('A = 1\nC = 3\n', 2, 2)
+            for source, start, end, path in (('A = 1\nB = 9\nC = 4\n', 2, 2, 'pkg/value.py'),
+                                             ('A = 1\nB = 9\nX = 0\nC = 3\n', 2, 2, 'pkg/value.py'),
+                                             ('A = 1\nX = 0\nB = 2\nC = 3\n', 2, 2, 'pkg/value.py'),
+                                             ('A = 0\nB = 2\nC = 3\n', 2, 3, 'pkg/value.py'),
+                                             ('A = 1\nB = 9\nC = 3\n', 2, 2, 'pkg/opaque.py')):
+                with self.subTest(source=source, path=path), self.assertRaisesRegex(c.ColdfixError, 'outside the finding'):
+                    check(source, start, end, path)
+            two = learn_replay.proposed_patch('pkg/value.py', original, 'A = 1\nB = 9\nC = 3\n') + \
+                learn_replay.proposed_patch('pkg/opaque.py', original, 'A = 0\nB = 2\nC = 3\n')
+            with self.assertRaisesRegex(c.ColdfixError, 'outside the finding'):
+                learn_replay.require_flagged_only(root, repo, before, 'pkg/value.py', two, 2, 2, 30)
+            submodule = (learn_replay.proposed_patch('pkg/value.py', original, 'A = 1\nB = 9\nC = 3\n') +
+                         'diff --git a/sub b/sub\nindex ' + 'a' * 40 + '..' + 'b' * 40 + ' 160000\n--- a/sub\n+++ b/sub\n'
+                         '@@ -1 +1 @@\n-Subproject commit ' + 'a' * 40 + '\n+Subproject commit ' + 'b' * 40 + '\n')
+            with self.assertRaisesRegex(c.ColdfixError, 'outside the finding'):
+                learn_replay.require_flagged_only(root, repo, before, 'pkg/value.py', submodule, 2, 2, 30)
+            self.assertEqual(git('rev-list', '--all', '--count'), '1')
+
+    def test_only_spill_rejections_of_the_real_or_generated_test_seek_a_proposed_fix(self):
+        self.assertTrue(hasattr(learn_replay, 'spill_only'))
+        self.assertTrue(learn_replay.spill_only([SPILLED, SPILLED]))
+        self.assertTrue(learn_replay.spill_only(['no changed unittest matches the recorded failure',
+                                                 'generated test: ' + SPILLED]))
+        self.assertFalse(learn_replay.spill_only(['no changed unittest matches the recorded failure']))
+        self.assertFalse(learn_replay.spill_only([SPILLED, 'a review finding is proven only with its flagged lines']))
+
     def test_a_long_file_sends_only_the_flagged_lines_and_their_context_and_splices_the_reply_back(self):
         original = ''.join(f'LINE_{number} = {number}\n' for number in range(1, 501))
         head, excerpt, tail = learn_replay.flagged_window(original, 250, 252)
@@ -3494,6 +3729,27 @@ class ReviewPairReplayTests(unittest.TestCase):
                          (False, True, learn_replay.REPLAY_RULES))
         self.assertEqual(write.call_args.kwargs['path'], stored['path'])
 
+    def test_a_usable_reasked_test_settles_its_terminal_outcome_after_the_rules_version_changes(self):
+        missing = self.GENERATED.replace('from value import VALUE', 'import coldfix_missing_module')
+        replies = [(missing, 'claude-haiku-5-5'), (self.VACUOUS, 'claude-haiku-5-5')]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store, ledger, entry, pairs = self.untested_review_fix(root)
+            settled = []
+            with patch.object(replay_isolation, 'replay_tree', c.replay_tree), \
+                    patch.object(learn_replay, 'write_test', side_effect=replies) as write:
+                for rules in (0, 0, 1):
+                    with patch.object(learn_replay, 'REPLAY_RULES', learn_replay.REPLAY_RULES + rules):
+                        learn_replay.run(store, ledger, projects=root, pairs_path=pairs)
+                    settled.append(entry['replay_settled']['confirmed'])
+                    entry.pop('replay_terminal', None)
+                    for attempt in [*entry['replay_attempts'], entry['replay_settled']]:
+                        attempt['day'] = '2026-01-01'
+        self.assertEqual(write.call_count, 2)
+        self.assertIn('generated test: incident not admitted; flagged lines reverted PASS; expected FAIL',
+                      entry['replay']['reason'])
+        self.assertEqual(settled, [False, True, True])
+
     def test_a_second_route_that_errors_keeps_the_first_reply_and_is_asked_again_alone(self):
         replies = [('placeholder', 'claude-haiku-5-5'), c.ColdfixError('route unavailable')]
         first, proven, routes, stored = self.second_route_after(replies)
@@ -3546,6 +3802,67 @@ class ReviewPairReplayTests(unittest.TestCase):
                                     path='test_coldfix_proof_0123456789ab.py')
         self.assertIn('The file is saved as test_coldfix_proof_0123456789ab.py in the repository root, so the '
                       'repository root is Path(__file__).resolve().parent', ask.call_args.args[1])
+
+    def test_a_review_test_writer_gets_the_flagged_files_real_names_and_parameters(self):
+        _, entry, write, _ = self.replay_with_generated(self.GENERATED)
+        self.assertEqual(write.call_args.kwargs.get('api'), 'VALUE = ...', str(entry.get('replay')))
+        with patch.object(c, 'privacy_counts', return_value={'secret': 1}):
+            _, _, screened, _ = self.replay_with_generated(self.GENERATED)
+        self.assertEqual(screened.call_args.kwargs.get('api'), '')
+        source = ('from dataclasses import dataclass\n'
+                  '@dataclass(frozen=True)\nclass Config:\n    mode: str\n    retries: int = 3\n'
+                  'class Source(Base):\n    def __init__(self, config, *, interval=None):\n        self._token = None\n'
+                  '    async def _fetch(self, now: float) -> str:\n        return ""\n')
+        api = learn_replay.flagged_api(source)
+        self.assertEqual(api.splitlines(), ['@dataclass(frozen=True)', 'class Config():', '    mode: str',
+                                            '    retries: int = ...', 'class Source(Base):',
+                                            '    def __init__(self, config, *, interval=None)',
+                                            '    async def _fetch(self, now: float) -> str'])
+        import learn_daily
+        with patch.object(learn_daily, 'primaries', return_value=[dict(model='claude-haiku-5-5')]), \
+                patch.object(learn_daily, 'ask', return_value=dict(source='x')) as ask:
+            learn_replay.write_test(dict(kind='review', error='finding'), 'the diff', Path('.'), api=api)
+        self.assertIn('use only those names and call them with exactly those parameters', ask.call_args.args[1])
+        self.assertIn('def __init__(self, config, *, interval=None)', ask.call_args.args[1])
+
+    def test_the_review_prompt_screens_each_local_import_independently(self):
+        import learn_daily
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = root / 'project'
+            package = repo / 'src/example'
+            package.mkdir(parents=True)
+            files = {
+                'source.py': ('from .config import Config\nfrom . import blocked\n'
+                              'import example.clock as clock\nimport unavailable\n'
+                              'def fetch(password="unsafe"): pass\n'),
+                'config.py': 'def Config(mode, client_id, api_endpoint): pass\n',
+                'blocked.py': 'def blocked(password="unsafe"): pass\n',
+                'clock/__init__.py': 'def now(): pass\n',
+            }
+            for name, source in files.items():
+                path = package / name
+                path.parent.mkdir(exist_ok=True)
+                path.write_text(source)
+            subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+            git = ['git', '-C', str(repo), '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid']
+            subprocess.run([*git, 'add', '.'], check=True)
+            subprocess.run([*git, 'commit', '-qm', 'Before'], check=True)
+            before = c.privacy_git(repo, 'rev-parse', 'HEAD').decode().strip()
+            (package / 'config.py').write_text('def Config(): pass\n')
+            subprocess.run([*git, 'commit', '-qam', 'After'], check=True)
+            after = c.privacy_git(repo, 'rev-parse', 'HEAD').decode().strip()
+            failure = dict(id='fixture', repo='example/project', kind='review', command='review', error='finding')
+            with patch.object(learn_daily, 'primaries', return_value=[dict(model='fixture')]), \
+                    patch.object(learn_daily, 'ask', return_value=dict(source=self.GENERATED)) as ask:
+                learn_replay.stored_test(root, failure, repo, before, after, 10, flagged='src/example/source.py')
+            prompt = ask.call_args.args[1]
+            payload = json.loads(prompt.split('\n', 1)[1])
+            self.assertNotIn('flagged_file_api', payload)
+            self.assertEqual(payload.get('imported_module_apis'), {
+                'src/example/config.py': 'def Config(mode, client_id, api_endpoint)',
+                'src/example/clock/__init__.py': 'def now()',
+            })
 
     def test_the_changed_test_pattern_still_reads_stored_patches_the_way_their_lessons_pinned_them(self):
         patch_text = '+    def test_new(self):\n+        pass\n+\n     def test_old(self):\n'

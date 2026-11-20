@@ -264,7 +264,7 @@ def prepare_arm(arm, source, workspace, config, work, sid):
     settings, extra, image = {}, [], None
     if arm == "coldrecall":
         image = build_image(source, workspace)
-        hook = dict(type="command", command=f"{sys.executable} {ROOT / 'coldrecall.py'} hook")
+        hook = dict(type="command", command=shlex.join([sys.executable, str(ROOT / "coldrecall.py"), "hook"]))
         settings = dict(hooks=dict(PreToolUse=[dict(matcher="Edit|Write|MultiEdit|NotebookEdit|Bash", hooks=[hook])]))
         image = dict(epoch=image["epoch"], active=len(image["active"]), regressions=len(image["regressions"]), retired=len(image["retired"]))
     elif arm == "wiki":

@@ -12,8 +12,11 @@ import sqlite3
 import sys
 
 import check_delivery
+from ci_batch import LEDGER as BATCH_LEDGER
 import coldfix as c
 import learn_daily
+import learn_report
+from learn_stall import SOURCE_LABELS
 import transcript_delivery
 
 LOCKS = {".lessons.lock": "lesson store write", ".learn-daily.lock": "daily or backlog", ".check-delivery.lock": "check delivery",
@@ -162,16 +165,30 @@ def summary(root, store, folder, scan_ledger, oss_store=None, backlog_store=None
     )
 
 
-def page(value):
+def repeats(cohorts):
+    if not cohorts:
+        return ""
+    briefed, held = cohorts["in_briefing"], cohorts["held_back"]
+    return f"""<h2>Repeats of the lesson's own failure after proof</h2>
+<p>In briefing {briefed['repeats']:,}/{briefed['lessons']:,} vs held back {held['repeats']:,}/{held['lessons']:,}</p>
+<p>Each fraction shows the share of current briefing-only lessons with a matching failure in their repository in the past 14 days.</p>"""
+
+
+def page(value, proven_from_transcripts=0):
     lessons = value["lessons"]
     def rows(items):
         return "".join(f"<tr><th scope=\"row\">{html.escape(str(key))}</th><td>{count:,}</td></tr>" for key, count in items) \
             or "<tr><td colspan=\"2\">None</td></tr>"
     totals = [("Found", lessons["found"]), ("Proven", lessons["proven"]), ("Rejected", sum(lessons["rejected"].values())),
               ("Waiting", lessons["waiting"]), ("Merged as duplicates", lessons["duplicate"])]
-    after = [("Retired", lessons["retired"]), ("Withdrawn", lessons["withdrawn"])]
+    after = [("Proven from transcripts", proven_from_transcripts), ("Enforced", len(value["prevented_or_fixed"]["enforced"])),
+             ("Retired", lessons["retired"]), ("Withdrawn", lessons["withdrawn"])]
     reasons = sorted(lessons["rejected"].items(), key=lambda row: (-row[1], row[0]))
     projects = sorted(value["projects"].items(), key=lambda row: (-row[1], row[0]))
+    sources = value.get("sources", {})
+    source_rows = "".join(f'<tr><th scope="row">{html.escape(name)}</th><td>{html.escape(state)}</td></tr>'
+                          for name, state in sources.items())
+    source_table = f"<h2>Sources</h2><table><tbody>{source_rows}</tbody></table>" if source_rows else ""
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Coldfix status</title>
@@ -181,13 +198,14 @@ td{{text-align:right;font-variant-numeric:tabular-nums}}p{{color:#555}}
 @media(prefers-color-scheme:dark){{body{{background:#111;color:#eee}}th,td{{border-color:#333}}p{{color:#aaa}}}}</style></head>
 <body><main><h1>What Coldfix has learned</h1>
 <p>Updated {datetime.now(timezone.utc):%d %b %Y %H:%M} UTC, all time.</p>
+{source_table}
 <h2>Lessons</h2><table><tbody>{rows(totals)}</tbody></table>
 <p>Found counts CI and review drafts (own, backlog and outside repositories) plus chat leads that held a lesson; each is in exactly one of proven, rejected, waiting or merged as a duplicate.</p>
 <h2>After delivery</h2><table><tbody>{rows(after)}</tbody></table>
-<p>Delivered lessons, counted apart from the states above. Retired lessons were fixed, superseded or contradicted. Withdrawn lessons were taken back by recheck, a veto or a later replay.</p>
+<p>Delivered lessons, counted apart from the states above. Enforced lessons have their check on the repository's default branch, so agents are no longer briefed on them. Retired lessons were fixed, superseded or contradicted. Withdrawn lessons were taken back by recheck, a veto or a later replay.</p>
 <h2>Rejected, by reason</h2><table><tbody>{rows(reasons)}</tbody></table>
 <h2>Projects that get lessons</h2><table><tbody>{rows(projects)}</tbody></table>
-<p>Count of in-force shared lessons per project.</p></main></body></html>
+<p>Count of in-force shared lessons per project.</p>{repeats(value.get("briefing_recurrence"))}</main></body></html>
 """
 
 
@@ -199,6 +217,7 @@ def main(argv=None):
     parser.add_argument("--oss-store", help="open-source store whose lessons count as outside repos, read-only")
     parser.add_argument("--backlog-store", help="own-repo CI backlog store whose lessons are counted, read-only")
     parser.add_argument("--page", help="also write the lesson counts to this static HTML file")
+    parser.add_argument("--source-states", help="JSON object of source states from the scheduler")
     args = parser.parse_args(argv)
     folder = c.ordinary_path(args.lessons)
     if not folder.is_dir():
@@ -212,8 +231,28 @@ def main(argv=None):
     backlog_root, backlog_store = c.load_store(args.backlog_store) if args.backlog_store else (None, None)
     value = summary(root, store, folder, c.ordinary_path(args.scan_ledger), oss_store, backlog_store,
                     [peer for peer in (oss_root, backlog_root) if peer])
+    sources = {}
+    if args.source_states is not None:
+        try:
+            sources = json.loads(args.source_states)
+        except (ValueError, RecursionError):
+            parser.error("invalid source state JSON")
+        if not isinstance(sources, dict) or any(not isinstance(state, str) for state in sources.values()):
+            parser.error("source states must be an object of strings")
+        if not sources:
+            sources = dict.fromkeys(SOURCE_LABELS.values(), "Idle. Scheduler state unavailable")
+    if oss_root:
+        reason = transcript_delivery.load(oss_root / BATCH_LEDGER, {}).get("oss_pause", {}).get("reason")
+        if reason:
+            sources["OSS"] = "Paused. " + reason
+    if sources:
+        value["sources"] = sources
+    value["briefing_recurrence"] = learn_report.briefing_cohorts(folder, store, datetime.now(timezone.utc), backlog_store)
     if args.page:
-        c.atomic_create(args.page, page(value), replace=True)
+        proven_from_transcripts = sum(m.get("status") == "active"
+                                      and m.get("source", "").startswith(transcript_delivery.TRANSCRIPT_PROVEN_SOURCE)
+                                      for m in transcript_delivery.lessons(folder).values())
+        c.atomic_create(args.page, page(value, proven_from_transcripts), replace=True)
     print(json.dumps(value, indent=2, sort_keys=True))
     return 0
 

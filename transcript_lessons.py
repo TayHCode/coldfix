@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 import tempfile
@@ -473,11 +474,15 @@ def main(argv=None):
     args = parser.parse_args(argv)
     jev, label = transcript_mistakes.judge(args.jev_endpoint, args.jev_model)
     if not jev or args.size < 1 or not transcript_mistakes.safe_endpoint(args.jev_endpoint):
-        parser.error("set COLDFIX_MODEL_CMD or JEV_API_KEY, a positive --size and an HTTPS (or localhost) --jev-endpoint")
+        parser.error("with COLDFIX_JUDGE=jev set JEV_API_KEY; use a positive --size and an HTTPS (or localhost) --jev-endpoint")
     if not FOLDER or not Path(FOLDER).is_dir():
         parser.error("set COLDFIX_LESSONS_DIR to the shared lessons folder")
     if not args.jev_model.startswith("jev-") or not c.CHEAP_MODEL.fullmatch(args.jev_model):
         parser.error("--jev-model must be a Jev model")
+    try:
+        judge_model = getattr(jev, "model", label)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        parser.error(f"the models.yaml {transcript_mistakes.FALLBACK_ROLE} judge is unavailable: {type(error).__name__}")
     root = c.ordinary_path(args.store)
     with c.lesson_lock(root, name=".transcript-lessons.lock"):
         try:
@@ -486,7 +491,7 @@ def main(argv=None):
         except ValueError as error:
             parser.exit(2, f"transcript lessons: {error}; a new judge needs a new --scan-ledger\n")
         batch = run(root, args.coldlocker, args.scan_ledger, args.size, jev, jev_model=label)
-    print(json.dumps(dict(batch, proven=batch.get("proven", 0), scanned=scan.get("scanned", 0), flagged=scan.get("jev_flagged", 0),
+    print(json.dumps(dict(batch, judge=judge_model, proven=batch.get("proven", 0), scanned=scan.get("scanned", 0), flagged=scan.get("jev_flagged", 0),
                           scan_errors=scan.get("errors", 0)), sort_keys=True))
     return 0 if not scan.get("errors") and (batch.get("errors", 0) < batch["picked"] or not batch["picked"]) else 2
 

@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 import coldfix
+import loop_setup
 
 import test_cli
 import test_draft
@@ -24,6 +25,10 @@ class InitTests(unittest.TestCase):
         self.store.mkdir()
         self.inputs = self.cwd / 'events.jsonl'
         self.inputs.write_text('')
+        for stub in (patch.object(loop_setup, 'init_loop', return_value={'schedule': 'stub'}),
+                     patch.dict(os.environ, HOME=str(self.cwd / 'empty-home'))):
+            stub.start()
+            self.addCleanup(stub.stop)
 
     def init(self, *options, code=0):
         return self.run_cli('--store', str(self.store), 'init', '--repo', str(self.repo), *options, code=code)
@@ -41,7 +46,7 @@ class InitTests(unittest.TestCase):
     def test_init_yes_keeps_an_existing_config(self):
         config = json.loads(self.init('--input', 'events.jsonl').stdout)
         result = self.init('--yes', '--input', 'other')
-        self.assertEqual(json.loads(result.stdout), config)
+        self.assertEqual(json.loads(result.stdout), {'config': config, 'loop': {'schedule': 'stub'}})
         self.assertIn('kept existing', result.stderr)
         self.assertEqual(json.loads((self.store / 'config.json').read_text()), config)
         (self.store / 'config.json').write_text('{broken')
@@ -68,7 +73,7 @@ class InitTests(unittest.TestCase):
         self.assertIn('not inside a Git repository', result.stderr)
         self.assertFalse((self.store / 'config.json').exists())
         result = self.run_cli('--store', str(self.store), 'init', '--yes', '--repo', str(self.repo))
-        self.assertEqual(json.loads(result.stdout), {'repo': str(self.repo)})
+        self.assertEqual(json.loads(result.stdout), {'config': {'repo': str(self.repo)}, 'loop': {'schedule': 'stub'}})
 
     def test_init_stops_on_a_failing_doctor_without_writing(self):
         result = subprocess.run([sys.executable, str(test_cli.CLI), '--store', str(self.store), 'init', '--yes'],

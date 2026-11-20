@@ -8,6 +8,7 @@ FAILURE = "documented-command-fails"
 
 
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -20,10 +21,15 @@ def holds():
     with tempfile.TemporaryDirectory() as temporary:
         copy = os.path.join(temporary, "tree")
         shutil.copytree(os.getcwd(), copy)
-        return bool(commands) and all(
-            subprocess.run(command, shell=True, cwd=copy, capture_output=True,
-                           env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1")).returncode == 0
-            for command in commands)
+        for command in commands:
+            try:
+                result = subprocess.run(shlex.split(command), cwd=copy, capture_output=True,
+                                        env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"))
+            except (FileNotFoundError, PermissionError, ValueError):
+                return False
+            if result.returncode:
+                return False
+        return bool(commands)
 
 
 def main():

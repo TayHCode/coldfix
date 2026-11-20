@@ -78,27 +78,63 @@ def records(root):
 DELIVERED_FIELDS = ("title", "rule", "failure", "fix", "check_script", "check_command")
 
 
+def transcript_candidates(root, store, moved):
+    path = root / learn_replay.TRANSCRIPT_REPLAY
+    if not path.exists():
+        return
+    routes = json.loads(c.read_text(path), object_pairs_hook=c.unique_object)
+    c.require(isinstance(routes, dict), "invalid transcript replay ledger")
+    for ref, route in routes.items():
+        if not isinstance(route, dict) or route.get("status") != "proven":
+            continue
+        receipt_id = route.get("receipt_id")
+        receipt = store["receipts"].get(receipt_id) if isinstance(receipt_id, str) else None
+        if not receipt or receipt["status"] != "PASS" or (receipt.get("reversed") or {}).get("status") != "FAIL":
+            continue
+        lesson = store["lessons"].get(receipt["lesson_revision"])
+        if (not lesson or lesson["lesson_id"] != route.get("lesson_id") or lesson["receipt"] != receipt_id
+                or lesson["verification"] != "proven" or ref not in lesson["evidence"]):
+            continue
+        failure = store["failures"][ref]
+        source_ref = failure.get("source_ref", "")
+        if (failure["command"] != "transcript correction" or not source_ref.startswith("transcript:")
+                or (lesson.get("admission") or {}).get("source_ref") != source_ref):
+            continue
+        repo = moved.get(ref) or failure["repo"]
+        if replay_repos.SLUG.fullmatch(repo):
+            yield lesson, {}, repo
+
+
 def proven(root, store, ledger):
     moved = replay_repos.load(root)
     latest = c.latest_lessons(store)
     invalidations = c.read_invalidations(root)
     found, failed = {}, set()
+    candidates = []
     for entry in ledger["drafts"].values():
         state = entry.get("replay", {})
-        if state.get("status") not in ("proven", "delivered"):
-            continue
-        lesson = store["lessons"][state["proof"]["id"]]
+        if state.get("status") in ("proven", "delivered"):
+            candidates.append((store["lessons"][state["proof"]["id"]], entry, None))
+    candidates.extend(transcript_candidates(root, store, moved))
+    for lesson, entry, transcript_repo in candidates:
+        state = entry.get("replay", {})
         current = latest[lesson["lesson_id"]]
         if (current["status"] in c.ENDED or current["verification"] != "proven"
                 or invalidations.get(current["lesson_id"]) == current["id"]
                 or any(current[key] != lesson[key] for key in DELIVERED_FIELDS)):
             continue
         receipt = store["receipts"][lesson["receipt"]]
-        if state["proof"].get("full_suite", {}).get("status") == "FAIL":
+        suite = state.get("proof", {}).get("full_suite")
+        if (suite or {}).get("status") == "FAIL":
             failed.add((lesson["lesson_id"], receipt["before"]["commit"], receipt["after"]["commit"]))
             continue
-        slugs = [moved.get(ref) or store["failures"][ref]["repo"] for ref in lesson["evidence"]]
-        checkout = Path(state["repo"]).name.casefold()
+        repo = transcript_repo
+        if repo is None:
+            slugs = [moved.get(ref) or store["failures"][ref]["repo"] for ref in lesson["evidence"]]
+            checkout = Path(state["repo"]).name.casefold()
+            repo = next((slug for slug in slugs if slug.split("/")[-1].casefold() == checkout), slugs[0])
+        elif lesson["lesson_id"] in found:
+            continue
         try:
             payload = regression_adapter.payload(lesson["check_script"])
         except ValueError:
@@ -107,9 +143,9 @@ def proven(root, store, ledger):
             lesson_id=lesson["lesson_id"], id=lesson["id"], created=lesson["created"], title=lesson["title"],
             rule=lesson["rule"], failure=lesson["failure"], fix=lesson["fix"], payload=payload,
             cause=entry.get("draft", {}).get("cause", ""), prevention=entry.get("draft", {}).get("prevention", ""),
-            full_suite=state["proof"].get("full_suite"), drafter=entry.get("drafter", ""),
+            full_suite=suite, drafter=entry.get("drafter", ""),
             scope=c.lesson_scope(lesson, store), before=receipt["before"]["commit"], after=receipt["after"]["commit"],
-            repo=next((slug for slug in slugs if slug.split("/")[-1].casefold() == checkout), slugs[0]))
+            repo=repo, from_transcript=transcript_repo is not None)
     return [row for row in found.values() if (row["lesson_id"], row["before"], row["after"]) not in failed]
 
 
@@ -573,6 +609,7 @@ def origins(lessons, rows, since=None):
 
 
 def deliver(root, lessons, now, write=False, only=None, issues=None):
+    lessons = [lesson for lesson in lessons if not lesson.get("from_transcript")]
     path = root / RECORDS
     rows = records(root)
     today = now.date().isoformat()

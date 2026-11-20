@@ -139,6 +139,15 @@ for _old, _new in (("\ndef main():", REPORTING),
                    ("max(1, len(names)):\n        return 2", "max(1, len(names)):\n        return incomplete(cause(output))"),
                    ("        return 1\n    return 2\n", "        return 1\n    return incomplete(cause(output))\n")):
     TEMPLATE = TEMPLATE.replace(_old, _new, 1)
+NO_SRC_TEMPLATE = TEMPLATE
+TEMPLATE = (NO_SRC_TEMPLATE
+            .replace("import os\n", "import os\nfrom pathlib import Path\n", 1)
+            .replace('        result = run(command, cwd=root, capture_output=True, text=True, errors="replace",\n'
+                     '                     env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"))\n',
+                     '        source = Path(root) / "src"\n'
+                     '        pythonpath = str(source) if os.path.isdir(source) and not os.path.islink(source) else ""\n'
+                     '        result = run(command, cwd=root, capture_output=True, text=True, errors="replace",\n'
+                     '                     env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1", PYTHONPATH=pythonpath))\n', 1))
 
 LEGACY_EXISTING_TEMPLATE = '''import hashlib
 import json

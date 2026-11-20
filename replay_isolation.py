@@ -10,6 +10,7 @@ import tarfile
 import tempfile
 
 import coldfix as c
+import replay_env
 
 TOOLS = '/opt/coldfix-replay'
 NAMESPACE_FIX = ('on Ubuntu 23.10 or later, let bwrap create user namespaces with the AppArmor profile '
@@ -38,16 +39,19 @@ def source_workspace(root, prefix):
         yield Path(temporary)
 
 
-def sandbox(repo, argv, check=None):
+def sandbox(repo, argv, check=None, env=None):
+    path = '/usr/bin:/bin' if env is None else replay_env.MOUNT + '/bin:/usr/bin:/bin'
     command = ['bwrap', '--die-with-parent', '--unshare-all', '--ro-bind', '/usr', '/usr',
                '--ro-bind', '/bin', '/bin', '--ro-bind', '/lib', '/lib', '--ro-bind', '/lib64', '/lib64',
                '--bind', str(repo), '/work', '--tmpfs', '/tmp', '--proc', '/proc', '--dev', '/dev',
-               '--clearenv', '--setenv', 'PATH', '/usr/bin:/bin', '--setenv', 'HOME', '/tmp',
+               '--clearenv', '--setenv', 'PATH', path, '--setenv', 'HOME', '/tmp',
                '--setenv', 'PYTHONDONTWRITEBYTECODE', '1', '--chdir', '/work']
     if check is not None:
         command += ['--ro-bind', str(check), '/retained-check']
     if cached_tools() is not None:
         command += ['--ro-bind', str(cached_tools()), TOOLS]
+    if env is not None:
+        command += ['--ro-bind', str(env), replay_env.MOUNT]
     return [*command, '--', *argv]
 
 
@@ -62,10 +66,10 @@ def runner():
     return template or None
 
 
-def run(repo, argv, check, timeout, deadline=None):
+def run(repo, argv, check, timeout, deadline=None, env=None):
     template = runner()
     if template is None:
-        return c.process(sandbox(repo, argv, check), timeout=c.remaining_timeout(timeout, deadline))
+        return c.process(sandbox(repo, argv, check, env), timeout=c.remaining_timeout(timeout, deadline))
     with tempfile.TemporaryFile() as payload:
         with tarfile.open(fileobj=payload, mode='w') as archive:
             archive.add(repo, arcname='repo')
@@ -116,8 +120,15 @@ def check_command(command):
 
 def replay_tree(repo, revision, scratch, command, expected_failure, timeout, reverse_patch=None, *, deadline=None):
     require_sandbox(deadline)
-    return c.replay_tree(repo, revision, scratch, command, expected_failure, timeout, reverse_patch,
-                         isolated=True, deadline=deadline)
+    if runner() is not None:
+        return c.replay_tree(repo, revision, scratch, command, expected_failure, timeout, reverse_patch,
+                             isolated=True, deadline=deadline)
+    env, error = replay_env.build(cache(), repo, revision, deadline)
+    row = c.replay_tree(repo, revision, scratch, command, expected_failure, timeout, reverse_patch,
+                        isolated=True, deadline=deadline, env=env)
+    if env is None:
+        return dict(row, env='host-only', env_error=error)
+    return dict(row, env='reconstructed')
 
 
 def witness_process(command, cwd=None, timeout=None):

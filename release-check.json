@@ -64,6 +64,7 @@
  "checks": [
   {
    "role": "tests",
+   "timeout": 1800,
    "argv": [
     "python3",
     "-m",
@@ -2678,7 +2679,7 @@
    "kind": "export-path-review",
    "path": "public-export.txt",
    "reason": "Public file list of this export; the layout, environment-literal and packaging tests read it at the export root.",
-   "source_sha256": "4625820a942705ba4e0c9026dec7f62878838efa38a4d0bd6e086c8e6523cf45"
+   "source_sha256": "fb8c14028eb99ce97e4043621749ce188dd9394cb8b9701aaa3924654f529346"
   },
   {
    "scope": "tree",

@@ -2,6 +2,7 @@
 """Test fixture: stands in for the agent CLI; runs the configured PreToolUse hook and emits a stream-json transcript."""
 import json
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 
@@ -20,7 +21,7 @@ def main():
     hooks = json.loads(Path(option("--settings")).read_text())
     for group in hooks.get("hooks", {}).get("PreToolUse", []):
         for hook in group["hooks"]:
-            done = subprocess.run(hook["command"], shell=True, input=json.dumps(dict(cwd=str(Path.cwd()), tool_input=dict(file_path=str(target)))),
+            done = subprocess.run(shlex.split(hook["command"]), input=json.dumps(dict(cwd=str(Path.cwd()), tool_input=dict(file_path=str(target)))),
                                   capture_output=True, text=True)
             emit(type="system", subtype="hook_response", output=done.stdout)
     edits = [("t1", "bad", "worse"), ("t2", "bad", "good")]

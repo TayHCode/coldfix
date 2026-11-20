@@ -977,6 +977,29 @@ class AdapterTests(unittest.TestCase):
         self.assertTrue(c.check_pins(previous, digest))
         self.assertFalse(c.check_pins(previous.replace(digest, "0" * 64), digest))
 
+    def test_generated_test_imports_a_src_layout_package_and_older_checks_still_pin(self):
+        source = "import unittest\nimport srcpkg\nclass T(unittest.TestCase):\n    def test_a(self):\n        self.assertEqual(srcpkg.VALUE, 2)\n"
+        patch = ("diff --git a/tests/test_s.py b/tests/test_s.py\nnew file mode 100644\n--- /dev/null\n+++ b/tests/test_s.py\n"
+                 f"@@ -0,0 +1,{source.count(chr(10))} @@\n" + "".join("+" + line + "\n" for line in source.splitlines()))
+        script, _, digest = regression_adapter.build("tests/test_s.py", patch, ["test_a"], "FAIL: test_a")
+        outcomes = []
+        for value in (2, 1):
+            with tempfile.TemporaryDirectory() as temporary:
+                (Path(temporary) / "tests").mkdir()
+                (Path(temporary) / "src/srcpkg").mkdir(parents=True)
+                (Path(temporary) / "src/srcpkg/__init__.py").write_text(f"VALUE = {value}\n")
+                check = Path(temporary) / "check.py"
+                check.write_text(script)
+                result = subprocess.run([sys.executable, str(check)], cwd=temporary, capture_output=True, text=True)
+                outcomes.append((result.returncode, result.stdout.strip(), result.stderr))
+        self.assertEqual([outcome[:2] for outcome in outcomes],
+                         [(0, '{"status": "PASS"}'), (1, '{"status": "FAIL", "failure": "regression:' + digest[:16] + '"}')],
+                         outcomes)
+        no_src = script.replace(regression_adapter.TEMPLATE, regression_adapter.NO_SRC_TEMPLATE)
+        self.assertNotEqual(no_src, script)
+        self.assertTrue(c.check_pins(no_src, digest))
+        self.assertFalse(c.check_pins(no_src.replace("return 2", "return 0", 1), digest))
+
     def test_an_existing_test_check_from_before_cause_reporting_still_pins(self):
         self.assertEqual(hashlib.sha256(regression_adapter.LEGACY_EXISTING_TEMPLATE.encode()).hexdigest(),
                          "8528f987e34b16db41ced04f5c67bed12b0134a8fc6db5b41feed3f1bf437f5b")
