@@ -490,9 +490,12 @@ def main(argv=None):
                     summary["replay"] = learn_replay.run(root, ledger, projects=args.projects)
                     summary["replay"]["delivered"] = sum(row.get("state") == "delivered"
                                                          for row in check_delivery.records(root).values())
-                    summary["replay"]["reasons"] = learn_replay.reason_buckets(
-                        attempt["reason"] for key, row in ledger["drafts"].items()
-                        for attempt in (row.get("replay_attempts") or [])[seen.get(key, 0):])
+                    attempts = [attempt for key, row in ledger["drafts"].items()
+                                for attempt in (row.get("replay_attempts") or [])[seen.get(key, 0):]]
+                    summary["replay"]["reasons"] = learn_replay.reason_buckets(attempt["reason"] for attempt in attempts)
+                    environments = learn_replay.rejection_environments(attempts)
+                    if environments:
+                        summary["replay"]["rejection_environments"] = environments
                     if reviews:
                         summary["replay"]["review"] = review_split(ledger, before, seen)
                     print("learn_daily replay " + json.dumps(summary["replay"], sort_keys=True), file=sys.stderr, flush=True)

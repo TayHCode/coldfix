@@ -168,11 +168,11 @@ class ColdboxIngestTests(unittest.TestCase):
         self.assertEqual([(group["count"], group["recurring"]) for group in groups], [(1, False)] * 3)
 
     def test_repository_and_command_paths_stay_in_normalized_identity(self):
-        rows = [receipt(id="cbx-1700000000-abc0", repo="owner/one",
+        rows = [receipt(id="cbx-1700000000-abc0", repo="sample-org/one",
                         checks=[dict(check="unit", command="pytest tests/unit", status="fail", exit=1)]),
                 receipt(id="cbx-1700000001-abc1", repo="other/two",
                         checks=[dict(check="unit", command="pytest tests/integration", status="fail", exit=1)]),
-                receipt(id="cbx-1700000002-abc2", repo="owner/one",
+                receipt(id="cbx-1700000002-abc2", repo="sample-org/one",
                         checks=[dict(check="unit", command="pytest tests/integration", status="fail", exit=1)])]
         for row in rows:
             self.ingest(row)

@@ -112,14 +112,25 @@ def install(env, requirements, roots, deadline):
     return None
 
 
+def env_dir(cache, requirements, roots, deadline=None):
+    key = hashlib.sha256(json.dumps(['system-site', python_version(deadline), requirements, roots]).encode()).hexdigest()[:32]
+    return cache / 'envs' / key
+
+
+def supplied(cache, repo, revision, deadline=None):
+    requirements, roots = spec(repo, revision, deadline)
+    names = {normalized(NAME.match(line)[0]) for line in requirements}
+    site = next(env_dir(cache, requirements, roots, deadline).glob('lib/python*/site-packages'), None) if cache else None
+    return names | ({normalized(path.name.removesuffix('.py')) for path in site.iterdir()} if site else set())
+
+
 def build(cache, repo, revision, deadline=None):
     if cache is None:
         return None, 'no COLDFIX_REPLAY_CACHE to hold the replay environment'
     try:
         requirements, roots = spec(repo, revision, deadline)
-        key = hashlib.sha256(json.dumps(['system-site', python_version(deadline), requirements, roots]).encode()).hexdigest()[:32]
-        envs = cache / 'envs'
-        env, failed = envs / key, envs / (key + '.error')
+        env = env_dir(cache, requirements, roots, deadline)
+        envs, failed = env.parent, env.parent / (env.name + '.error')
         if (env / 'pyvenv.cfg').is_file():
             return env, None
         if failed.is_file() and time.time() - failed.stat().st_mtime < RETRY_SECONDS:

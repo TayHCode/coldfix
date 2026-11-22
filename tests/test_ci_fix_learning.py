@@ -773,7 +773,7 @@ class LocalProofTests(unittest.TestCase):
                         ci.workflow_plan(content, job())
 
     def test_home_python_retained_check_exports(self):
-        runtime = self.path / "home/fixture/bin/python3"
+        runtime = self.path / "home/user/bin/python3"
         runtime.parent.mkdir(parents=True)
         runtime.symlink_to(sys.executable)
         with patch.object(ci.sys, "executable", str(runtime)):

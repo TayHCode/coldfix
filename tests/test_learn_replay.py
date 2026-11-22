@@ -13,13 +13,18 @@ import time
 import unittest
 from unittest.mock import patch
 
+import check_delivery
+import ci_batch
 import ci_fix_learning
 import coldfix as c
 import coldrecall
+import failure_ingest
 import incident_admission
 import learn_replay
 import learn_report
 import regression_adapter
+import replay_env
+import replay_repos
 import replay_isolation
 import test_learn
 
@@ -960,6 +965,129 @@ class LearnReplayTests(unittest.TestCase):
             self.assertEqual([self.settle_replays(root, ledger, day, prepare)
                               for day in ('2026-11-01', '2026-11-02', '2026-11-03', '2026-11-04', '2026-11-05')], [1, 1, 1, 1, 1])
             self.assertFalse(ledger['drafts']['draft']['replay_settled']['confirmed'])
+
+    def test_a_narrow_rules_bump_reopens_only_the_rejections_it_names(self):
+        missing = ("incident not admitted; flagged lines reverted INCOMPLETE; expected FAIL; "
+                   "ModuleNotFoundError: No module named 'vault_kit'")
+        days = ('2026-11-01', '2026-11-02', '2026-11-03', '2026-11-04')
+        env_bump = getattr(learn_replay, 'REOPENS', {}).get(4, ())
+        for reason, settle_days, reopened_by_narrow_bump in (
+                ('no changed unittest matches the recorded failure', days[:1], 0), (missing, days, 1),
+                ('incident not admitted; red FAIL, green FAIL, reversed-patch FAIL; expected FAIL, PASS, FAIL', days, 0),
+                ('incident not admitted; red PASS, green PASS, reversed-patch PASS; expected FAIL, PASS, FAIL', days, 0),
+                ('incident not admitted; flagged lines reverted PASS; expected FAIL', days, 0),
+                ('Coldpass replay input: wrong_failure', days[:1], 1),
+                ('generated test: ' + learn_replay.UNUSABLE_REASK, days[:1], 1)):
+            with self.subTest(reason=reason), tempfile.TemporaryDirectory() as directory, \
+                    patch.object(learn_replay, 'REOPENS', {2: env_bump}, create=True):
+                def prepare(*args, **kwargs):
+                    raise c.ColdfixError(reason)
+                root = Path(directory)
+                ledger = self.settle_ledger(root)
+                for day in settle_days:
+                    self.settle_replays(root, ledger, day, prepare)
+                settled = dict(ledger['drafts']['draft']['replay_settled'])
+                self.assertTrue(settled['confirmed'])
+                self.assertEqual(self.settle_replays(root, ledger, '2026-11-05', prepare, rules=2), reopened_by_narrow_bump)
+                ledger['drafts']['draft']['replay_settled'] = settled
+                self.assertEqual(self.settle_replays(root, ledger, '2026-11-06', prepare, rules=3), 1)
+
+    def test_a_narrow_rules_bump_reopens_a_rejection_whose_proposed_fix_hit_a_missing_module(self):
+        def prepare(*args, **kwargs):
+            raise c.ColdfixError('no changed unittest matches the recorded failure')
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(learn_replay, 'REOPENS', {2: getattr(learn_replay, 'REOPENS', {}).get(4, ())}, create=True):
+            root = Path(directory)
+            ledger = self.settle_ledger(root)
+            self.settle_replays(root, ledger, '2026-11-01', prepare)
+            entry = ledger['drafts']['draft']
+            settled = dict(entry['replay_settled'])
+            self.assertTrue(settled['confirmed'])
+            self.assertEqual(self.settle_replays(root, ledger, '2026-11-02', prepare, rules=2), 0)
+            entry['replay_settled'] = settled
+            entry['proposed_fix'] = dict(status='rejected', reason=(
+                "incident not admitted; flagged lines reverted INCOMPLETE; expected FAIL; "
+                "ModuleNotFoundError: No module named 'vault_kit'"))
+            self.assertEqual(self.settle_replays(root, ledger, '2026-11-03', prepare, rules=2), 1)
+
+    def test_a_narrow_rules_bump_reopens_a_fallback_pass_only_when_the_env_can_supply_its_module(self):
+        env_bump = learn_replay.REOPENS[4]
+        for module, outside, declared, reopened in (('vault_kit', '', set(), 1), ('httpx', ' outside this repo', {'httpx'}, 1),
+                                                    ('readtrial', ' outside this repo', {'httpx'}, 0),
+                                                    ('yaml.constructor', ' outside this repo', {'yaml'}, 1),
+                                                    ('readtrial.cli', ' outside this repo', {'httpx'}, 0),
+                                                    ('readtrial', ' outside this repo', None, 1)):
+            reason = ("incident not admitted; flagged lines reverted PASS; expected FAIL; "
+                      f"ModuleNotFoundError: No module named '{module}'{outside}")
+            with self.subTest(module=module, declared=declared), tempfile.TemporaryDirectory() as directory, \
+                    patch.object(learn_replay, 'REOPENS', {2: env_bump}), \
+                    patch.object(learn_replay, 'declared_modules', create=True,
+                                 side_effect=c.ColdfixError('no checkout') if declared is None else None,
+                                 return_value=declared) as looked_up:
+                def prepare(*args, **kwargs):
+                    raise c.ColdfixError(reason)
+                root = Path(directory)
+                ledger = self.settle_ledger(root)
+                self.settle_replays(root, ledger, '2026-11-01', prepare)
+                self.assertTrue(ledger['drafts']['draft']['replay_settled']['confirmed'])
+                self.assertEqual(self.settle_replays(root, ledger, '2026-11-02', prepare, rules=2), reopened)
+                if outside:
+                    self.assertEqual([call.args[1]['replay_attempts'][0]['before'] for call in looked_up.call_args_list], ['e' * 40])
+
+    def test_declared_modules_cover_every_replayed_revision(self):
+        entry = dict(replay_attempts=[dict(failure='f' * 32, before='a' * 40), dict(failure=None, before=None),
+                                      dict(failure='f' * 32, before='b' * 40, after='c' * 40),
+                                      dict(failure='f' * 32, before='b' * 40, after='c' * 40)])
+        store = dict(failures={'f' * 32: dict(id='f' * 32)})
+        found = {'a' * 40: {'httpx'}, 'b' * 40: {'yaml'}, 'c' * 40: {'openpyxl'}}
+        with patch.object(learn_replay, 'source_repo', return_value=Path('repo')), \
+                patch.object(learn_replay.replay_env, 'supplied', create=True,
+                             side_effect=lambda cache, repo, revision, *rest: found[revision]) as supplied:
+            self.assertEqual(learn_replay.declared_modules(store, entry, Path('projects')), {'httpx', 'yaml', 'openpyxl'})
+            self.assertEqual(sorted(call.args[2] for call in supplied.call_args_list), ['a' * 40, 'b' * 40, 'c' * 40])
+            supplied.reset_mock()
+            learn_replay.declared_modules(store, entry, Path('projects'), 123.0)
+        self.assertEqual({call.args[3:] for call in supplied.call_args_list}, {(123.0,)})
+        with self.assertRaises(c.ColdfixError):
+            learn_replay.declared_modules(store, dict(replay_attempts=[]), Path('projects'))
+
+    def test_retries_whose_missing_module_the_env_can_supply_run_first(self):
+        def rejected(reason):
+            return dict(verdict='PASS', replay=dict(status='rejected', reason=reason),
+                        replay_attempts=[dict(day='2026-10-31', failure='f' * 32, before='e' * 40, after='d' * 40, reason=reason)])
+        missing = "incident not admitted; flagged lines reverted INCOMPLETE; expected FAIL; ModuleNotFoundError: No module named '{}'"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ledger = dict(runs=[], drafts={name: dict(rejected(reason), evidence=[name]) for name, reason in (
+                ('plain', 'no changed unittest matches the recorded failure'),
+                ('unresolved', missing.format('httpx') + ' outside this repo'),
+                ('cross', missing.format('readtrial') + ' outside this repo'),
+                ('declared', missing.format('httpx') + ' outside this repo'),
+                ('intree', missing.format('vault_kit')))})
+            (root / 'learn-drafts.json').write_text(json.dumps(ledger))
+            pairs = root / 'pairs.json'
+            pairs.write_text(json.dumps(dict(results=[])))
+            failure = dict(id='f' * 32, kind='ci')
+            prepared = []
+
+            def prepare(failure, pair, *args, **kwargs):
+                prepared.append(pair['name'])
+                raise c.ColdfixError('no changed unittest matches the recorded failure')
+
+            def declared(store, entry, *args):
+                if entry['evidence'] == ['unresolved']:
+                    raise c.ColdfixError('no checkout')
+                return {'httpx'}
+            with patch.object(learn_replay, 'utc_day', return_value='2026-11-01'), \
+                    patch.object(learn_replay, 'expired', side_effect=lambda deadline: len(prepared) >= 2), \
+                    patch.object(learn_replay.c, 'load_store', return_value=(root, {})), \
+                    patch.object(learn_replay, 'prior_proof', return_value=None), \
+                    patch.object(learn_replay, 'declared_modules', create=True, side_effect=declared), \
+                    patch.object(learn_replay, 'prepare', side_effect=prepare), \
+                    patch.object(learn_replay, 'replay_candidates', side_effect=lambda store, entry, *args: [
+                        (failure, dict(before='e' * 40, after='d' * 40, name=entry['evidence'][0]))]):
+                learn_replay.run(root, ledger, projects=root, pairs_path=pairs)
+            self.assertEqual(sorted(prepared), ['declared', 'intree'])
 
     def test_flagged_lines_that_arrive_the_same_day_reopen_a_review_rejection(self):
         url = 'https://github.com/datarobot-oss/datarobot-genai/pull/772#discussion_r4605753840'
@@ -3524,11 +3652,12 @@ class ReviewPairReplayTests(unittest.TestCase):
         git('commit', '-qm', 'Keep the value positive')
         after = git('rev-parse', 'HEAD')
         if ci:
-            ref = 'https://github.com/example/project/actions/runs/7#attempt-1'
-            failure = c.event_record(dict(kind='ci', command='verify', repo='example/project', agent='unknown',
-                error=json.dumps(dict(type='ci', head_sha=before, run_id=7,
-                                      log_tail=also_failed + 'FAIL: test_value_is_positive (test_value.ValueTests)\nAssertionError')),
-                source_ref=ref, occurred='2026-11-05T00:00:00Z'), 'failure-ingest')
+            failure = c.event_record(failure_ingest.ci_event(dict(
+                type='ci', repo='example/project', run_id=7, workflow='verify', job='verify', runner='fixture',
+                pr=None, duration_seconds=1, attempt=1, conclusion='failure', head_sha=before,
+                occurred='2026-11-05T00:00:00Z',
+                log_tail=also_failed + 'FAIL: test_value_is_positive (test_value.ValueTests)\nAssertionError')),
+                'failure-ingest')
             pair = dict(repo='example/project', red_run=7, before=before, after=after)
         else:
             ref = 'https://github.com/example/project/pull/1#discussion_r1'
@@ -3564,6 +3693,69 @@ class ReviewPairReplayTests(unittest.TestCase):
                  '        self.assertGreater(VALUE, 0)\n')
     VACUOUS = ('import unittest\nclass ValueTests(unittest.TestCase):\n'
                '    def test_value_is_positive(self):\n        pass\n')
+
+    def test_pinned_rejection_environment_survives_live_and_oss_readback(self):
+        missing = self.GENERATED.replace('from value import VALUE', 'import coldfix_missing_module')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stores = {}
+            for scope in ('live', 'oss'):
+                for case in ('reconstructed', 'host-only', 'unknown', 'proven'):
+                    with self.subTest(scope=scope, case=case):
+                        project = root / scope / case
+                        project.mkdir(parents=True)
+                        test = self.GENERATED if case in ('unknown', 'proven') else missing
+                        if case in ('reconstructed', 'proven'):
+                            package = project / 'project/packages/kit'
+                            package.mkdir(parents=True)
+                            (package / 'pyproject.toml').write_text('[project]\nname = "coldfix-fixture-kit"\n')
+                            (package / 'coldfix_fixture_kit.py').write_text('import unittest\n')
+                            test = test.replace('import unittest', 'from coldfix_fixture_kit import unittest')
+                        store, ledger, entry, pairs = self.untested_review_fix(project, base_test=test, ci=True)
+                        pair = json.loads(pairs.read_text())['results'][0]
+                        if case == 'unknown':
+                            entry['draft']['rule'] = 'Make test_value_is_positive pass.'
+                        with patch.dict(os.environ, COLDFIX_REPLAY_CACHE=str(project / 'cache')):
+                            os.environ.pop(replay_isolation.RUNNER, None)
+                            with patch.object(replay_env, 'install', wraps=replay_env.install) as install:
+                                if case == 'host-only':
+                                    install.return_value = 'fixture setup failed'
+                                if scope == 'live':
+                                    learn_replay.run(store, ledger, projects=project, pairs_path=pairs)
+                                else:
+                                    learn_replay.run_in_workspace(store, ledger, project, pairs, 600, history=False,
+                                                                  unbounded=True)
+                        saved = ci_batch.learn_daily_ledger(store)['drafts']['candidate']
+                        stores[scope, case] = store
+                        if case == 'proven':
+                            self.assertEqual(saved['replay']['status'], 'proven')
+                            self.assertNotIn('replay_attempts', saved)
+                            receipt = c.load_store(store)[1]['receipts'][saved['replay']['proof']['receipt_id']]
+                            self.assertEqual([(receipt[side]['status'], receipt[side]['env'])
+                                              for side in ('before', 'after', 'reversed')],
+                                             [('FAIL', 'reconstructed'), ('PASS', 'reconstructed'),
+                                              ('FAIL', 'reconstructed')])
+                            continue
+                        self.assertEqual(saved['replay']['status'], 'rejected')
+                        [attempt] = saved['replay_attempts']
+                        self.assertEqual((attempt['before'], attempt['after']), (pair['before'], pair['after']))
+                        if case == 'unknown':
+                            self.assertNotIn('env', attempt)
+                            self.assertFalse(install.called)
+                        else:
+                            self.assertIn("No module named 'coldfix_missing_module'", attempt['reason'])
+                            self.assertEqual(attempt.get('env'), case)
+                            self.assertNotIn('env_error', attempt)
+                            self.assertTrue(install.called)
+                        if scope == 'oss':
+                            counts = ci_batch.measure(store, set(saved['evidence'])).get('rejection_environments')
+                            self.assertEqual(counts, {case: 1})
+            for case in ('reconstructed', 'host-only', 'unknown'):
+                if ('live', case) in stores and ('oss', case) in stores:
+                    report = learn_report.report(stores['live', case], datetime.now(timezone.utc),
+                                                 oss_store=stores['oss', case])
+                    self.assertEqual(report.get('replay_rejection_environments'), {case: 1})
+                    self.assertEqual(report['outside_repos'].get('replay_rejection_environments'), {case: 1})
 
     def test_a_ci_fix_whose_recorded_test_passes_before_it_is_proven_by_a_generated_test_of_that_name(self):
         result, entry, write, lessons = self.replay_with_generated(self.GENERATED, base_test=self.VACUOUS, ci=True)
@@ -3937,7 +4129,8 @@ class ReviewPairReplayTests(unittest.TestCase):
 class TranscriptCodeLeadReplayTests(unittest.TestCase):
     GENERATED = ReviewPairReplayTests.GENERATED
 
-    def lead(self, root, after_mistake, thread='', named_repo='example/project', merged=False):
+    def lead(self, root, after_mistake, thread='', named_repo='example/project', merged=False, repo_name='example/project',
+             session=None, folder='/srv/projects/project'):
         store = root / 'store'
         store.mkdir(mode=0o700)
         repo = root / 'project'
@@ -3968,9 +4161,15 @@ class TranscriptCodeLeadReplayTests(unittest.TestCase):
         named = after_mistake.format(repo=named_repo, after=after)
         evidence = ('user [u1]: Keep VALUE positive.\n\nassistant [a1]: I set VALUE to -1.\n\n'
                     'user [u2]: Wrong, it must stay positive.\n\nassistant [a2]: ' + named)
-        failure = c.event_record(dict(kind='correction', command='transcript correction', repo='example/project',
+        transcript = root / 'transcript.md'
+        turns = [('user', 'u1', 'Keep VALUE positive.'), ('assistant', 'a1', 'I set VALUE to -1.'),
+                 ('user', 'u2', 'Wrong, it must stay positive.'), ('assistant', 'a2', named),
+                 *[('assistant', 'a3', text.format(repo=named_repo, after=after)) for text in [session] if session]]
+        transcript.write_text((f'---\nproject_hint: "{folder}"\n---\n\n' if folder else '') + ''.join(f'## {role} · 2026-11-05 00:00:0{number}Z · {ident}\n\n{text}\n\n'
+                                      for number, (role, ident, text) in enumerate(turns)))
+        failure = c.event_record(dict(kind='correction', command='transcript correction', repo=repo_name,
             agent='claude', error=json.dumps(dict(type='transcript_correction', score=0.9, evidence=evidence)),
-            source_ref='transcript:/transcripts/t.md#messages=u1,a1,u2,a2', occurred='2026-11-05T00:00:00Z',
+            source_ref=f'transcript:{transcript}#messages=u1,a1,u2,a2', occurred='2026-11-05T00:00:00Z',
             thread=thread), 'stdin')
         c.save(store, 'failures', failure)
         lesson = dict(id=failure['id'], verdict='lesson', source='owner', kind='code', title='Keep values positive',
@@ -4024,6 +4223,126 @@ class TranscriptCodeLeadReplayTests(unittest.TestCase):
             store, _, _, _ = self.lead(root, 'Fixed in https://github.com/{repo}/pull/7', named_repo='example/other')
             counts, write, routes = self.replay(root, store)
             self.assertEqual((counts, routes, write.call_count), (dict(routed=0, proven=0, rejected=0), {}, 0))
+
+    def test_a_pull_request_the_session_opened_after_the_excerpt_routes_the_lead(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store, failure, before, after = self.lead(root, 'Fixed.', session='Opened https://github.com/{repo}/pull/7')
+            counts, _, routes = self.replay(root, store)
+            self.assertEqual(counts, dict(routed=1, proven=1, rejected=0))
+            self.assertEqual((routes[failure['id']]['fix'], routes[failure['id']]['before'], routes[failure['id']]['after']),
+                             ('https://github.com/example/project/pull/7', before, after))
+
+    def test_a_lead_without_a_repository_takes_the_one_its_session_pull_request_names(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store, failure, _, _ = self.lead(root, 'Fixed.', repo_name='unknown',
+                                             session='Opened https://github.com/{repo}/pull/7')
+            self.assertEqual(self.replay(root, store)[0], dict(routed=1, proven=1, rejected=0))
+            self.assertEqual(replay_repos.load(store), {failure['id']: 'example/project'})
+            [(_, _, repo)] = check_delivery.transcript_candidates(store, c.load_store(store)[1], replay_repos.load(store))
+            self.assertEqual(repo, 'example/project')
+
+    def test_a_lead_without_a_repository_whose_session_names_two_repositories_is_not_routed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store, _, _, _ = self.lead(root, 'Fixed.', repo_name='unknown', session=(
+                'Opened https://github.com/{repo}/pull/7 and https://github.com/example/other/pull/8'))
+            counts, write, routes = self.replay(root, store)
+            self.assertEqual((counts, routes, write.call_count, replay_repos.load(store)),
+                             (dict(routed=0, proven=0, rejected=0), {}, 0, {}))
+
+    def test_a_lead_without_a_repository_ignores_a_pull_request_outside_its_session_folder(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store, _, _, _ = self.lead(root, 'Fixed.', repo_name='unknown', folder='/srv/projects/other',
+                                       session='See https://github.com/{repo}/pull/7 for an example')
+            counts, write, routes = self.replay(root, store)
+            self.assertEqual((counts, routes, write.call_count), (dict(routed=0, proven=0, rejected=0), {}, 0))
+
+    def test_a_lead_without_a_repository_ignores_a_folder_quoted_in_the_conversation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store, _, _, _ = self.lead(root, 'Fixed.', repo_name='unknown', folder=None, session=(
+                'The log shows {{"cwd": "/srv/projects/project"}}. Opened https://github.com/{repo}/pull/7'))
+            self.assertEqual(self.replay(root, store)[0], dict(routed=0, proven=0, rejected=0))
+
+    def test_a_lead_without_a_repository_ignores_a_subdirectory_named_like_the_repository(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store, _, _, _ = self.lead(root, 'Fixed.', repo_name='unknown', folder='/srv/projects/app/project',
+                                       session='Opened https://github.com/{repo}/pull/7')
+            self.assertEqual(self.replay(root, store)[0], dict(routed=0, proven=0, rejected=0))
+
+    def test_a_lead_without_a_repository_takes_only_the_first_checkout_in_its_folder(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store, _, _, _ = self.lead(root, 'Fixed.', repo_name='unknown',
+                                       folder='/srv/projects/app/tests/worktrees/project',
+                                       session='Opened https://github.com/{repo}/pull/7')
+            self.assertEqual(self.replay(root, store)[0], dict(routed=0, proven=0, rejected=0))
+
+    def test_a_lead_without_a_repository_ignores_an_unclosed_front_matter_block(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store, failure, _, _ = self.lead(root, 'Fixed.', repo_name='unknown', folder=None,
+                                             session='Opened https://github.com/{repo}/pull/7')
+            transcript = root / 'transcript.md'
+            transcript.write_text('---\ntitle: "x"\n\n' + transcript.read_text().replace(
+                'Opened', 'project_hint: "/srv/projects/project"\nOpened'))
+            self.assertEqual(self.replay(root, store)[0], dict(routed=0, proven=0, rejected=0))
+
+    def test_a_proof_from_another_checkout_does_not_bind_a_lead_without_a_repository(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store, failure, _, _ = self.lead(root, 'Fixed.', repo_name='unknown',
+                                             session='Opened https://github.com/{repo}/pull/7')
+            proof = dict(id='r', lesson_id='L1', receipt_id='x', status='PASS', verification='proven')
+            with patch.object(learn_replay, 'prior_proof', return_value=(root / 'other', proof)):
+                counts, _, routes = self.replay(root, store)
+            self.assertEqual(counts, dict(routed=1, proven=0, rejected=1))
+            self.assertEqual(routes[failure['id']]['reason'], 'prior proof is in another repository')
+            self.assertEqual(replay_repos.load(store), {})
+
+    def test_a_proof_from_a_same_named_repository_of_another_owner_does_not_bind_the_lead(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store, _, _, _ = self.lead(root, 'Fixed.', repo_name='unknown',
+                                       session='Opened https://github.com/{repo}/pull/7')
+            other = root / 'elsewhere' / 'project'
+            other.mkdir(parents=True)
+            subprocess.check_call(['git', '-C', str(other), 'init', '-q'])
+            subprocess.check_call(['git', '-C', str(other), 'remote', 'add', 'origin',
+                                   'https://github.com/elsewhere/project.git'])
+            proof = dict(id='r', lesson_id='L1', receipt_id='x', status='PASS', verification='proven')
+            with patch.object(learn_replay, 'prior_proof', return_value=(other, proof)):
+                counts, _, _ = self.replay(root, store)
+            self.assertEqual(counts, dict(routed=1, proven=0, rejected=1))
+            self.assertEqual(replay_repos.load(store), {})
+
+    def test_a_rejected_guess_does_not_bind_a_lead_to_that_repository(self):
+        vacuous = ('import unittest\nclass ValueTests(unittest.TestCase):\n'
+                   '    def test_value_is_positive(self):\n        pass\n')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store, _, _, _ = self.lead(root, 'Fixed.', repo_name='unknown',
+                                       session='Opened https://github.com/{repo}/pull/7')
+            self.assertEqual(self.replay(root, store, vacuous)[0], dict(routed=1, proven=0, rejected=1))
+            self.assertEqual(replay_repos.load(store), {})
+
+    def test_a_transcript_path_replaced_by_a_fifo_is_not_read(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store, _, _, _ = self.lead(root, 'Fixed.', session='Opened https://github.com/{repo}/pull/7')
+            (root / 'transcript.md').unlink()
+            os.mkfifo(root / 'transcript.md')
+            self.assertEqual(self.replay(root, store)[0], dict(routed=0, proven=0, rejected=0))
+
+    def test_a_session_pull_request_in_another_repository_is_not_routed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store, _, _, _ = self.lead(root, 'Fixed.', session='Opened https://github.com/example/other/pull/7')
+            self.assertEqual(self.replay(root, store)[0], dict(routed=0, proven=0, rejected=0))
 
     def test_a_generated_test_that_passes_before_the_fix_is_rejected_and_not_retried_that_week(self):
         vacuous = ('import unittest\nclass ValueTests(unittest.TestCase):\n'

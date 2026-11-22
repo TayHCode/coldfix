@@ -1,6 +1,7 @@
 """Replay reviewed drafts against locally available fixed-in-PR pairs."""
 import argparse
 import ast
+from collections import Counter
 import copy
 import difflib
 from datetime import date, datetime, timezone
@@ -24,6 +25,7 @@ import failure_ingest
 import flakiness
 import incident_admission
 import regression_adapter
+import replay_env
 import replay_isolation
 import replay_repos
 import coldpass_replay
@@ -71,6 +73,8 @@ NOT_PROVABLE = frozenset({
 })
 TERMINAL = frozenset({'not_provable', 'missing_input', 'screen_rejected', 'privacy_screen'})
 UNUSABLE_REASK = 'model wrote no usable unittest after re-ask'
+REOPENS = {4: ('INCOMPLETE', 'replay_incomplete', 'wrong_failure', UNUSABLE_REASK)}
+IMPORT_FAILURE = re.compile(r"No module named '([\w.]+)'( outside this repo)?|\bImportError\b")
 TRANSCRIPT_SETTLED = re.compile(r'not_replayable_correction_only: transcript (proven|duplicate|no_lesson|unprovable|rejected|retry)')
 
 
@@ -982,7 +986,9 @@ def coldpass_proof(root, store, entry, failure, pair, projects, timeout, deadlin
         if 'privacy screen blocked' in message:
             raise c.ColdfixError('privacy_blocked') from None
         if message.startswith('incident not admitted;'):
-            raise c.ColdfixError('replay_incomplete' if 'INCOMPLETE' in message else 'wrong_failure') from None
+            raise incident_admission.ReplayRejected(
+                'replay_incomplete' if 'INCOMPLETE' in message else 'wrong_failure',
+                error.env if isinstance(error, incident_admission.ReplayRejected) else None) from None
         raise
 
 
@@ -1202,15 +1208,50 @@ NAMED_FIX = re.compile(r'https://github\.com/([A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-
 
 
 def named_fix(failure, lead):
-    import transcript_lessons
-    rows = transcript_lessons.turns(failure)
+    import transcript_lessons, transcript_mistakes
+    known = {failure['repo'].casefold(), repo_slug(failure).casefold()} - {'unknown'}
+    match = later_fix(known, lead, transcript_lessons.turns(failure), failure.get('thread') or '')
+    if match and known:
+        return match
+    path = Path(failure['source_ref'].removeprefix('transcript:').partition('#')[0])
+    try:
+        raw = path.read_bytes() if path.is_file() else b''
+    except OSError:
+        raw = b''
+    match = match or later_fix(known, lead, transcript_mistakes.read_messages(path, raw))
+    if match is None or known:
+        return match
+    return match if match[1].split('/')[1].casefold().removesuffix('-private') == session_checkout(path, raw) else None
+
+
+def session_checkout(path, raw):
+    text, folder = raw.decode('utf-8', 'replace'), ''
+    if path.suffix == '.jsonl':
+        for line in text.split('\n'):
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            meta = (record.get('payload') if record.get('type') == 'session_meta' else record) if isinstance(record, dict) else None
+            if isinstance(meta, dict) and isinstance(meta.get('cwd'), str):
+                folder = meta['cwd']
+                break
+    else:
+        front = re.match(r'---\n((?:(?!## ).*\n)*?)---\n', text)
+        found = front and re.search(r'^project_hint: "([^"]*)"$', front[1], re.M)
+        folder = found[1] if found else ''
+    parts = [part.casefold() for part in re.split(r'[\\/]+', folder)]
+    return next((name for parent, name in zip(parts, parts[1:]) if parent in ('projects', 'repos', 'worktrees')), None)
+
+
+def later_fix(known, lead, rows, thread=''):
     ids = [row['id'] for row in rows]
     wrong = lead['lesson']['wrong_message']
     later = '\n'.join(row['text'] for row in rows[ids.index(wrong) + 1:]) if wrong in ids else ''
-    for match in NAMED_FIX.finditer(later + '\n' + (failure.get('thread') or '')):
-        if match[1].casefold() == failure['repo'].casefold():
-            return match
-    return None
+    matches = [match for match in NAMED_FIX.finditer(later + '\n' + thread) if replay_repos.SLUG.fullmatch(match[1])]
+    if not known:
+        return matches[0] if len({match[1].casefold() for match in matches}) == 1 else None
+    return next((match for match in matches if match[1].casefold() in known), None)
 
 
 def fix_pair(failure, match, projects, timeout):
@@ -1251,13 +1292,19 @@ def transcript_proofs(root, projects, timeout, deadline):
             previous = routes.get(key) or {}
             if previous.get('status') == 'proven' or recent(previous.get('day')) or expired(deadline):
                 continue
+            inferred = repo_slug(failure) == 'unknown'
+            if inferred:
+                failure = dict(failure, repo=match[1])
             route = dict(day=utc_day(), fix=match[0])
             lesson = lead['lesson']
             entry = dict(evidence=[key], headline=lesson['what_went_wrong'],
                          draft=dict(kind='test', title=lesson['title'], rule=lesson['rule']))
             bounded = min(timeout, max(0.001, (deadline - time.monotonic()) / 3))
             try:
-                proof = (prior_proof(store, entry) or (None, None))[1]
+                prior = prior_proof(store, entry)
+                c.require(not (inferred and prior) or prior[0].is_dir() and settle_codex_lessons.slug_of(
+                    prior[0], timeout=bounded).casefold() == match[1].casefold(), 'prior proof is in another repository')
+                proof = (prior or (None, None))[1]
                 if proof is None:
                     route.update(fix_pair(failure, match, projects, bounded))
                     _, proof = generated_proof(root, store, entry, failure, route, projects, bounded, deadline,
@@ -1270,6 +1317,8 @@ def transcript_proofs(root, projects, timeout, deadline):
             else:
                 if proof is None:
                     continue
+                if inferred:
+                    replay_repos.record(root, {key: match[1]})
                 route.update(status='proven', lesson_id=proof['lesson_id'], receipt_id=proof['receipt_id'])
                 counts['proven'] += 1
             route.pop('repo', None)
@@ -1320,6 +1369,11 @@ def replay_outcome(reason):
     return reason.startswith('incident not admitted; ') or reason == 'model wrote no usable unittest' or terminal([reason])
 
 
+def rejection_environments(attempts):
+    return dict(Counter(attempt['env'] if attempt.get('env') in ('reconstructed', 'host-only') else 'unknown'
+                        for attempt in attempts if attempt.get('before') and attempt.get('after')))
+
+
 def pair_inputs(store, entry, pairs):
     known = dict(evidence=[ref for ref in entry['evidence'] if ref in store.get('failures', {})])
     return c.digest(c.encoded(sorted(' '.join([*pair_key(failure, pair), *(
@@ -1335,9 +1389,35 @@ def recent(day):
     return 0 <= age < RETRY_DAYS
 
 
-def settled(record):
-    return (isinstance(record, dict) and bool(record.get('confirmed')) and record.get('revision') == REPLAY_RULES
-            and recent(record.get('day')))
+def env_fixable(reason, declared):
+    return any(not module or not outside or (names := declared()) is None
+               or replay_env.normalized(module.split('.')[0]) in names
+               for module, outside in IMPORT_FAILURE.findall(reason))
+
+
+def declared_modules(store, entry, projects, deadline=None):
+    revisions = {(attempt['failure'], attempt[side]) for attempt in entry.get('replay_attempts') or []
+                 for side in ('before', 'after') if attempt.get('failure') and attempt.get(side)}
+    c.require(revisions, 'no replayed revision to resolve requirements')
+    if isinstance(projects, SourceProjects) and deadline is not None:
+        projects = copy.copy(projects)
+        projects.deadline = deadline
+    return set().union(*(replay_env.supplied(replay_isolation.cache(), source_repo(store['failures'][ref], projects, [revision]),
+                                             revision, deadline) for ref, revision in revisions))
+
+
+def reopens(bump, reason, fixable):
+    if bump not in REOPENS:
+        return True
+    if IMPORT_FAILURE.search(reason):
+        return fixable()
+    return any(text in reason for text in REOPENS[bump])
+
+
+def settled(record, reason='', fixable=lambda: True):
+    return (isinstance(record, dict) and bool(record.get('confirmed')) and recent(record.get('day'))
+            and type(record.get('revision')) is int and record['revision'] <= REPLAY_RULES
+            and not any(reopens(bump, reason, fixable) for bump in range(record['revision'] + 1, REPLAY_RULES + 1)))
 
 
 def terminal(reasons):
@@ -1430,6 +1510,29 @@ def run_in_workspace(root, ledger, projects, pairs_path, timeout, history=True, 
         pairs += [row for row in reviewed.values() if row.get('after')]
         revalidate(root, ledger, path, pairs, projects, timeout,
                    None if deadline is None else min(deadline, time.monotonic() + REPLAY_SECONDS / 2), counts)
+
+        def rejection(entry):
+            return f"{(entry.get('replay') or {}).get('reason')}; {(entry.get('proposed_fix') or {}).get('reason')}"
+
+        lookup_deadline = None if deadline is None else min(deadline, time.monotonic() + REPLAY_SECONDS / 6)
+
+        @functools.cache
+        def declared(fingerprint):
+            try:
+                return declared_modules(first_store(), ledger['drafts'][fingerprint], projects, lookup_deadline)
+            except (KeyError, *replay_env.ERRORS):
+                return None
+
+        def fixable(fingerprint):
+            return env_fixable(rejection(ledger['drafts'][fingerprint]), lambda: declared(fingerprint))
+
+        def env_first(item):
+            fingerprint, entry = item
+            return not ((entry.get('replay') or {}).get('status') == 'rejected' and IMPORT_FAILURE.search(rejection(entry))
+                        and (entry.get('replay_attempts') or [{}])[-1].get('day') != utc_day()
+                        and not settled(entry.get('replay_settled'), rejection(entry), lambda: fixable(fingerprint))
+                        and env_fixable(rejection(entry), lambda: declared(fingerprint) or set()))
+        drafts.sort(key=env_first)
         for fingerprint, entry in drafts:
             if entry['verdict'] != 'PASS':
                 continue
@@ -1499,13 +1602,16 @@ def run_in_workspace(root, ledger, projects, pairs_path, timeout, history=True, 
                      or (entry.get('replay_settled') or {}).get('day') == utc_day())
                     and (expired(deadline) or pair_error or (entry.get('replay_settled') or {}).get('inputs') is None
                          or same_inputs(first_store, entry, pairs))
-                    or settled(entry.get('replay_settled'))
+                    or settled(entry.get('replay_settled'), rejection(entry), lambda: fixable(fingerprint))
                     and (expired(deadline) or not pair_error and same_inputs(first_store, entry, pairs))):
                 continue
-            def reject(reason, failure=None, pair=None):
-                entry.setdefault('replay_attempts', []).append(dict(day=utc_day(),
+            def reject(reason, failure=None, pair=None, error=None):
+                attempt = dict(day=utc_day(),
                     failure=failure['id'] if failure else None, before=pair['before'] if pair else None,
-                    after=pair['after'] if pair else None, reason=reason))
+                    after=pair['after'] if pair else None, reason=reason)
+                if pair and isinstance(error, incident_admission.ReplayRejected) and error.env in ('reconstructed', 'host-only'):
+                    attempt['env'] = error.env
+                entry.setdefault('replay_attempts', []).append(attempt)
                 counts['rejected'] += 1
                 c.atomic_create(path, c.encoded(ledger), replace=True)
             try:
@@ -1611,7 +1717,7 @@ def run_in_workspace(root, ledger, projects, pairs_path, timeout, history=True, 
                                     infrastructure = infrastructure or not isinstance(error, c.ColdfixError)
                                     reasons.append(str(error))
                                     pair_reasons.append(str(error))
-                                    reject(str(error), failure, pair)
+                                    reject(str(error), failure, pair, error)
                                     if not selected:
                                         break
                             outcomes = list(pair_reasons)
@@ -1632,7 +1738,7 @@ def run_in_workspace(root, ledger, projects, pairs_path, timeout, history=True, 
                                                               or reask_pending(root, failure))
                                             outcomes.append('generated test: ' + str(error))
                                             reasons.append('generated test: ' + str(error))
-                                            reject('generated test: ' + str(error), failure, pair)
+                                            reject('generated test: ' + str(error), failure, pair, error)
                             unsettled = unsettled or infrastructure
                             if deferred:
                                 current = dict(key=list(key), skipped=sorted(skipped), reasons=pair_reasons,

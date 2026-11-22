@@ -18,7 +18,7 @@ class PublicAdmissionTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        self.fixture = self.root / 'fixture'
+        self.fixture = self.root / 'sample-project'
         self.fixture.mkdir()
         self.git('init', '-q', str(self.fixture))
         self.git('-C', str(self.fixture), 'config', 'user.email', 'fixture@example.invalid')
@@ -30,8 +30,8 @@ class PublicAdmissionTests(unittest.TestCase):
         (self.fixture / 'value').write_text('after')
         self.git('-C', str(self.fixture), 'commit', '-qam', 'after')
         self.after = self.git('-C', str(self.fixture), 'rev-parse', 'HEAD')
-        self.entry = dict(repo='Public/Fixture', repository_id=123, before=self.before, after=self.after)
-        self.failure = dict(repo='Public/Fixture', error=json.dumps(dict(type='coldpass', commit=self.before,
+        self.entry = dict(repo='Public/Sample-Project', repository_id=123, before=self.before, after=self.after)
+        self.failure = dict(repo='Public/Sample-Project', error=json.dumps(dict(type='coldpass', commit=self.before,
                                                                 repository_id=123)))
         self.commands = []
 
@@ -46,7 +46,7 @@ class PublicAdmissionTests(unittest.TestCase):
     def transport(self, command, timeout, env):
         self.commands.append((command, env))
         self.assertEqual(command[1], 'clone')
-        self.assertEqual(command[-2], 'https://github.com/Public/Fixture.git')
+        self.assertEqual(command[-2], 'https://github.com/Public/Sample-Project.git')
         shutil.copytree(self.fixture, command[-1], dirs_exist_ok=True)
         self.git('-C', command[-1], 'config', '--remove-section', 'user')
         self.git('-C', command[-1], 'remote', 'add', 'origin', command[-2])
@@ -58,9 +58,9 @@ class PublicAdmissionTests(unittest.TestCase):
             return learn_replay.run(self.root, {})
 
     def test_daily_coldpass_public_admission_uses_credential_free_mirror(self):
-        local = self.root / 'Fixture'
+        local = self.root / 'Sample-Project'
         shutil.copytree(self.fixture, local)
-        self.git('-C', str(local), 'remote', 'add', 'origin', 'https://github.com/Public/Fixture.git')
+        self.git('-C', str(local), 'remote', 'add', 'origin', 'https://github.com/Public/Sample-Project.git')
         self.manifest()
         with patch.object(public_admission, 'identity') as identity, \
                 patch.object(learn_replay, 'clone_source', side_effect=self.transport), \
@@ -79,9 +79,9 @@ class PublicAdmissionTests(unittest.TestCase):
         self.assertTrue(env['HOME'].endswith('/.public-home'))
 
     def test_unbounded_and_local_shortcut_deny_before_clone(self):
-        local = self.root / 'Fixture'
+        local = self.root / 'Sample-Project'
         shutil.copytree(self.fixture, local)
-        self.git('-C', str(local), 'remote', 'add', 'origin', 'https://github.com/Public/Fixture.git')
+        self.git('-C', str(local), 'remote', 'add', 'origin', 'https://github.com/Public/Sample-Project.git')
         with patch.object(learn_replay, 'clone_source') as clone, \
                 patch.dict(os.environ, COLDFIX_OWNER='Owner', COLDFIX_CHECKOUTS=str(self.root)):
             with self.assertRaisesRegex(c.ColdfixError, 'not explicitly admitted'):
@@ -91,25 +91,25 @@ class PublicAdmissionTests(unittest.TestCase):
     def test_unverified_private_or_renamed_identity_denies(self):
         self.manifest()
         for metadata in ({'private': True}, {'private': False, 'visibility': 'public',
-                          'full_name': 'Other/Fixture', 'id': 123}, {}):
+                          'full_name': 'Other/Sample-Project', 'id': 123}, {}):
             with self.subTest(metadata=metadata):
                 with patch.object(public_admission.urllib.request, 'build_opener') as opener:
                     response = opener.return_value.open.return_value.__enter__.return_value
-                    response.url = 'https://api.github.com/repos/Public/Fixture'
+                    response.url = 'https://api.github.com/repos/Public/Sample-Project'
                     response.read.return_value = json.dumps(metadata).encode()
                     with self.assertRaises(c.ColdfixError):
-                        public_admission.identity('Public/Fixture', 123)
+                        public_admission.identity('Public/Sample-Project', 123)
 
     def test_poisoned_cache_denies(self):
         workspace = self.root / 'workspace'
-        clone = workspace / 'public/public/fixture'
+        clone = workspace / 'public/public/sample-project'
         clone.parent.mkdir(parents=True)
         shutil.copytree(self.fixture, clone)
-        self.git('-C', str(clone), 'remote', 'add', 'origin', 'https://token@github.com/Public/Fixture.git')
+        self.git('-C', str(clone), 'remote', 'add', 'origin', 'https://token@github.com/Public/Sample-Project.git')
         sources = learn_replay.SourceProjects(None, workspace, 'Owner', 30)
         with patch.object(learn_replay, 'clone_source') as transport:
             with self.assertRaisesRegex(c.ColdfixError, 'unsafe public cache'):
-                sources.mirror('Public/Fixture', [self.before], True)
+                sources.mirror('Public/Sample-Project', [self.before], True)
             transport.assert_not_called()
 
     def test_peer_fallback_disabled(self):
@@ -119,7 +119,7 @@ class PublicAdmissionTests(unittest.TestCase):
         sources.peers = ['/private/peer']
         with patch.object(learn_replay, 'clone_source', side_effect=subprocess.CalledProcessError(1, 'git')) as clone:
             with self.assertRaises(subprocess.CalledProcessError):
-                sources.mirror('Public/Fixture', [self.before], True)
+                sources.mirror('Public/Sample-Project', [self.before], True)
             self.assertEqual(clone.call_count, 1)
 
     def tracking_transport(self, command, timeout, env):
@@ -206,7 +206,7 @@ class PublicAdmissionTests(unittest.TestCase):
         private_sha = self.git('-C', str(private), 'rev-parse', 'HEAD')
         if kind == 'commondir':
             self.git('-C', str(private), 'config', '--remove-section', 'user')
-            self.git('-C', str(private), 'remote', 'add', 'origin', 'https://github.com/Public/Fixture.git')
+            self.git('-C', str(private), 'remote', 'add', 'origin', 'https://github.com/Public/Sample-Project.git')
         if kind.startswith('pack'):
             self.git('-C', str(private), 'gc', '--prune=now')
         sources = learn_replay.SourceProjects(None, self.root / 'workspace', 'Owner', 30,
@@ -359,7 +359,7 @@ class PublicAdmissionTests(unittest.TestCase):
                 command[-2] = str(self.fixture)
                 subprocess.run(command, env=env, check=True, capture_output=True, timeout=timeout)
                 self.git('-C', command[-1], 'remote', 'set-url', 'origin',
-                         'https://github.com/Public/Fixture.git')
+                         'https://github.com/Public/Sample-Project.git')
                 self.assertEqual(self.git('-C', command[-1], 'log', '--all', '--format=%H'), self.before)
                 self.assertNotEqual(subprocess.run(['git', '-C', command[-1], 'cat-file', '-e', after],
                                                   capture_output=True).returncode, 0)
@@ -380,7 +380,7 @@ class PublicAdmissionTests(unittest.TestCase):
         clone = self.root / 'cache'
         shutil.copytree(self.fixture, clone)
         self.git('-C', str(clone), 'config', '--remove-section', 'user')
-        self.git('-C', str(clone), 'remote', 'add', 'origin', 'https://github.com/Public/Fixture.git')
+        self.git('-C', str(clone), 'remote', 'add', 'origin', 'https://github.com/Public/Sample-Project.git')
         sources = learn_replay.SourceProjects(None, self.root / 'workspace', 'Owner', 30)
         for key, value in (('branch.trunk.remote', '/private/mirror'),
                            ('branch.main.remote', 'https://private.example/repo'),
@@ -424,16 +424,16 @@ class PublicAdmissionTests(unittest.TestCase):
 
     def test_cache_credential_helper_and_local_alternates_deny(self):
         workspace = self.root / 'workspace'
-        clone = workspace / 'public/public/fixture'
+        clone = workspace / 'public/public/sample-project'
         clone.parent.mkdir(parents=True)
         shutil.copytree(self.fixture, clone)
         self.git('-C', str(clone), 'config', '--remove-section', 'user')
-        self.git('-C', str(clone), 'remote', 'add', 'origin', 'https://github.com/Public/Fixture.git')
+        self.git('-C', str(clone), 'remote', 'add', 'origin', 'https://github.com/Public/Sample-Project.git')
         self.git('-C', str(clone), 'config', 'credential.helper', '!false')
         sources = learn_replay.SourceProjects(None, workspace, 'Owner', 30)
         with self.assertRaisesRegex(c.ColdfixError, 'unsafe public cache'):
-            sources.mirror('Public/Fixture', [self.before], True)
+            sources.mirror('Public/Sample-Project', [self.before], True)
         self.git('-C', str(clone), 'config', '--remove-section', 'credential')
         (clone / '.git/objects/info/alternates').write_text('/private/objects')
         with self.assertRaisesRegex(c.ColdfixError, 'unsafe public cache'):
-            sources.mirror('Public/Fixture', [self.before], True)
+            sources.mirror('Public/Sample-Project', [self.before], True)

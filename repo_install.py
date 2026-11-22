@@ -1,5 +1,7 @@
 """Install the Coldfix CI reviewer workflow and git hook into a repository."""
 
+from contextlib import nullcontext
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -141,10 +143,74 @@ def apply(repo, steps):
             c.require(result.returncode == 0, "cannot write git config")
 
 
+def install_marker(repo):
+    c.require((repo / ".git").exists(), "target must be a git repository root")
+    result = subprocess.run(["git", "-C", str(repo), "rev-parse", "--absolute-git-dir"],
+                            text=True, capture_output=True)
+    c.require(result.returncode == 0 and result.stdout.strip(), "cannot find repository metadata")
+    return c.ordinary_path(Path(result.stdout.strip()) / "coldfix-install.json")
+
+
+def hook_record(marker):
+    record = c.read_install_record(marker)
+    c.require(not record or isinstance(record.get("files"), dict), "invalid repository installation record")
+    return record
+
+
 def install(args):
     repo = c.ordinary_path(args.repo)
-    steps = plan(repo, args.runs_on)
-    if not args.dry_run:
-        apply(repo, steps)
+    marker = install_marker(repo)
+    root = str(c.ordinary_path(args.store))
+    with nullcontext() if args.dry_run else c.lesson_lock(marker.parent, name=".coldfix-install.lock"):
+        record = hook_record(marker) or dict(store=root, files={})
+        c.require(record["store"] == root, "repository hooks belong to another store")
+        steps = plan(repo, args.runs_on)
+        if not args.dry_run and any(action != "unchanged" for action, *_ in steps):
+            for action, label, _, content, _ in steps:
+                if action == "create":
+                    record["files"][label] = c.digest(content)
+                elif action == "set":
+                    record["hooks_path"] = True
+            c.atomic_create(marker, c.encoded(record), replace=True)
+            apply(repo, steps)
     return "\n".join(f"{'would ' if args.dry_run and action != 'unchanged' else ''}{action}: {label}"
                      for action, label, *_ in steps)
+
+
+def uninstall(repo, store):
+    from loop_setup import uninstall_schedule
+    root = c.ordinary_path(store)
+    marker = install_marker(repo) if repo else None
+    if not marker or not marker.exists():
+        return uninstall_schedule(root)
+    with c.lesson_lock(marker.parent, name=".coldfix-install.lock"):
+        record = hook_record(marker)
+        if record.get("store") != str(root):
+            return uninstall_schedule(root)
+        files = []
+        for relative, _, mode in FILES:
+            if relative not in record["files"]:
+                continue
+            path = repo / relative
+            if path.is_symlink() or not c.ordinary_path(path).is_file():
+                continue
+            if path.stat().st_mode & 0o777 == mode and hashlib.sha256(path.read_bytes()).hexdigest() == record["files"][relative]:
+                files.append(path)
+        for path in [marker, *files]:
+            c.require(os.access(path.parent, os.W_OK | os.X_OK), "cannot remove " + str(path))
+        hooks = c.ordinary_path(repo / HOOKS_PATH)
+        unset_hooks_path = False
+        if record.get("hooks_path") and not (hooks.exists() and any(path not in files for path in hooks.iterdir())):
+            current = git_config(repo, "--local", "--get-all", "core.hooksPath")
+            c.require(current.returncode in (0, 1), "cannot read git config")
+            worktrees = subprocess.run(["git", "-C", str(repo), "worktree", "list", "--porcelain", "-z"], capture_output=True)
+            c.require(worktrees.returncode == 0, "cannot check repository worktrees")
+            unset_hooks_path = current.stdout.strip() == HOOKS_PATH and worktrees.stdout.count(b"\0\0") == 1
+            if unset_hooks_path:
+                c.require(not (marker.parent / "config.lock").exists(), "repository config is locked")
+        uninstall_schedule(root)
+        if unset_hooks_path:
+            c.require(git_config(repo, "--local", "--unset", "core.hooksPath").returncode == 0, "cannot write git config")
+        for path in files:
+            path.unlink()
+        marker.unlink()

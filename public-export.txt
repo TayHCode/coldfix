@@ -5,6 +5,7 @@ CONTRIBUTING.md
 LICENSE
 README.md
 SECURITY.md
+action.yml
 agents_block.py
 bench/coldrecall_speed.py
 check_delivery.py
@@ -281,6 +282,7 @@ tests/fixtures/coldrecall_measure/fake_codex.py
 tests/fixtures/coldrecall_measure/hillclimb.json
 tests/fixtures/coldrecall_measure/hillclimb_facts.json
 tests/fixtures/coldrecall_measure/wiki_fixture.py
+tests/fixtures/coldrewind-undo.json
 tests/fixtures/failed-ci-flake.json
 tests/fixtures/failed-ci-network.json
 tests/fixtures/failed-ci-run.json
@@ -335,6 +337,7 @@ tests/test_cli_canaries_hostname.py
 tests/test_cli_canaries_ip.py
 tests/test_cli_canaries_other.py
 tests/test_cli_canaries_phone.py
+tests/test_cli_contract.py
 tests/test_cli_lessons.py
 tests/test_cli_lessons_lifecycle.py
 tests/test_cli_short_prose_captures.py
@@ -351,6 +354,7 @@ tests/test_coldrecall_epochs_resume.py
 tests/test_coldrecall_measure.py
 tests/test_coldrecall_packet.py
 tests/test_coldrecall_speed.py
+tests/test_coldrewind_ingest.py
 tests/test_collect_sources.py
 tests/test_draft.py
 tests/test_e2e_dogfood.py

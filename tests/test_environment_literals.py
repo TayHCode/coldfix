@@ -18,10 +18,10 @@ def routing():
 '''
 MODELS_FILE_FIXED = MODELS_FILE_DEFAULT.replace('Path.home() / "projects/coldlocker/models.yaml"', '""')
 VM_RUN_COMMAND_DEFAULT = '''
-job = ['sudo', '-n', 'bash', os.environ.get('COLDFIX_VM_RUN_COMMAND', '/home/owner/bootstrap/run-command.sh'),
+job = ['sudo', '-n', 'bash', os.environ.get('COLDFIX_VM_RUN_COMMAND', '/home/user/bootstrap/run-command.sh'),
        guest, str(script)]
 '''
-VM_RUN_COMMAND_FIXED = VM_RUN_COMMAND_DEFAULT.replace("/home/owner/bootstrap/run-command.sh", "run-command.sh")
+VM_RUN_COMMAND_FIXED = VM_RUN_COMMAND_DEFAULT.replace("/home/user/bootstrap/run-command.sh", "run-command.sh")
 CHECKOUTS_DEFAULT = '''
 summary["spread"] = learn_replay.spread(root, args.projects or Path.home() / "projects")
 '''
@@ -62,7 +62,7 @@ class EnvironmentLiteralTests(unittest.TestCase):
     def test_placeholder_home_and_venv_interpreters_are_allowed(self):
         self.assertEqual(literals("raw guest output with a path /home/example/private"), [])
         self.assertEqual(literals("/home/example"), [])
-        self.assertEqual(literals("/home/example-user/private\n/home/examplecorp\n/home/example.org\n"
+        self.assertEqual(literals("/home/example-team/private\n/home/examplecorp\n/home/example.test\n"
                                   "/home/example+user/private\n/home/example@company/private"), [1, 2, 3, 4, 5])
         self.assertEqual(literals('python = abspath(venv) + "/bin/python"'), [])
         self.assertEqual(literals("#!/usr/bin/env python3"), [])

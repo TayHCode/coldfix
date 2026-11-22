@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""List, and with --apply remove, clean git worktrees whose work is already in origin/main."""
+"""List, and with --apply remove, clean git worktrees under <repo>/.worktrees whose work is already in origin/main.
+
+Exit codes: 0 pass, 1 a removal failed, 2 usage or error. --json prints one object with schema_version 1."""
 
 import argparse
 import json
@@ -12,10 +14,15 @@ import sys
 BASE = "origin/main"
 
 
+class CleanupError(Exception):
+    pass
+
+
 def git(cwd, *args, check=True):
-    result = subprocess.run(["git", "-C", str(cwd), *args], text=True, capture_output=True)
+    result = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True)
+    result.stdout, result.stderr = os.fsdecode(result.stdout), os.fsdecode(result.stderr)
     if check and result.returncode:
-        raise SystemExit(f"git {' '.join(args)}: {result.stderr.strip()}")
+        raise CleanupError(f"git {' '.join(args)} failed with exit {result.returncode}")
     return result
 
 
@@ -53,8 +60,11 @@ def decide(repo, entry, is_main):
     path, head = entry["worktree"], entry.get("HEAD", "")
     branch = entry.get("branch", "").removeprefix("refs/heads/") or None
     row = dict(path=path, branch=branch, head=head, decision="keep")
+    bound = Path(repo).resolve() / ".worktrees"
     if is_main:
         row["reason"] = "main checkout"
+    elif bound not in Path(path).resolve().parents:
+        row["reason"] = f"outside {bound}; never removed"
     elif "prunable" in entry:
         row["reason"] = "directory missing; use git worktree prune"
     elif "locked" in entry:
@@ -104,15 +114,38 @@ def run(repo, apply):
     return rows
 
 
+def error_result():
+    return json.dumps(dict(schema_version=1, exit_code=2), indent=2)
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message):
+        argv = sys.argv[1:] if self.argv is None else self.argv
+        options = argv[:argv.index("--")] if "--" in argv else argv
+        if any(len(flag) > 2 and "--json".startswith(flag) for flag in (arg.partition("=")[0] for arg in options)):
+            print(error_result())
+        self.exit(2, "worktree_cleanup: invalid arguments; see --help\n")
+
+
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = Parser(description=__doc__)
+    parser.argv = argv
+    sys.stdout.reconfigure(errors="backslashreplace")
     parser.add_argument("--repo", default=".", help="any checkout of the repository (default: current directory)")
     parser.add_argument("--apply", action="store_true", help="run git worktree remove (never --force) on the merged, clean worktrees")
     parser.add_argument("--json", action="store_true", help="print JSON instead of plain text")
     args = parser.parse_args(argv)
-    rows = run(args.repo, args.apply)
+    try:
+        rows = run(args.repo, args.apply)
+    except (CleanupError, OSError, RuntimeError) as error:
+        message = error if isinstance(error, CleanupError) else "cannot resolve the repository or a worktree path"
+        print(f"worktree_cleanup: {message}", file=sys.stderr)
+        if args.json:
+            print(error_result())
+        return 2
+    exit_code = 1 if any(row.get("removed") is False for row in rows) else 0
     if args.json:
-        print(json.dumps(rows, indent=2))
+        print(json.dumps(dict(schema_version=1, exit_code=exit_code, worktrees=rows), indent=2))
     else:
         print("applied" if args.apply else "dry run: nothing changed; pass --apply to remove")
         for row in rows:
@@ -122,7 +155,7 @@ def main(argv=None):
             elif verb == "remove":
                 verb = "would remove"
             print(f"{verb}: {row['path']} ({row['branch'] or 'detached'}): {row['reason']}")
-    return 1 if any(row.get("removed") is False for row in rows) else 0
+    return exit_code
 
 
 if __name__ == "__main__":

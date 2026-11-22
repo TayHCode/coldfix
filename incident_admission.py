@@ -15,6 +15,12 @@ import regression_adapter
 import replay_isolation
 
 
+class ReplayRejected(c.ColdfixError):
+    def __init__(self, message, env):
+        super().__init__(message)
+        self.env = env
+
+
 def reject_duplicates(store, failure, ignore_lesson_id=None, *, recurring=False, coldpass=False):
     ref = failure["source_ref"]
     c.require(sum(row.get("source_ref") == ref for row in store["failures"].values()) == 1,
@@ -138,8 +144,8 @@ def require_flagged_lines_exercised(args, root, repo, script, expected, lesson=N
                         args, repo)
         if lesson is not None:
             save_flagged_receipt(root, repo, lesson, row, patch, cause)
-        raise c.ColdfixError(f"incident not admitted; flagged lines reverted {row['status']}; expected FAIL"
-                             + (f"; {cause}" if cause else ""))
+        raise ReplayRejected(f"incident not admitted; flagged lines reverted {row['status']}; expected FAIL"
+                             + (f"; {cause}" if cause else ""), row.get("env"))
 
 
 def hostname_text(repo, revisions, path, test_patch, rest):
@@ -418,8 +424,11 @@ def admit(args, root, store):
             if cause:
                 causes.setdefault(cause, []).append(label)
         causes = "".join(f"; {', '.join(labels)}: {cause}" for cause, labels in causes.items())
-        raise c.ColdfixError(f"incident not admitted; red {states['before']}, green {states['after']}, "
-                             f"reversed-patch {states['reversed']}; expected FAIL, PASS, FAIL{causes}")
+        dispositions = {(receipt[side] or {}).get("env") for side, expected in
+                        (("before", "FAIL"), ("after", "PASS"), ("reversed", "FAIL")) if states[side] != expected}
+        env = dispositions.pop() if len(dispositions) == 1 else None
+        raise ReplayRejected(f"incident not admitted; red {states['before']}, green {states['after']}, "
+                             f"reversed-patch {states['reversed']}; expected FAIL, PASS, FAIL{causes}", env)
     result["test_sha256"] = digest
     result["full_suite"] = full_suite(root, repo, args.before, args.after, args.timeout,
                                       getattr(args, "deadline", None))

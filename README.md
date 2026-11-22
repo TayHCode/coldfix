@@ -58,24 +58,17 @@ python3 -m pip install .
 coldfix --help
 ```
 
-Then set it up in the repository you want Coldfix to learn from:
+## Try an offline scan
+
+From the Coldfix checkout, scan a fixture that ships with the repository. This works offline
+and requires no sign-in, transcript collection, or scheduler.
 
 ```sh
-coldfix init --yes
+coldfix check library/reject-linter-error-output/fixtures/bad
 ```
 
-`init` runs `doctor` (stopping with its fix if the sandbox cannot run) and saves `.coldfix/config.json` with
-this Git checkout as `repo`. With `--yes` it never prompts: it keeps an existing config and needs a Git checkout
-or `--repo`. Without `--yes`, it asks before replacing an existing config and asks for the repository when you
-run it outside one.
-
-`--yes` then starts the [automatic loop](#run-the-automatic-loop). It needs `gh` signed in (`gh auth login`), the
-`claude` or `codex` CLI signed in and on `PATH`, and transcripts in `~/.claude/projects` or `~/.codex/sessions`.
-If one is missing, it names it and installs no wrapper or schedule. Otherwise it writes `.coldfix/model-cmd` (the
-`COLDFIX_MODEL_CMD` wrapper around that CLI), installs a `coldfix-loop` systemd user timer, or a cron entry when
-user systemd is unavailable, that runs `setup` hourly, and runs `setup` once now. Running it again replaces that
-timer or entry rather than adding one. `coldfix status` shows the transcripts analyzed, the CI failures collected and
-the next scheduled run.
+Coldfix reports `reject-linter-error-output` at `lint.py:2` and exits with status 1 because it
+found a problem.
 
 ## Check your repository
 
@@ -85,6 +78,23 @@ the next scheduled run.
 mkdir demo && cd demo && git init -q
 printf 'import unittest\n\n\nclass DemoTests(unittest.TestCase):\n    pass\n\n\ndef test_never_collected():\n    pass\n' > test_demo.py
 coldfix check || echo "coldfix check exited $?"
+```
+
+To run it on every pull request, add this workflow. It runs only on Coldbox; the action exits 2 on a GitHub-hosted or other non-Coldbox runner.
+
+```yaml
+name: coldfix-check
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: [self-hosted, coldbox]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: TayHCode/coldfix@main
 ```
 
 ## First run
@@ -174,6 +184,34 @@ Plain text, extra output, another failure identifier or a mismatched exit code m
 `INCOMPLETE`, and replay exits 2. Its `reason` names each incomplete side (`before`, `after`, or
 `reversed` for incidents), the exit code and what was wrong with stdout. A lesson is proven only when
 the check fails with the expected failure before and passes after.
+
+## Set up recurring learning
+
+To opt into recurring learning, run this in the repository you want Coldfix to learn from:
+
+```sh
+coldfix init --yes
+```
+
+`init` runs `doctor` (stopping with its fix if the sandbox cannot run) and saves `.coldfix/config.json` with
+this Git checkout as `repo`. With `--yes` it never prompts: it keeps an existing config and needs a Git checkout
+or `--repo`. Without `--yes`, it asks before replacing an existing config and asks for the repository when you
+run it outside one.
+
+`--yes` then starts the automatic loop. It needs `gh` signed in (`gh auth login`), the
+`claude` or `codex` CLI signed in and on `PATH`, and transcripts in `~/.claude/projects` or `~/.codex/sessions`.
+If one is missing, it names it and installs no wrapper or schedule. Otherwise it writes `.coldfix/model-cmd` (the
+`COLDFIX_MODEL_CMD` wrapper around that CLI), installs a `coldfix-loop` systemd user timer, or a cron entry when
+user systemd is unavailable, that runs `setup` hourly, and runs `setup` once now. Only the owning store can update that schedule. `coldfix status` shows the transcripts analyzed, the CI failures collected and
+the next scheduled run.
+
+To stop recurring learning, run `coldfix --store PATH uninstall` before removing the package.
+Run it in the repository where you ran `install`, or pass `--repo REPO` to remove its managed
+hook and workflows. Existing store evidence, edited hooks and files installed before Coldfix
+recorded hook ownership stay in place. After uninstall, another store can claim the schedule.
+
+Cron keeps up to 64 KiB each in `loop.log`, its rotated copy `loop.log.1`, and
+`loop.log.failure`, which holds the tail of the most recent failed invocation.
 
 ## Run the automatic loop
 
@@ -278,7 +316,10 @@ Some tests are skipped when an optional tool, such as `shellcheck`, is missing.
 - Exports contain only authored text and opaque evidence IDs, never the captured command, error or labels.
 - Authored text is screened for common credential shapes. The screen is conservative and incomplete, so never
   paste raw logs into a rule.
-- Commands exit 0 on success and 2 on invalid input or a local I/O failure. A complete failed replay exits 1.
+- Commands exit 0 on success, 1 on a finding or a complete failed check or replay, and 2 on invalid input or
+  a local I/O failure. Invalid arguments print `coldfix: invalid arguments; see --help` without echoing them.
+- `check --json`, `doctor --json`, and `status --json` print one object with `schema_version: 1` and
+  `exit_code`. Usage and runtime errors report the reason on stderr and set `exit_code` to `2`.
 
 ## Limitations
 

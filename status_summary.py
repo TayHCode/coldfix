@@ -56,7 +56,10 @@ def transcripts(root):
     ledger = root / "transcript-scan.sqlite"
     if not ledger.is_file():
         return dict(analyzed=0, judged=0)
-    db = sqlite3.connect(ledger.as_uri() + "?mode=ro", uri=True)
+    try:
+        db = sqlite3.connect(ledger.as_uri() + "?mode=ro", uri=True)
+    except sqlite3.Error:
+        raise c.ColdfixError("cannot read the transcript ledger; left unchanged") from None
     try:
         analyzed, judged = db.execute("SELECT count(*), count(score) FROM scans").fetchone()
     except sqlite3.Error:
@@ -69,7 +72,7 @@ def transcripts(root):
 def next_run(root):
     import loop_setup
     service = loop_setup.unit_folder() / (loop_setup.UNIT + ".service")
-    if shutil.which("systemctl") and service.is_file() and loop_setup.systemd_quote(str(root)) in service.read_text():
+    if shutil.which("systemctl") and service.is_file() and loop_setup.owns_service(service.read_text(), root):
         reply = subprocess.run(["systemctl", "--user", "show", loop_setup.UNIT + ".timer", "-p", "NextElapseUSecRealtime", "--value"],
                                capture_output=True, text=True)
         if reply.returncode == 0 and reply.stdout.strip() not in ("", "n/a"):
@@ -77,7 +80,7 @@ def next_run(root):
     if shutil.which("crontab"):
         reply = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
         entry = [line for line in reply.stdout.splitlines() if line.endswith(loop_setup.CRON_TAG)
-                 and " --store " + shlex.quote(str(root)) + " " in line] if reply.returncode == 0 else []
+                 and (loop_setup.owns_cron(line, root) or " --store " + shlex.quote(str(root)) + " " in line)] if reply.returncode == 0 else []
         if entry:
             return "cron " + " ".join(entry[0].split()[:5])
     return None

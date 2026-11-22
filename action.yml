@@ -1,0 +1,13 @@
+name: coldfix check
+description: Run the Coldfix library's portable checks on the checked-out repository, on Coldbox runners only.
+runs:
+  using: composite
+  steps:
+    - name: coldfix check
+      shell: bash
+      run: |
+        if [ "$RUNNER_ENVIRONMENT" != self-hosted ] || [ -z "${COLDBOX_JOB_DIR:-}" ]; then
+          echo "coldfix check runs only on Coldbox: set runs-on: [self-hosted, coldbox]" >&2
+          exit 2
+        fi
+        python3 "$GITHUB_ACTION_PATH/coldfix.py" check "$GITHUB_WORKSPACE"

@@ -126,6 +126,29 @@ class ColdpassSourcesTests(unittest.TestCase):
         self.assertEqual(rows[0]["recheck_pair"]["after"], "b" * 40)
         self.assertEqual(learn_daily.waiting(store, {"drafts": {}}, []), [])
 
+    def test_no_verdict_outcomes_are_noise_and_a_product_failure_still_reaches_the_draft_queue(self):
+        import learn_daily
+        red = run_row("red", "blocked", owner="repo")
+        gone = run_row("gone", "repo_unavailable", owner="repo", outcome_class="unsupported",
+                       what_failed="The repository is no longer on GitHub (HTTP 404).")
+        empty = run_row("empty", "nothing_to_run", owner="repo", outcome_class="inconclusive", evidence="nothing_checked",
+                        what_failed="The checkout has no README-documented run entrypoint; nothing was executed.")
+        green = run_row("green", "pass", date="2026-10-21", commit="b" * 40)
+        self.write([red, gone, empty, green])
+        config = self.root / "sources.json"
+        config.write_text(json.dumps({"coldpass": {"format": "coldpass-runs", "command": ["cat", str(self.runs)]}}))
+        self.store.mkdir(mode=0o700)
+        result = collect_sources.collect(self.store, config)["coldpass"]
+        self.assertEqual((result["imported"], result["rejected"]), (1, 0))
+        self.assertEqual(sources.collect(self.runs.read_bytes())[1]["noise"],
+                         {"inconclusive:nothing_to_run": 1, "setup:repo_unavailable": 1})
+        store = c.load_store(self.store)[1]
+        pairs = json.loads((self.store / sources.RECHECKS).read_text())
+        rows = learn_daily.waiting(store, {"drafts": {}}, [], pairs)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual([store["failures"][ref]["source_ref"] for ref in rows[0]["evidence"]],
+                         ["coldpass:run:red:unclassified"])
+
     def test_each_case_lands_in_its_bucket(self):
         expected = {"pass": "pass", "harness-outcome": "harness", "harness-owner": "harness",
                     "setup-outcome": "setup", "setup-owner": "setup", "product-blocked": "product",

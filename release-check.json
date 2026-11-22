@@ -27,6 +27,7 @@
   "tests/test_export_screen.py",
   "tests/test_learning_service.py",
   "tests/test_mirror_lessons.py",
+  "tests/test_quarantine_lesson.py",
   "tests/test_recall_eval.py",
   "tests/test_recall_quality.py",
   "tests/test_registered_lessons.py",
@@ -2679,7 +2680,7 @@
    "kind": "export-path-review",
    "path": "public-export.txt",
    "reason": "Public file list of this export; the layout, environment-literal and packaging tests read it at the export root.",
-   "source_sha256": "fb8c14028eb99ce97e4043621749ce188dd9394cb8b9701aaa3924654f529346"
+   "source_sha256": "418e7c053b388a918985bd26aa23fe279f2a715c50a6e7ae133d796c9c2c139c"
   },
   {
    "scope": "tree",
@@ -2715,6 +2716,126 @@
    "path": "tests/test_failure_ingest.py",
    "fingerprint": "4c1029697ee35871",
    "reason": "Generic unused tuple variable in a synthetic test fixture, not a personal identity. The current tree uses an underscore."
+  },
+  {
+   "scope": "tree",
+   "kind": "home-path",
+   "path": "tests/test_cli.py",
+   "line": 164,
+   "fingerprint": "8d6b26862863e91a",
+   "source_sha256": "cb042c8c8c066fbe9ed41d3e760a87df2e3a9be9314adfa2daf11de2f102a9a0",
+   "classification": "false-positive",
+   "reason": "Synthetic test input for literal path recognition."
+  },
+  {
+   "scope": "tree",
+   "kind": "denylist",
+   "path": "tests/test_environment_literals.py",
+   "line": 65,
+   "fingerprint": "6d3340a8fee4a7cb",
+   "source_sha256": "2e1c966ab466948ccb011bcb2049970f1b92232daf2b6e39d7822481cbdc1a45",
+   "classification": "false-positive",
+   "reason": "Synthetic test input for literal path recognition."
+  },
+  {
+   "scope": "tree",
+   "kind": "home-path",
+   "path": "tests/test_environment_literals.py",
+   "line": 21,
+   "fingerprint": "b98d692c4574a80e",
+   "source_sha256": "2e1c966ab466948ccb011bcb2049970f1b92232daf2b6e39d7822481cbdc1a45",
+   "classification": "false-positive",
+   "reason": "Synthetic test input for literal path recognition."
+  },
+  {
+   "scope": "tree",
+   "kind": "home-path",
+   "path": "tests/test_environment_literals.py",
+   "line": 24,
+   "fingerprint": "b98d692c4574a80e",
+   "source_sha256": "2e1c966ab466948ccb011bcb2049970f1b92232daf2b6e39d7822481cbdc1a45",
+   "classification": "false-positive",
+   "reason": "Synthetic test input for literal path recognition."
+  },
+  {
+   "scope": "tree",
+   "kind": "home-path",
+   "path": "tests/test_environment_literals.py",
+   "line": 65,
+   "fingerprint": "b5738b6e5863ff8c",
+   "source_sha256": "2e1c966ab466948ccb011bcb2049970f1b92232daf2b6e39d7822481cbdc1a45",
+   "classification": "false-positive",
+   "reason": "Synthetic test input for literal path recognition."
+  },
+  {
+   "scope": "tree",
+   "kind": "home-path",
+   "path": "tests/test_environment_literals.py",
+   "line": 65,
+   "fingerprint": "aed949abf24ba8f4",
+   "source_sha256": "2e1c966ab466948ccb011bcb2049970f1b92232daf2b6e39d7822481cbdc1a45",
+   "classification": "false-positive",
+   "reason": "Synthetic test input for literal path recognition."
+  },
+  {
+   "scope": "history",
+   "kind": "home-path",
+   "path": "tests/test_cli.py",
+   "line": 164,
+   "fingerprint": "8d6b26862863e91a",
+   "source_sha256": "cb042c8c8c066fbe9ed41d3e760a87df2e3a9be9314adfa2daf11de2f102a9a0",
+   "classification": "false-positive",
+   "reason": "Synthetic test input for literal path recognition."
+  },
+  {
+   "scope": "history",
+   "kind": "denylist",
+   "path": "tests/test_environment_literals.py",
+   "line": 65,
+   "fingerprint": "6d3340a8fee4a7cb",
+   "source_sha256": "2e1c966ab466948ccb011bcb2049970f1b92232daf2b6e39d7822481cbdc1a45",
+   "classification": "false-positive",
+   "reason": "Synthetic test input for literal path recognition."
+  },
+  {
+   "scope": "history",
+   "kind": "home-path",
+   "path": "tests/test_environment_literals.py",
+   "line": 21,
+   "fingerprint": "b98d692c4574a80e",
+   "source_sha256": "2e1c966ab466948ccb011bcb2049970f1b92232daf2b6e39d7822481cbdc1a45",
+   "classification": "false-positive",
+   "reason": "Synthetic test input for literal path recognition."
+  },
+  {
+   "scope": "history",
+   "kind": "home-path",
+   "path": "tests/test_environment_literals.py",
+   "line": 24,
+   "fingerprint": "b98d692c4574a80e",
+   "source_sha256": "2e1c966ab466948ccb011bcb2049970f1b92232daf2b6e39d7822481cbdc1a45",
+   "classification": "false-positive",
+   "reason": "Synthetic test input for literal path recognition."
+  },
+  {
+   "scope": "history",
+   "kind": "home-path",
+   "path": "tests/test_environment_literals.py",
+   "line": 65,
+   "fingerprint": "b5738b6e5863ff8c",
+   "source_sha256": "2e1c966ab466948ccb011bcb2049970f1b92232daf2b6e39d7822481cbdc1a45",
+   "classification": "false-positive",
+   "reason": "Synthetic test input for literal path recognition."
+  },
+  {
+   "scope": "history",
+   "kind": "home-path",
+   "path": "tests/test_environment_literals.py",
+   "line": 65,
+   "fingerprint": "aed949abf24ba8f4",
+   "source_sha256": "2e1c966ab466948ccb011bcb2049970f1b92232daf2b6e39d7822481cbdc1a45",
+   "classification": "false-positive",
+   "reason": "Synthetic test input for literal path recognition."
   }
  ]
 }

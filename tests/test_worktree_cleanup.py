@@ -1,5 +1,6 @@
 """worktree_cleanup behavior through its real CLI against temporary git repositories."""
 
+import io
 import json
 import os
 from pathlib import Path
@@ -7,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import worktree_cleanup
 
@@ -40,6 +42,8 @@ class WorktreeCleanupTests(unittest.TestCase):
         self.git(self.repo, "push", "-q", "-u", "origin", "main")
         self.git(self.repo, "remote", "set-url", "--push", "origin", str(self.origin))
         self.git(self.repo, "remote", "set-url", "origin", "https://github.com/origin-owner/project.git")
+        self.wt = self.repo / ".worktrees"
+        (self.repo / ".git" / "info" / "exclude").write_text(".worktrees/\n")
 
     def git(self, cwd, *args):
         result = subprocess.run(["git", "-C", str(cwd), *args], env=self.env, text=True, capture_output=True)
@@ -53,7 +57,7 @@ class WorktreeCleanupTests(unittest.TestCase):
         return self.git(cwd, "rev-parse", "HEAD")
 
     def worktree(self, name, *commits, detach=False):
-        path = self.tmp / "wt" / name
+        path = self.wt / name
         if detach:
             self.git(self.repo, "worktree", "add", "-q", "--detach", str(path), "main")
         else:
@@ -77,7 +81,9 @@ class WorktreeCleanupTests(unittest.TestCase):
         return result.stdout
 
     def decisions(self, *args):
-        rows = json.loads(self.cleanup("--json", *args))
+        result = json.loads(self.cleanup("--json", *args))
+        self.assertEqual((result["schema_version"], result["exit_code"]), (1, 0))
+        rows = result["worktrees"]
         return {row["branch"] or Path(row["path"]).name: row for row in rows}
 
     def scenario(self):
@@ -88,18 +94,18 @@ class WorktreeCleanupTests(unittest.TestCase):
         self.worktree("squashed-then-more", "t1")
         self.worktree("merged-detached", "d1", detach=True)
         self.worktree("unmerged-detached", "d2", detach=True)
-        (self.tmp / "wt" / "merged-dirty" / "scratch.txt").write_text("uncommitted")
+        (self.wt / "merged-dirty" / "scratch.txt").write_text("uncommitted")
         self.land("merged-clean", "merged-dirty", squash="squashed")
-        self.git(self.tmp / "wt" / "merged-detached", "checkout", "-q", "--detach", "main")
-        self.commit(self.tmp / "wt" / "squashed-then-more", "t2.txt", "extra after pr")
-        tip = self.git(self.tmp / "wt" / "squashed", "rev-parse", "HEAD")
-        old = self.git(self.tmp / "wt" / "squashed-then-more", "rev-parse", "HEAD~1")
+        self.git(self.wt / "merged-detached", "checkout", "-q", "--detach", "main")
+        self.commit(self.wt / "squashed-then-more", "t2.txt", "extra after pr")
+        tip = self.git(self.wt / "squashed", "rev-parse", "HEAD")
+        old = self.git(self.wt / "squashed-then-more", "rev-parse", "HEAD~1")
         self.gh_json.write_text(json.dumps([{"headRefOid": tip}, {"headRefOid": old}]))
 
     def snapshot(self):
         return (self.git(self.repo, "worktree", "list", "--porcelain"),
                 self.git(self.repo, "branch", "--list", "--format=%(refname) %(objectname)"),
-                sorted(str(p.relative_to(self.tmp)) for p in (self.tmp / "wt").rglob("*") if ".git" not in p.parts))
+                sorted(str(p.relative_to(self.tmp)) for p in (self.wt).rglob("*") if ".git" not in p.parts))
 
     def test_dry_run_changes_nothing_and_reports_every_worktree(self):
         self.scenario()
@@ -117,7 +123,7 @@ class WorktreeCleanupTests(unittest.TestCase):
         self.scenario()
         out = self.cleanup("--apply")
         self.assertEqual(out.count("removed:"), 3)
-        wt = self.tmp / "wt"
+        wt = self.wt
         self.assertEqual(sorted(p.name for p in wt.iterdir()),
                          ["merged-dirty", "squashed-then-more", "unmerged", "unmerged-detached"])
         self.assertEqual((wt / "merged-dirty" / "scratch.txt").read_text(), "uncommitted")
@@ -178,19 +184,19 @@ class WorktreeCleanupTests(unittest.TestCase):
 
     def assert_only_kept_remains(self, result):
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(sorted(p.name for p in (self.tmp / "wt").iterdir()), ["kept"])
+        self.assertEqual(sorted(p.name for p in (self.wt).iterdir()), ["kept"])
         self.assertTrue(self.repo.is_dir())
 
     def test_apply_with_repo_pointing_at_a_removable_worktree(self):
         self.two_removable_worktrees()
-        result = subprocess.run([sys.executable, str(CLI), "--repo", str(self.tmp / "wt" / "a"), "--apply"],
+        result = subprocess.run([sys.executable, str(CLI), "--repo", str(self.wt / "a"), "--apply"],
                                 env=self.env, text=True, capture_output=True)
         self.assert_only_kept_remains(result)
         self.assertEqual(result.stdout.count("removed:"), 2)
 
     def test_apply_from_inside_a_removable_worktree_with_default_repo(self):
         self.two_removable_worktrees()
-        result = subprocess.run([sys.executable, str(CLI), "--apply"], cwd=self.tmp / "wt" / "a",
+        result = subprocess.run([sys.executable, str(CLI), "--apply"], cwd=self.wt / "a",
                                 env=self.env, text=True, capture_output=True)
         self.assert_only_kept_remains(result)
         self.assertEqual(result.stdout.count("removed:"), 2)
@@ -230,15 +236,15 @@ class WorktreeCleanupTests(unittest.TestCase):
         self.env["FAKE_GH_LOG"] = str(log)
         (self.bin / "gh").write_text(
             '#!/bin/sh\nprintf "%s\\n" "$@" > "$FAKE_GH_LOG"\ncat "$FAKE_GH_JSON"\n')
-        for url in ("https://enterprise.example.invalid/owner/repo.git",
-                    "git@enterprise.example.invalid:owner/repo.git",
-                    "ssh://git@enterprise.example.invalid:2222/owner/repo.git"):
+        for url in ("https://enterprise.example.invalid/sample-org/repo.git",
+                    "git@enterprise.example.invalid:sample-org/repo.git",
+                    "ssh://git@enterprise.example.invalid:2222/sample-org/repo.git"):
             with self.subTest(url=url):
                 self.git(self.repo, "remote", "set-url", "origin", url)
                 self.assertEqual(self.decisions()["enterprise"]["decision"], "remove")
                 args = log.read_text().splitlines()
                 self.assertEqual(args[args.index("--repo") + 1],
-                                 "enterprise.example.invalid/owner/repo")
+                                 "enterprise.example.invalid/sample-org/repo")
 
     def test_unparseable_origin_keeps_unmerged_worktree(self):
         path = self.worktree("unmerged", "unmerged commit")
@@ -248,8 +254,8 @@ class WorktreeCleanupTests(unittest.TestCase):
         self.env["FAKE_GH_LOG"] = str(log)
         (self.bin / "gh").write_text(
             '#!/bin/sh\ntouch "$FAKE_GH_LOG"\ncat "$FAKE_GH_JSON"\n')
-        for url in (str(self.origin), "https:///owner/repo", "https://github.com/owner",
-                    "https://github.com//repo", "https://github.com/owner/repo/extra"):
+        for url in (str(self.origin), "https:///sample-org/repo", "https://github.com/sample-org",
+                    "https://github.com//repo", "https://github.com/sample-org/repo/extra"):
             with self.subTest(url=url):
                 self.git(self.repo, "remote", "set-url", "origin", url)
                 self.assertEqual(self.decisions("--apply")["unmerged"]["decision"], "keep")
@@ -305,6 +311,72 @@ class WorktreeCleanupTests(unittest.TestCase):
         rows = self.decisions("--apply")
         self.assertTrue(rows["child"]["removed"] and rows["parent"]["removed"])
         self.assertFalse(parent.exists())
+
+    def test_merged_worktree_outside_the_bound_is_kept_and_logged(self):
+        outside = self.tmp / "legacy" / "merged-outside"
+        self.git(self.repo, "worktree", "add", "-q", "-b", "merged-outside", str(outside), "main")
+        self.commit(outside, "outside.txt", "o1")
+        self.land("merged-outside")
+        self.assertIn(f"keep: {outside} (merged-outside): outside", self.cleanup("--apply"))
+        self.assertTrue((outside / "outside.txt").is_file())
+        row = self.decisions("--apply")["merged-outside"]
+        self.assertEqual(row["decision"], "keep")
+        self.assertEqual(row["reason"], f"outside {self.wt.resolve()}; never removed")
+        self.assertNotIn("removed", row)
+        self.assertTrue((outside / "outside.txt").is_file())
+        odd = os.fsencode(self.tmp / "legacy") + b"/odd-\xff"
+        self.git(self.repo, "worktree", "add", "-q", "-b", "odd-name", os.fsdecode(odd), "main")
+        row = self.decisions()["odd-name"]
+        self.assertEqual((row["decision"], row["path"]), ("keep", os.fsdecode(odd)))
+        self.assertIn("(odd-name): outside", self.cleanup())
+
+    def test_carriage_return_in_a_worktree_path_is_kept_intact(self):
+        path = self.wt / "cr\rname"
+        self.git(self.repo, "worktree", "add", "-q", "-b", "cr-name", str(path), "main")
+        self.commit(path, "cr.txt", "c1")
+        self.land("cr-name")
+        row = self.decisions("--apply")["cr-name"]
+        self.assertEqual((row["path"], row["decision"], row["removed"]), (str(path), "remove", True))
+        self.assertFalse(path.exists())
+
+    def test_symlink_loop_in_path_resolution_exits_two_without_echo(self):
+        self.addCleanup(os.chdir, os.getcwd())
+        for json_flag in ((), ("--json",)):
+            with self.subTest(json=bool(json_flag)), \
+                    patch.object(Path, "resolve", side_effect=RuntimeError("Symlink loop from secret")), \
+                    patch("sys.stdout", new=io.TextIOWrapper(io.BytesIO())) as out, \
+                    patch("sys.stderr", new=io.StringIO()) as err:
+                code = worktree_cleanup.main(["--repo", str(self.repo), *json_flag])
+                out.flush()
+                printed = out.buffer.getvalue().decode()
+            self.assertEqual((code, err.getvalue()),
+                             (2, "worktree_cleanup: cannot resolve the repository or a worktree path\n"))
+            self.assertEqual(printed and json.loads(printed),
+                             {"schema_version": 1, "exit_code": 2} if json_flag else "")
+
+    def test_errors_exit_two_with_a_versioned_json_result(self):
+        plain = self.tmp / "plain"
+        plain.mkdir()
+        self.git(self.repo, "update-ref", "-d", "refs/remotes/origin/main")
+        usage = "worktree_cleanup: invalid arguments; see --help\n"
+        cases = [(("--repo", str(repo)), None) for repo in (plain, self.repo, self.tmp / "secret-missing")]
+        cases += [(("--secret-flag",), usage), (("--json=secret",), usage), (("--", "--json", "secret"), usage)]
+        for args, stderr in cases:
+            for json_flag in ((), ("--json",)):
+                with self.subTest(args=args, json=bool(json_flag)):
+                    result = subprocess.run([sys.executable, str(CLI), *json_flag, *args],
+                                            env=self.env, text=True, capture_output=True)
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    if stderr:
+                        self.assertEqual(result.stderr, stderr)
+                    else:
+                        self.assertRegex(result.stderr, r"^worktree_cleanup: git [^\n]* failed with exit \d+\n$")
+                    self.assertNotIn("secret", result.stdout + result.stderr)
+                    self.assertNotIn("Traceback", result.stderr)
+                    if json_flag or args == ("--json=secret",):
+                        self.assertEqual(json.loads(result.stdout), {"schema_version": 1, "exit_code": 2})
+                    else:
+                        self.assertEqual(result.stdout, "")
 
     def test_squash_requires_merged_pr_for_this_head(self):
         self.worktree("squashed", "s1", "s2")

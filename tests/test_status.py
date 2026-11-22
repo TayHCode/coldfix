@@ -4,10 +4,13 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import coldfix as c
+import status_summary
 from test_cli import run_main
 
 
@@ -165,7 +168,7 @@ class StatusTests(unittest.TestCase):
         for bad in ("private-canary", original.replace('"events": 3', '"events": 999')):
             marker.write_text(bad)
             result = self.cli("status", "--json", root=output, code=2)
-            self.assertEqual(result.stdout, "")
+            self.assertEqual(json.loads(result.stdout), {"schema_version": 1, "exit_code": 2})
             self.assertEqual(result.stderr, "coldfix: cannot summarize invalid status store; left unchanged\n")
             self.assertEqual(marker.read_text(), bad)
         path = next((self.store / "failures").glob("*.json"))
@@ -173,6 +176,14 @@ class StatusTests(unittest.TestCase):
         before = self.manifest()
         self.cli("status", code=2)
         self.assertEqual(self.manifest(), before)
+
+    def test_unreadable_transcript_ledger_is_a_fixed_coldfix_error(self):
+        self.ingest(self.event("sample:one"))
+        (self.store / "transcript-scan.sqlite").write_bytes(b"")
+        unreadable = sqlite3.OperationalError("unable to open private-canary")
+        with patch.object(status_summary.sqlite3, "connect", side_effect=unreadable):
+            with self.assertRaisesRegex(c.ColdfixError, "^cannot read the transcript ledger; left unchanged$"):
+                status_summary.status(self.store)
 
     def test_symlinks_are_rejected_and_no_lesson_lock_is_created(self):
         self.ingest(self.event("sample:one"))

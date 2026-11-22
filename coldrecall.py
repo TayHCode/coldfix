@@ -558,7 +558,10 @@ def hook(stdin, stdout, limit=None, ranking="overlap", once=False, log=None):
         seen = delivered_path(root, session)
         seen.parent.mkdir(mode=0o700, exist_ok=True)
         with open(str(seen) + ".lock", "a", encoding="utf-8") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return [], []
             return pick(seen)
     refs, lines = fail_open(find)
     if lines:

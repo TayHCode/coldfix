@@ -24,6 +24,7 @@ class LoopInitTests(unittest.TestCase):
         self.bin = self.cwd / "bin"
         self.bin.mkdir()
         os.symlink(shutil.which("cat"), self.bin / "cat")
+        os.symlink(shutil.which("env"), self.bin / "env")
         self.cron = self.cwd / "crontab.txt"
         self.calls = self.cwd / "calls.txt"
         self.repo = self.cwd / "my repo"
@@ -75,6 +76,173 @@ class LoopInitTests(unittest.TestCase):
         self.init()
         self.assertEqual(self.cron.read_text().splitlines(), ["0 1 * * * keep-me", entry])
 
+    def test_second_checkout_cannot_take_over_cron(self):
+        self.init()
+        first_entry = self.cron.read_bytes()
+        self.repo = self.cwd / "second checkout"
+        self.repo.mkdir()
+        self.store = self.repo / ".coldfix"
+        result = self.init(code=2)
+        self.assertIn("schedule", result.stderr)
+        self.assertEqual(self.cron.read_bytes(), first_entry)
+
+    def legacy_cron(self, store):
+        command = [sys.executable, str(test_cli.CLI), "--store", str(store), "setup", "--backend",
+                   "local", "--transcripts", str(self.home / ".claude/projects")]
+        environment = dict(COLDFIX_MODEL_CMD=shlex.quote(str(store / "model-cmd")), PATH=str(self.bin))
+        environment.update({key: self.environment.get(key, os.environ.get(key)) for key in
+                            ("GH_CONFIG_DIR", "XDG_CONFIG_HOME") if self.environment.get(key, os.environ.get(key))})
+        assignments = " ".join(shlex.quote(key + "=" + value) for key, value in environment.items())
+        entry = (f"17 * * * * cd {shlex.quote(str(store.parent))} && env {assignments} {shlex.join(command)}"
+                 f" >> {shlex.quote(str(store / 'loop.log'))} 2>&1")
+        return entry.replace("%", "\\%") + " # coldfix-loop"
+
+    def test_foreign_legacy_cron_survives_init(self):
+        foreign = self.legacy_cron(self.cwd / "other" / ".coldfix") + "\n"
+        self.cron.write_text(foreign)
+        self.assertIn("schedule", self.init(code=2).stderr)
+        self.assertEqual(self.cron.read_text(), foreign)
+
+    def test_migration_preserves_foreign_legacy_and_current_entries(self):
+        other = self.repo / "other store"
+        with patch.dict(os.environ, self.environment):
+            loop_setup.install_schedule(other, ["run"], {})
+            foreign_current = self.cron.read_text()
+            loop_setup.uninstall_schedule(other)
+        foreign = foreign_current + self.legacy_cron(other) + "\n"
+        self.cron.write_text(foreign + self.legacy_cron(self.store) + "\n")
+        self.tool("systemctl", "exit 0")
+        self.tool("loginctl", "echo yes")
+        self.init()
+        self.assertEqual(self.cron.read_text(), foreign)
+
+    def test_second_store_cannot_replace_or_retire_systemd(self):
+        self.tool("systemctl", 'echo "systemctl $*" >> "$CALLS"')
+        self.tool("loginctl", "echo yes")
+        self.init()
+        units = self.cwd / "config/systemd/user"
+        service = (units / "coldfix-loop.service").read_bytes()
+        self.store = self.repo / "other"
+        for linger in ("yes", "no"):
+            self.tool("loginctl", "echo " + linger)
+            self.assertIn("schedule", self.init(code=2).stderr)
+            self.assertEqual((units / "coldfix-loop.service").read_bytes(), service)
+            self.assertTrue((units / "coldfix-loop.timer").exists())
+
+    def test_generated_cron_bounds_output_and_keeps_latest_failure(self):
+        self.store.mkdir()
+        script = self.cwd / "output.py"
+        status = self.cwd / "exit-code"
+        script.write_text("import sys\nfrom pathlib import Path\ncode = int(Path(sys.argv[1]).read_text())\n"
+                          "print('x' * 400000)\nprint('diagnostic', code, file=sys.stderr)\nsys.exit(code)\n")
+        with patch.dict(os.environ, self.environment):
+            loop_setup.install_schedule(self.store, [sys.executable, str(script), str(status)], {})
+            command = self.cron.read_text().split(maxsplit=5)[5]
+            for code in (3, 7, 0, 0, 0, 0):
+                status.write_text(str(code))
+                result = subprocess.run(["/bin/sh", "-c", command], capture_output=True)
+                self.assertEqual(result.returncode, code, result.stderr)
+        logs = list(self.store.glob("loop.log*"))
+        self.assertLessEqual(sum(path.stat().st_size for path in logs), 3 * 65536)
+        self.assertEqual((self.store / "loop.log.failure").read_bytes()[-2:], b"7\n")
+        self.assertIn(b"diagnostic 7", (self.store / "loop.log.failure").read_bytes())
+        self.assertTrue((self.store / "loop.log.1").is_file())
+
+    def test_cron_startup_failure_is_recorded_under_the_log_cap(self):
+        self.store.mkdir()
+        missing = self.cwd / "missing interpreter"
+        log = self.store / "loop.log"
+        log.write_bytes(b"x" * loop_setup.LOG_CAP)
+        with patch.dict(os.environ, self.environment), patch.object(loop_setup.sys, "executable", str(missing)):
+            loop_setup.install_schedule(self.store, ["/bin/true"], {})
+            entry = self.cron.read_text().split(maxsplit=5)[5]
+            for _ in range(3):
+                result = subprocess.run(["/bin/sh", "-c", entry], capture_output=True)
+                self.assertEqual(result.returncode, 127)
+        failure = self.store / "loop.log.failure"
+        self.assertTrue(failure.is_file(), "cron startup failure must survive in the failure log")
+        self.assertIn(b"failed to start: 127", failure.read_bytes())
+        self.assertIn(b"x", log.read_bytes())
+        self.assertEqual(log.read_bytes().count(b"failed to start: 127"), 3)
+        self.assertLessEqual(log.stat().st_size, loop_setup.LOG_CAP)
+        self.assertLessEqual(failure.stat().st_size, loop_setup.LOG_CAP)
+
+    def test_refused_uninstall_leaves_the_schedule_wrapper_and_repo_files_untouched(self):
+        self.init()
+        environment = dict(self.environment, PATH=str(self.bin) + os.pathsep + os.environ["PATH"])
+        with patch.dict(os.environ, environment):
+            test_cli.CliTests.run_cli(self, "--store", str(self.store), "install", "--repo", str(self.repo))
+            cron = self.cron.read_text()
+            def snapshot():
+                return {p: (p.read_bytes(), p.stat().st_mode, p.stat().st_mtime_ns)
+                        for root in (self.repo, self.home) for p in root.rglob("*") if p.is_file()}
+            for edited in (cron.replace(" && env ", " && env EDITED=yes "), cron.replace("17 *", "18 *")):
+                self.cron.write_text(edited)
+                before = snapshot()
+                result = test_cli.CliTests.run_cli(self, "--store", str(self.store), "uninstall", "--repo", str(self.repo), code=2)
+                self.assertIn("cron", result.stderr)
+                self.assertEqual(snapshot(), before)
+                self.assertEqual(self.cron.read_text(), edited)
+            self.cron.write_text(cron)
+            (self.repo / ".git/config.lock").touch()
+            before = snapshot()
+            result = test_cli.CliTests.run_cli(self, "--store", str(self.store), "uninstall", "--repo", str(self.repo), code=2)
+            self.assertIn("locked", result.stderr)
+            self.assertEqual(snapshot(), before)
+            self.assertEqual(self.cron.read_text(), cron)
+
+    def test_uninstall_removes_owned_job_wrapper_and_hook(self):
+        self.tool("gh", '[ "$1 $2" = "api user" ] && { echo fixture-login; exit; }; echo "[]"')
+        self.tool("loginctl", "echo no")
+        environment = dict(self.environment, PATH=str(self.bin) + os.pathsep + os.environ["PATH"])
+        def cli(store, *args, code=0):
+            result = subprocess.run([sys.executable, str(test_cli.CLI), "--store", str(store), *args],
+                                    cwd=self.repo, env=environment, text=True, capture_output=True)
+            self.assertEqual(result.returncode, code, result.stderr)
+            return result
+        cli(self.store, "init", "--yes")
+        self.cron.write_text("0 1 * * * keep-me\n" + self.cron.read_text())
+        first_entry = self.cron.read_bytes()
+        other = self.cwd / "other checkout"
+        subprocess.run(["git", "init", "-q", str(other)], check=True)
+        other_store = other / ".coldfix"
+        self.assertIn("schedule", cli(other_store, "init", "--yes", "--repo", str(other), code=2).stderr)
+        self.assertEqual(self.cron.read_bytes(), first_entry)
+        other_hook = self.repo / ".githooks/post-commit"
+        evidence = self.store / "transcript-scan.sqlite"
+        original = evidence.read_bytes()
+        cli(self.store, "install")
+        other_hook.write_text("keep hook")
+        cli(other_store, "uninstall")
+        self.assertEqual(self.cron.read_bytes(), first_entry)
+        self.assertTrue((self.repo / ".githooks/pre-push").is_file())
+        cli(self.store, "uninstall")
+        cli(self.store, "uninstall")
+        self.assertEqual(self.cron.read_text(), "0 1 * * * keep-me\n")
+        self.assertFalse((self.store / "model-cmd").exists())
+        self.assertFalse((self.store / loop_setup.CRON_FAILURE).exists())
+        self.assertFalse((self.repo / ".githooks/pre-push").exists())
+        self.assertEqual(other_hook.read_text(), "keep hook")
+        self.assertEqual(evidence.read_bytes(), original)
+        result = subprocess.run(["git", "-C", str(self.repo), "config", "core.hooksPath"],
+                                capture_output=True, text=True, check=True)
+        self.assertEqual(result.stdout.strip(), ".githooks")
+
+    def test_uninstall_keeps_preexisting_hook_and_edited_workflow(self):
+        from repo_install import HOOK
+        hook = self.repo / ".githooks/pre-push"
+        hook.parent.mkdir()
+        hook.write_text(HOOK)
+        hook.chmod(0o755)
+        workflow = self.repo / ".github/workflows/coldfix-review.yml"
+        with patch.dict(os.environ, {**self.environment, "PATH": str(self.bin) + os.pathsep + os.environ["PATH"]}):
+            test_cli.CliTests.run_cli(self, "--store", str(self.store), "install", "--repo", str(self.repo))
+            workflow.write_bytes(b"edited\xff")
+            test_cli.CliTests.run_cli(self, "--store", str(self.store), "uninstall", "--repo", str(self.repo))
+        self.assertEqual(hook.read_text(), HOOK)
+        self.assertEqual(workflow.read_bytes(), b"edited\xff")
+        self.assertFalse((self.repo / ".github/workflows/coldfix-rules.yml").exists())
+
     def test_init_yes_prefers_a_systemd_user_timer(self):
         self.tool("systemctl", 'echo "systemctl $*" >> "$CALLS"')
         self.tool("loginctl", 'echo yes')
@@ -87,7 +255,7 @@ class LoopInitTests(unittest.TestCase):
         self.assertIn("OnCalendar=hourly", (units / "coldfix-loop.timer").read_text())
         self.assertIn("systemctl --user enable --now coldfix-loop.timer", self.calls.read_text())
         self.assertFalse(self.cron.exists())
-        self.cron.write_text("0 1 * * * keep-me\n17 * * * * old " + loop_setup.CRON_TAG + "\n")
+        self.cron.write_text("0 1 * * * keep-me\n" + self.legacy_cron(self.store) + "\n")
         self.init()
         self.assertEqual(self.cron.read_text(), "0 1 * * * keep-me\n")
 
@@ -108,6 +276,27 @@ class LoopInitTests(unittest.TestCase):
         self.assertFalse((units / "coldfix-loop.timer").exists() or (units / "coldfix-loop.service").exists())
         self.assertIn("systemctl --user disable --now coldfix-loop.timer", self.calls.read_text())
 
+    def test_failed_timer_disable_does_not_add_a_cron_job(self):
+        self.tool("loginctl", "echo yes")
+        self.tool("systemctl", "exit 0")
+        self.init()
+        self.tool("loginctl", "echo no")
+        self.tool("systemctl", "exit 1")
+        self.assertIn("disable", self.init(code=2).stderr)
+        self.assertFalse(self.cron.exists())
+        self.tool("systemctl", "exit 0")
+        self.assertIn("cron entry", self.init().stdout)
+
+    def test_retry_after_failed_systemd_reload_accepts_the_written_service(self):
+        self.tool("loginctl", "echo yes")
+        self.tool("systemctl", "exit 0")
+        self.init()
+        self.environment["GH_CONFIG_DIR"] = str(self.cwd / "gh")
+        self.tool("systemctl", '[ "$2" != "daemon-reload" ]')
+        self.assertIn("daemon-reload failed", self.init(code=2).stderr)
+        self.tool("systemctl", "exit 0")
+        self.assertIn("systemd user timer", self.init().stdout)
+
     def test_a_line_break_in_a_schedule_value_leaves_the_schedule_unchanged(self):
         self.cron.write_text("0 1 * * * keep-me\n")
         with patch.dict(os.environ, self.environment), \
@@ -127,6 +316,29 @@ class LoopInitTests(unittest.TestCase):
             with self.assertRaisesRegex(loop_setup.c.ColdfixError, "crontab -l failed"):
                 entry(self.cwd, ["run"], dict(PATH="p"))
         self.assertIn("50", self.cron.read_text())
+
+    def test_reinit_updates_a_wrapper_from_a_previous_python_and_checkout(self):
+        self.store.mkdir()
+        wrapper = self.store / "model-cmd"
+        old = self.cwd / "old checkout's copy"
+        wrapper.write_text(f'#!/bin/sh\nexec {shlex.quote(str(old / "bin/python3"))} '
+                           f'{shlex.quote(str(old / "loop_setup.py"))} codex "$@"\n')
+        self.init()
+        self.assertIn(shlex.quote(sys.executable), wrapper.read_text())
+        self.assertNotIn(str(old), wrapper.read_text())
+
+    def test_uninstall_recognizes_a_relocated_wrapper_and_preserves_user_edits(self):
+        self.store.mkdir()
+        wrapper = self.store / "model-cmd"
+        old = '#!/bin/sh\nexec /old/python3 /old/loop_setup.py claude "$@"\n'
+        with patch.dict(os.environ, self.environment):
+            for content in (old + "echo custom\n", old.replace('"$@"', '"custom"')):
+                wrapper.write_text(content)
+                loop_setup.uninstall_schedule(self.store)
+                self.assertEqual(wrapper.read_text(), content)
+            wrapper.write_text(old)
+            loop_setup.uninstall_schedule(self.store)
+            self.assertFalse(wrapper.exists())
 
     def test_wrapper_replaces_a_symlink_instead_of_writing_through_it(self):
         target = self.cwd / "target"

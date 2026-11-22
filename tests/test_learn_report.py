@@ -34,6 +34,55 @@ class LearnReportTests(unittest.TestCase):
         self.assertEqual(process.returncode, 2)
         self.assertIn("lessons folder not found", process.stderr)
 
+    def test_prevention_evidence_compares_the_same_windows_for_both_cohorts(self):
+        folder = self.store.parent
+        now = datetime(2026, 11, 22, tzinfo=timezone.utc)
+        published = "2026-11-12T00:00:00+00:00"
+        lessons, deliveries = {}, {}
+        for number, key, at in ((1, "A", published), (2, "B", published),
+                                (3, "D", "2026-11-20T00:00:00+00:00")):
+            label = f"L{number}"
+            created = "2026-11-09T00:00:00+00:00"
+            (folder / f"{label}-example.md").write_text(
+                f"---\nid: {label}\nstatus: active\nverification: proven\nscope: repo:example/repo\n"
+                f"first_seen: {created}\nsource: {learn_report.transcript_delivery.PROVEN_SOURCE}{key}\n---\n"
+            )
+            lessons[key] = dict(id=key, lesson_id=key, previous="", created=created, group_id=key,
+                                grouping="exact", verification="proven", status="active")
+            deliveries[key] = dict(status="delivered", lesson=label, revision=key, delivered=at)
+        (folder / "briefing.md").write_text("- **L2 example**\n")
+        (self.store / learn_report.transcript_delivery.DELIVERIES).write_text(json.dumps(dict(proven=deliveries)))
+
+        def failure(group, day, repo="example/repo"):
+            at = f"2026-11-{day:02d}T00:00:00+00:00"
+            return dict(created=at, occurred=at, source="github", repo=repo, group_id=group,
+                        command="test", error=group)
+
+        failures = [failure("A", 4), failure("A", 5), failure("A", 12), failure("A", 18),
+                    failure("A", 19), failure("B", 11), failure("B", 15, "other/repo")]
+        evidence = learn_report.prevention_evidence(
+            self.store, dict(lessons=lessons, failures=dict(enumerate(failures))), folder, now
+        )
+        before = dict(start="2026-11-05T00:00:00+00:00", end=published, failures=1,
+                      lessons_with_recurrence=1, recurrence_rate=1.0)
+        after = dict(start=published, end="2026-11-19T00:00:00+00:00")
+        self.assertEqual(evidence["as_of"], now.isoformat())
+        self.assertEqual(evidence["days_per_window"], 7)
+        self.assertEqual(evidence["status"], "observed")
+        self.assertEqual(evidence["withheld"], dict(lessons=2, denominator=1, before=before,
+            after=dict(after, failures=2, lessons_with_recurrence=1, recurrence_rate=1.0)))
+        self.assertEqual(evidence["delivered"], dict(lessons=1, denominator=1, before=before,
+            after=dict(after, failures=0, lessons_with_recurrence=0, recurrence_rate=0.0)))
+
+    def test_prevention_evidence_is_inconclusive_for_empty_cohorts(self):
+        folder = self.store.parent
+        evidence = learn_report.report(self.store, datetime.now(timezone.utc), folder=folder)["prevention_evidence"]
+        self.assertEqual(evidence["status"], "inconclusive")
+        for name in ("withheld", "delivered"):
+            self.assertEqual((evidence[name]["lessons"], evidence[name]["denominator"]), (0, 0))
+            self.assertIsNone(evidence[name]["before"]["recurrence_rate"])
+            self.assertIsNone(evidence[name]["after"]["recurrence_rate"])
+
     def test_counts_only_the_window_and_reads_runs_and_drafts_from_the_daily_ledger(self):
         for index in range(3):
             row = dict(RUN, head_sha=str(index) * 40, run_id=2000 + index, log_tail="AssertionError: same")

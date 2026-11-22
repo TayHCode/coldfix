@@ -1,7 +1,14 @@
 from datetime import datetime, timezone
 import json
+import io
+from contextlib import redirect_stdout
+import subprocess
 import unittest
 from unittest import mock
+
+import transcript_delivery as delivery
+import learn_daily
+from test_transcript_delivery import Fixture
 
 import check_delivery
 import coldfix as c
@@ -59,6 +66,78 @@ class AgentsBlockTests(CliCase):
         self.assertEqual((repo / "CLAUDE.md").read_text(), "Claude notes.\n")
         self.agents(unrelated)
         self.assertFalse((unrelated / "AGENTS.md").exists())
+
+    def test_retirement_refreshes_both_routes_and_reports_disconnected_paths(self):
+        repo, before, after = self.history()
+        revision = self.author_lesson()
+        proven = json.loads(self.run_replay(revision, repo, before, after, "--status", "active").stdout)
+        fixture = Fixture(self.cwd)
+        fixture.root = self.store
+        (self.store / learn_daily.LEDGER).write_text(json.dumps(dict(drafts={
+            "draft": dict(replay=dict(status="proven", proof=dict(id=proven["id"]), repo=str(repo)))})))
+        checks = self.cwd / "checks.json"
+        checks.write_text(json.dumps({proven["lesson_id"]: "example-count-check"}))
+        offline = self.cwd / "offline"
+        subprocess.run(["git", "clone", "--quiet", str(repo), str(offline)], check=True)
+        (repo / "CLAUDE.md").write_text("Keep local notes.\n")
+        with mock.patch.object(delivery, "LESSON_CHECKS", checks), mock.patch.object(delivery, "HOOK_READ_SECONDS", 0):
+            fixture.deliver()
+            ledger_path = self.store / delivery.DELIVERIES
+            record = json.loads(ledger_path.read_text())["proven"][proven["lesson_id"]]
+            lesson, source = record["lesson"], fixture.folder / record["file"]
+            self.assertIn("Require the expected count.", fixture.file("briefing.md"))
+            for checkout in (repo, offline):
+                self.assertEqual(self.agents(checkout)["lessons"], [proven["lesson_id"]])
+            moved = offline.rename(self.cwd / "unmounted")
+            retire = ("retire", lesson, "--lessons", str(fixture.folder))
+            result = json.loads(self.run_cli(*retire).stdout)
+            self.assertNotIn("Require the expected count.", fixture.file("briefing.md"))
+            self.assertFalse((repo / "AGENTS.md").exists())
+            self.assertEqual((repo / "CLAUDE.md").read_text(), "Keep local notes.\n")
+            self.assertEqual(result["pending_refresh"], [str(offline / "AGENTS.md")])
+            files = (ledger_path, source, fixture.folder / "briefing.md", repo / "CLAUDE.md")
+            before_retry = [(p.read_bytes(), p.stat().st_mtime_ns) for p in files]
+            self.assertEqual(json.loads(self.run_cli(*retire).stdout), result)
+            self.assertEqual([(p.read_bytes(), p.stat().st_mtime_ns) for p in files], before_retry)
+            fixture.deliver()
+            self.prove_elsewhere(proven["id"])
+            exported = self.run_cli("export", "--format", "briefing", "--output", "after.md")
+            self.assertEqual(json.loads(exported.stdout)["lesson_count"], 0)
+            rejected = self.run_cli("export", "--lesson", proven["lesson_id"], "--output", "rule.md", code=2)
+            self.assertIn("vetoed", rejected.stderr)
+            self.assertNotIn("Require the expected count.", fixture.file("briefing.md"))
+            moved.rename(offline)
+            self.assertNotIn("pending_refresh", json.loads(self.run_cli(*retire).stdout))
+            for checkout in (repo, offline):
+                self.assertEqual(self.agents(checkout)["lessons"], [])
+                self.assertFalse((checkout / "AGENTS.md").exists())
+
+    def test_veto_command_refreshes_registered_copies_without_conferring_delivery_store_ownership(self):
+        repo, before, after = self.history()
+        proven = json.loads(self.run_replay(self.author_lesson(), repo, before, after, "--status", "active").stdout)
+        target = repo / "AGENTS.md"
+        self.agents(repo)
+        fixture = Fixture(self.cwd)
+        fixture.root = self.store
+        rejected = self.run_cli("retire", "L1", "--lessons", str(fixture.folder), code=2)
+        self.assertIn("no delivery ledger", rejected.stderr)
+        self.assertIn("status: active", fixture.file("L1-docs-sync.md"))
+
+        (self.store / learn_daily.LEDGER).write_text(json.dumps(dict(drafts={
+            "draft": dict(replay=dict(status="proven", proof=dict(id=proven["id"]), repo=str(repo)))})))
+        fixture.deliver()
+        ledger = json.loads((self.store / delivery.DELIVERIES).read_text())
+        lesson = ledger["proven"][proven["lesson_id"]]["lesson"]
+        moved = repo.rename(self.cwd / "unmounted")
+        output = io.StringIO()
+        with mock.patch.object(delivery, "FOLDER", str(fixture.folder)), mock.patch.object(delivery, "TOOL", str(fixture.tool)), \
+                mock.patch.object(delivery, "RULES", str(fixture.rules)), mock.patch.object(delivery, "HOOK_READ_SECONDS", 0), \
+                redirect_stdout(output):
+            self.assertEqual(delivery.main(["--store", str(self.store), "veto", lesson]), 0)
+        self.assertEqual(json.loads(output.getvalue())["pending_refresh"], [str(target)])
+        moved.rename(repo)
+        self.run_cli("retire", lesson, "--lessons", str(fixture.folder))
+        self.assertFalse(target.exists())
 
     def test_an_existing_test_delivery_carries_its_rule_into_the_repository_export(self):
         revision = self.author_lesson()

@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "step": {
+    "step_id": 8,
+    "timestamp": "2026-11-21T14:03:11Z",
+    "agent": "coldrewind",
+    "command": ["coldrewind", "undo", "7"],
+    "reversibility": "reversible",
+    "reason": "",
+    "pre_snapshot_id": "snap-0008",
+    "post_snapshot_id": "snap-0006",
+    "changed_paths": ["config/<redacted>.toml", "src/client.py"]
+  }
+}

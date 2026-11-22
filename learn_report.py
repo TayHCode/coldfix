@@ -15,7 +15,7 @@ import flakiness
 import coldpass_replay
 from learn_daily import LEDGER, fix_pairs, waiting
 from learn_candidates import candidates
-from learn_replay import PROOF_TESTS, reason_buckets
+from learn_replay import PROOF_TESTS, reason_buckets, rejection_environments
 import transcript_delivery
 
 TRACKED = "promote-to-check.json"
@@ -38,6 +38,17 @@ def rejected_replays(drafts, since):
         elif row["day"] >= since and row.get("replay", {}).get("status") == "rejected":
             reasons.append(row["replay"]["reason"])
     return reasons
+
+
+def read_ledger(root):
+    path = root / LEDGER
+    return json.loads(c.read_text(path)) if path.exists() else dict(drafts={}, runs=[])
+
+
+def rejection_environment_summary(drafts, since):
+    counts = rejection_environments(attempt for row in drafts for attempt in row.get("replay_attempts") or ()
+                                    if attempt["day"] >= since)
+    return dict(replay_rejection_environments=counts) if counts else {}
 
 
 def generated_test_calls(root, start):
@@ -115,17 +126,18 @@ def first_proof(store, record):
     return proven
 
 
-def ci_recurrence(store, rows, *, window=None, failures=None):
+def ci_recurrence(store, rows, *, window=None, failures=None, repo_scoped=False):
     if not rows:
         return []
     exact, normalized = {}, {}
+    repo_scoped = repo_scoped or window is not None
     for row in store["failures"].values() if failures is None else failures:
         if row["source"] == "ci-fix-learning-local-reproduction":
             continue
         at = happened(row)
         if window and not window[0] <= at <= window[1]:
             continue
-        repo = row["repo"].casefold() if window else None
+        repo = row["repo"].casefold() if repo_scoped else None
         exact.setdefault((repo, row["group_id"]), []).append(at)
         normalized.setdefault((repo, c.signature(row)), []).append(at)
     latest, result = c.latest_lessons(store), []
@@ -134,7 +146,7 @@ def ci_recurrence(store, rows, *, window=None, failures=None):
         proven = record and first_proof(store, record)
         if not proven or record["status"] == "retired" or delivery.get("state") == "retired":
             continue
-        repo = delivery["repo"].casefold() if window else None
+        repo = delivery["repo"].casefold() if repo_scoped else None
         times = (exact if record["grouping"] == "exact" else normalized).get((repo, record["group_id"]), [])
         if window:
             proof_at = c.time_key(proven)
@@ -147,12 +159,10 @@ def ci_recurrence(store, rows, *, window=None, failures=None):
     return result
 
 
-def briefing_cohorts(folder, store, now, backlog_store=None):
+def briefing_members(folder):
     files = transcript_delivery.lessons(folder)
     briefing = folder / "briefing.md"
     published = set(re.findall(r"(?m)^- \*\*(L\d+)\b", c.read_text(briefing))) if briefing.is_file() else set()
-    result = {cohort: dict(lessons=0, repeats=0) for cohort in ("in_briefing", "held_back")}
-    rows, cohorts = {}, {}
     for name in transcript_delivery.proven_candidates(files):
         meta = files[name]
         if not transcript_delivery.briefing_only(meta):
@@ -160,10 +170,15 @@ def briefing_cohorts(folder, store, now, backlog_store=None):
         held = transcript_delivery.held_back(meta)
         if held == (meta["id"] in published):
             continue
-        lesson_id = meta["source"].split(":", 1)[1]
-        rows[lesson_id] = dict(repo=meta["scope"].removeprefix("repo:"))
-        cohorts[lesson_id] = "held_back" if held else "in_briefing"
+        yield meta["source"].split(":", 1)[1], meta["scope"].removeprefix("repo:"), held, meta["id"]
 
+
+def briefing_cohorts(folder, store, now, backlog_store=None):
+    result = {cohort: dict(lessons=0, repeats=0) for cohort in ("in_briefing", "held_back")}
+    rows, cohorts = {}, {}
+    for lesson_id, repo, held, _ in briefing_members(folder):
+        rows[lesson_id] = dict(repo=repo)
+        cohorts[lesson_id] = "held_back" if held else "in_briefing"
     stores = (store,) if backlog_store is None else (store, backlog_store)
     window = (now - timedelta(days=14), now)
     for source in stores:
@@ -174,6 +189,44 @@ def briefing_cohorts(folder, store, now, backlog_store=None):
             group["repeats"] += row["failures_since"] > 0
             del rows[row["lesson"]]
     return result
+
+
+def prevention_evidence(root, store, folder, now):
+    publication = transcript_delivery.load(root / transcript_delivery.DELIVERIES, {}).get("proven", {})
+    latest = c.latest_lessons(store)
+    members = {"withheld": set(), "delivered": set()}
+    rows = {}
+    for lesson, repo, held, label in briefing_members(folder):
+        members["withheld" if held else "delivered"].add(lesson)
+        record, entry = latest.get(lesson), publication.get(lesson, {})
+        if (record and record["status"] not in c.ENDED and entry.get("status") == "delivered"
+                and entry.get("lesson") == label and entry.get("revision") == record["id"]):
+            at = c.time_key(entry["delivered"])
+            if c.time_key(record["created"]) <= at <= now - WEEK:
+                rows[lesson] = dict(repo=repo, state="delivered", at=entry["delivered"])
+
+    recurrence = ci_recurrence(store, rows, repo_scoped=True)
+    cohorts = {}
+    for name, lessons in members.items():
+        observed = [row for row in recurrence if row["lesson"] in lessons]
+        anchors = sorted(c.time_key(row["delivered"]) for row in observed)
+        denominator = len(observed)
+        cohort = dict(lessons=len(lessons), denominator=denominator)
+        for period, start, end in (("before", -WEEK, timedelta()), ("after", timedelta(), WEEK)):
+            counts = [row[f"failures_{period}"] for row in observed]
+            repeated = sum(count > 0 for count in counts)
+            cohort[period] = dict(
+                start=(anchors[0] + start).isoformat() if anchors else None,
+                end=(anchors[-1] + end).isoformat() if anchors else None,
+                failures=sum(counts), lessons_with_recurrence=repeated,
+                recurrence_rate=repeated / denominator if denominator else None,
+            )
+        cohorts[name] = cohort
+    return dict(as_of=now.isoformat(), days_per_window=WEEK.days,
+                anchor="Recorded lesson file publication of the current revision",
+                basis="Current briefing membership and matching failures recorded in this store",
+                status="observed" if all(cohort["denominator"] for cohort in cohorts.values()) else "inconclusive",
+                **cohorts)
 
 
 def compared(rows, now):
@@ -193,8 +246,7 @@ def report(root, now, days=7, folder=None, injections=None, oss_store=None):
     since = first.isoformat()
     store = c.load_store(root)[1]
     recent = lambda row: c.time_key(row["created"]) >= start
-    ledger_path = root / LEDGER
-    ledger = json.loads(ledger_path.read_text()) if ledger_path.exists() else dict(drafts={}, runs=[])
+    ledger = read_ledger(root)
     rejected = rejected_replays(ledger["drafts"].values(), since)
     progress = root / "learn-review-replay.json"
     if progress.exists():
@@ -226,6 +278,7 @@ def report(root, now, days=7, folder=None, injections=None, oss_store=None):
         ci_lesson_recurrence=ci_recurrence(store, {lesson["lesson_id"]: {} for lesson in proven_ci} | delivery_rows),
         lessons_rejected=reason_buckets(rejected),
     )
+    result.update(rejection_environment_summary(ledger["drafts"].values(), since))
     if oss_store:
         outside = c.load_store(oss_store)[1]
         result["outside_repos"] = dict(
@@ -233,6 +286,7 @@ def report(root, now, days=7, folder=None, injections=None, oss_store=None):
             active=sum(row["status"] in c.LIVE and row["verification"] == "proven"
                        for row in c.latest_lessons(outside).values()),
             proof="replayed",
+            **rejection_environment_summary(read_ledger(oss_store)["drafts"].values(), since),
         )
     if injections:
         result["context_injected"] = context_injected(injections, start)
@@ -242,6 +296,7 @@ def report(root, now, days=7, folder=None, injections=None, oss_store=None):
             for codes in row["readiness"]["evidence"].values() for code in codes)
     if folder:
         result["lesson_recurrence"], result["promote_to_check"] = transcript_delivery.recurrence(root, store, folder)
+        result["prevention_evidence"] = prevention_evidence(root, store, folder, now)
         tracked = transcript_delivery.load(folder / TRACKED, {})
         c.require(isinstance(tracked, dict) and all(re.fullmatch(r"L[1-9]\d*", k) and isinstance(v, str)
                                                     and ISSUE.fullmatch(v) for k, v in tracked.items()),

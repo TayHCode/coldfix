@@ -121,6 +121,29 @@ class DraftTests(unittest.TestCase):
         self.assertEqual(json.loads(self.output.read_text())[self.group]["rule"], self.response["rule"])
         self.assertEqual((proof["status"], proof["verification"]), ("PASS", "proven"))
 
+    def test_absent_fleet_cli_names_the_standalone_route(self):
+        tools = self.cwd / "tools"
+        tools.mkdir()
+        (tools / "git").symlink_to(shutil.which("git"))
+        for executable in (None, False):
+            with self.subTest(executable=executable):
+                if executable is False:
+                    (tools / "acme").write_text("#!/bin/sh\n")
+                with patch.dict(os.environ, PATH=str(tools)):
+                    os.environ.pop("COLDFIX_MODEL_CMD", None)
+                    result = self.draft(code=2)
+                self.assertEqual((result.stdout, result.stderr),
+                                 ("", "coldfix: model resolution is off: acme is not installed; "
+                                      "install it or set COLDFIX_MODEL_CMD to run standalone\n"))
+                self.assertFalse(self.output.exists())
+        with patch.dict(os.environ, PATH=str(tools)):
+            os.environ.pop("COLDFIX_MODEL_CMD", None)
+            os.environ.pop("COLDFIX_FLEET_CLI", None)
+            result = self.draft(code=2)
+        self.assertEqual((result.stdout, result.stderr), ("", "coldfix: model resolution is off: set COLDFIX_FLEET_CLI, "
+                                                              "or COLDFIX_MODEL_CMD to run standalone\n"))
+        self.assertFalse(self.output.exists())
+
     def test_wrong_check_is_drafted_and_rejected_by_replay(self):
         marker = self.cwd / "executed"
         self.response["check_script"] = 'from pathlib import Path\nPath(' + repr(str(marker)) + ').touch()\nprint(\'{"status":"PASS"}\')\n'

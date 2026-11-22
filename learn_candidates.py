@@ -76,7 +76,7 @@ def candidates(store, exclude=(), pairs=()):
             continue
         key, line = fingerprint(record, row)
         group = groups.setdefault(key, dict(fingerprint=key, headline=line, evidence=[], repos=set(), commits=set(),
-                                            transcript=False, replayable=False))
+                                            transcript=False, replayable=False, undo=False))
         group["evidence"].append(record["id"])
         group["repos"].add(record["repo"])
         group["commits"].add((record["repo"], revision(row)))
@@ -84,13 +84,14 @@ def candidates(store, exclude=(), pairs=()):
         if row.get("type") == "coldpass":
             group["readiness"] = coldpass_replay.readiness(store, group["evidence"], pairs)
             group["replayable"] = group["readiness"]["ready"]
+        group["undo"] |= row.get("type") == "coldrewind"
         score = row.get("score")
         group["transcript"] |= (record.get("command") == "transcript correction" and record.get("source_ref", "").startswith("transcript:")
                                 and row.get("type") == "transcript_correction" and type(score) in (int, float)
                                 and TRANSCRIPT_SCORE <= score <= 1)
     rows = [dict(group, evidence=sorted(group["evidence"]), repos=sorted(group["repos"]), commits=len(group["commits"]))
             for key, group in groups.items() if key not in exclude
-            and ("readiness" in group or group["transcript"] or group["replayable"] or len(group["commits"]) >= MIN_COMMITS or len(group["repos"]) >= MIN_REPOS)]
+            and ("readiness" in group or group["undo"] or group["transcript"] or group["replayable"] or len(group["commits"]) >= MIN_COMMITS or len(group["repos"]) >= MIN_REPOS)]
     return sorted(rows, key=lambda row: (-row["commits"], -len(row["repos"]), row["fingerprint"]))
 
 

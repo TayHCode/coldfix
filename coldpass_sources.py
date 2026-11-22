@@ -12,9 +12,11 @@ import coldfix as c
 import failure_ingest as fi
 
 
-OUTCOMES = {"pass", "harness_error", "blocked", "unverified", "unsupported", "too_slow", "needs_credentials", "needs_browser", "needs_keys_or_hardware"}
+OUTCOMES = {"pass", "harness_error", "blocked", "unverified", "unsupported", "too_slow", "needs_credentials", "needs_browser",
+            "needs_keys_or_hardware", "repo_unavailable", "nothing_to_run"}
 HARNESS_OUTCOMES = {"harness_error"}
-SETUP_OUTCOMES = {"unsupported", "needs_credentials", "needs_browser", "needs_keys_or_hardware"}
+SETUP_OUTCOMES = {"unsupported", "needs_credentials", "needs_browser", "needs_keys_or_hardware", "repo_unavailable"}
+NO_VERDICT_OUTCOMES = {"nothing_to_run"}
 CHECKED = {"partly_checked", "readme_checked"}
 EXCERPT = 2000
 RECHECKS = "coldpass-rechecks.json"
@@ -84,6 +86,8 @@ def classify(run):
         return "harness"
     if run["outcome"] in SETUP_OUTCOMES or run["owner"] == "prerequisite":
         return "setup"
+    if run["outcome"] in NO_VERDICT_OUTCOMES:
+        return "inconclusive"
     if run["owner"] == "repo" or run["owner"] is None and (
             run["origin"] == "repo" or run["outcome_class"] == "repo_failure"):
         return "product"

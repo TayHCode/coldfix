@@ -293,7 +293,8 @@ class LibraryExportTests(CliCase):
         self.assertEqual(again["proof_refused"], {"use-the-configured-ssh-alias": "not a judged or replayed library lesson"})
         rerun = subprocess.run([sys.executable, str(self.library / "rerun.py"), "use-the-configured-ssh-alias"],
                                text=True, capture_output=True)
-        self.assertEqual((rerun.returncode, rerun.stdout), (0, "PASS use-the-configured-ssh-alias\n"))
+        self.assertEqual((rerun.returncode, rerun.stdout),
+                         (0, "PASS use-the-configured-ssh-alias\nExecuted proofs: 1\n"))
 
     def test_a_check_that_passes_on_the_bad_fixture_is_refused(self):
         self.assert_still_judged(self.fixture_proof(self.PASSES_ON_GOOD, bad=("fixed",)),

@@ -3,7 +3,10 @@ import hashlib
 import io
 import json
 import os
+from pathlib import Path
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -26,6 +29,37 @@ def frontmatter(slug):
 
 
 class LibraryTests(unittest.TestCase):
+    def test_requested_proof_exit_and_count(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            runner = shutil.copy(Path(LIBRARY) / "rerun.py", root)
+            shutil.copytree(Path(LIBRARY) / "races", root / "races")
+            result = subprocess.run([sys.executable, "-B", runner], capture_output=True, text=True)
+            self.assertEqual((result.returncode, result.stdout), (2, "JUDGED races\nExecuted proofs: 0\n"))
+            shutil.copytree(Path(LIBRARY) / "closing-fence-length", root / "closing-fence-length")
+            for slug, status, code in (("incomplete", "INCOMPLETE", 2), ("mismatch", "PASS", 0)):
+                lesson = root / slug
+                for side in ("bad", "good"):
+                    (lesson / "fixtures" / side).mkdir(parents=True)
+                (lesson / "rule.md").touch()
+                report = json.dumps({"status": status})
+                (lesson / "check.py").write_text(f"print({report!r})\nraise SystemExit({code})\n")
+
+            cases = (
+                (["races"], 2, "INCOMPLETE races (no runnable proof)\nExecuted proofs: 0\n"),
+                (["incomplete"], 2, "INCOMPLETE incomplete\nExecuted proofs: 1\n"),
+                (["mismatch"], 1, "FAIL mismatch\nExecuted proofs: 1\n"),
+                (["closing-fence-length"], 0, "PASS closing-fence-length\nExecuted proofs: 1\n"),
+                (["closing-fence-length", "races"], 2,
+                 "PASS closing-fence-length\nINCOMPLETE races (no runnable proof)\nExecuted proofs: 1\n"),
+                ([], 2, "PASS closing-fence-length\nINCOMPLETE incomplete\nFAIL mismatch\nJUDGED races\n"
+                 "Executed proofs: 3\n"),
+            )
+            for slugs, code, output in cases:
+                with self.subTest(slugs=slugs):
+                    result = subprocess.run([sys.executable, "-B", runner, *slugs], capture_output=True, text=True)
+                    self.assertEqual((result.returncode, result.stdout), (code, output), result.stderr)
+
     def test_proof_level_matches_the_shipped_proof(self):
         for slug in lessons():
             with self.subTest(slug):
@@ -62,7 +96,8 @@ class LibraryTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()) as output, \
                 mock.patch.object(rerun, "repository_proof", lambda lesson: True):
             code = rerun.main(["conflict-markers", "jsonl-unicode-separators"])
-        self.assertEqual((code, output.getvalue()), (0, "PASS conflict-markers\nPASS jsonl-unicode-separators\n"))
+        self.assertEqual((code, output.getvalue()), (0, "PASS conflict-markers\nPASS jsonl-unicode-separators\n"
+                                                     "Executed proofs: 3\n"))
 
     def test_a_generated_proof_whose_check_passes_on_bad_is_not_a_proof(self):
         with tempfile.TemporaryDirectory() as lesson:
@@ -125,8 +160,8 @@ class LibraryTests(unittest.TestCase):
 
     def test_an_unknown_lesson_fails_the_rerun(self):
         with contextlib.redirect_stdout(io.StringIO()) as output:
-            self.assertEqual(rerun.main(["no-such-lesson"]), 1)
-        self.assertEqual(output.getvalue(), "UNKNOWN no-such-lesson\n")
+            self.assertEqual(rerun.main(["no-such-lesson"]), 2)
+        self.assertEqual(output.getvalue(), "UNKNOWN no-such-lesson\nExecuted proofs: 0\n")
 
     def test_an_unreachable_repository_is_incomplete_and_the_rerun_continues(self):
         with tempfile.TemporaryDirectory() as root:
@@ -145,8 +180,8 @@ class LibraryTests(unittest.TestCase):
                     code = rerun.main(["unreachable", "also-missing"])
             finally:
                 rerun.LIBRARY = library
-        self.assertEqual(code, 1)
-        self.assertEqual(output.getvalue(), "INCOMPLETE unreachable\nUNKNOWN also-missing\n")
+        self.assertEqual(code, 2)
+        self.assertEqual(output.getvalue(), "INCOMPLETE unreachable\nUNKNOWN also-missing\nExecuted proofs: 1\n")
 
     def rerun_fixture_lesson(self, check_source):
         with tempfile.TemporaryDirectory() as root:
@@ -185,15 +220,15 @@ class LibraryTests(unittest.TestCase):
             finally:
                 rerun.LIBRARY = library
             self.assertTrue(rerun.fixture_proof(lesson))
-        self.assertEqual((code, output.getvalue()), (1, "INCOMPLETE lesson\n"))
+        self.assertEqual((code, output.getvalue()), (2, "INCOMPLETE lesson\nExecuted proofs: 2\n"))
 
     def test_an_incomplete_check_is_reported_as_incomplete(self):
         code, output = self.rerun_fixture_lesson("import sys\nprint('{\"status\": \"INCOMPLETE\"}')\nsys.exit(2)\n")
-        self.assertEqual((code, output), (1, "INCOMPLETE lesson\nUNKNOWN also-missing\n"))
+        self.assertEqual((code, output), (2, "INCOMPLETE lesson\nUNKNOWN also-missing\nExecuted proofs: 1\n"))
 
     def test_a_non_object_status_line_fails_the_proof_and_the_rerun_continues(self):
         code, output = self.rerun_fixture_lesson("import sys\nprint('null')\nsys.exit(1)\n")
-        self.assertEqual((code, output), (1, "FAIL lesson\nUNKNOWN also-missing\n"))
+        self.assertEqual((code, output), (2, "FAIL lesson\nUNKNOWN also-missing\nExecuted proofs: 1\n"))
 
     def test_repository_proofs_pin_a_github_repository_and_their_check(self):
         for slug in lessons():

@@ -295,7 +295,14 @@ PARALLEL_VERIFY_JUNIT = (PARALLEL_VERIFY
                          .replace(b'run_module() {\n', b'unittest=(-m unittest)\nif [[ -n ${COLD_VERIFY_UNITTEST:-} ]]; then\n'
                                   b'    unittest=("$COLD_VERIFY_UNITTEST")\nfi\n\nrun_module() {\n')
                          .replace(b'python3 -B -m unittest discover', b'python3 -B "${unittest[@]}" discover'))
-VERIFY_RECIPES = (CANONICAL_VERIFY, PARALLEL_VERIFY, PARALLEL_VERIFY_JUNIT)
+PARALLEL_VERIFY_CLASS_JUNIT = PARALLEL_VERIFY.replace(
+    b'logs=$(mktemp -d)\n',
+    b'if [[ -n ${COLD_VERIFY_UNITTEST:-} ]]; then\n'
+    b'    exec python3 -B .fleet/shard_unittest.py "$(nproc)"\n'
+    b'fi\n\n'
+    b'logs=$(mktemp -d)\n',
+)
+VERIFY_RECIPES = (CANONICAL_VERIFY, PARALLEL_VERIFY, PARALLEL_VERIFY_JUNIT, PARALLEL_VERIFY_CLASS_JUNIT)
 
 COMMAND_TEMPLATE = '''import json
 from hashlib import sha256

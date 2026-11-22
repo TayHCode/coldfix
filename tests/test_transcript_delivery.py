@@ -84,6 +84,12 @@ def finding_lead(title, rule, finding_class="design"):
                 proof=dict(excerpt="I wrapped the call in while True and retry on every error."))
 
 
+def quarantine_cli(argv):
+    try:
+        return c.main(argv)
+    except SystemExit as error:
+        return error.code
+
 class Fixture:
     def __init__(self, directory):
         base = Path(directory)
@@ -495,6 +501,18 @@ class TranscriptDeliveryTests(unittest.TestCase):
         self.assertEqual(self.f.deliver()["added"], [])
         self.assertEqual(len(self.f.asked), calls)
 
+    def test_retirement_overrides_an_automatic_scope_veto(self):
+        self.f.ledger(dict(a=lead("First", "Check receipt ownership.")))
+        self.f.deliver()
+        path = self.f.root / d.DELIVERIES
+        saved = json.loads(path.read_text())
+        saved["leads"]["a"].update(status="vetoed", reason=d.OFF_TOPIC, scope_version=1)
+        path.write_text(json.dumps(saved))
+        (self.f.folder / "L2-first.md").unlink()
+        d.quarantine(self.f.root, "L2", self.f.folder, "retire")
+        self.assertEqual(self.f.deliver()["added"], [])
+        self.assertNotIn("lessons/L2-first.md", self.f.files())
+
     def test_reconsidered_scope_rejection_still_has_to_pass_duplicate_check(self):
         self.f.ledger(dict(a=lead("Verify tracking", "Check the event data.")))
         self.f.deliver()
@@ -872,8 +890,9 @@ class TranscriptDeliveryTests(unittest.TestCase):
             return real(target, *args, **kwargs)
         waited = []
         with mock.patch.object(d.c, "atomic_create", side_effect=interrupted), self.assertRaises(OSError), \
-                mock.patch.object(d.time, "sleep", side_effect=lambda seconds: waited.append(
-                    (seconds, "L2" in self.f.file("briefing.md"), "status: active" in path.read_text()))):
+                mock.patch.object(d, "time", wraps=d.time) as delivery_time:
+            delivery_time.sleep.side_effect = lambda seconds: waited.append(
+                (seconds, "L2" in self.f.file("briefing.md"), "status: active" in path.read_text()))
             self.f.deliver()
         self.assertEqual(waited, [(d.HOOK_READ_SECONDS, False, True)])
         self.assertNotIn("L2", self.f.file("briefing.md"))
@@ -905,6 +924,21 @@ class TranscriptDeliveryTests(unittest.TestCase):
         self.assertEqual(self.f.file("L1-docs-sync.md").count("retired_by:"), 1)
         with self.assertRaisesRegex(c.ColdfixError, "no lesson L9"):
             self.cli("veto", "L9")
+
+    def test_retire_switches_off_an_unrecorded_lesson_in_the_live_briefing_at_once(self):
+        self.f.ledger({})
+        self.f.deliver()
+        self.assertIn(L1_LINE, self.f.file("briefing.md"))
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = quarantine_cli(["--store", str(self.f.root), "retire", "L1", "--lessons", str(self.f.folder)])
+        self.assertEqual(code, 0)
+        self.assertNotIn("L1", self.f.file("briefing.md"))
+        meta = d.frontmatter(self.f.file("L1-docs-sync.md"))
+        self.assertEqual((meta["status"], meta["retired_by"]), ("retired", "retire"))
+        for bad in ("L9", "../L1", "L01"):
+            with self.subTest(bad=bad), redirect_stdout(io.StringIO()):
+                self.assertEqual(quarantine_cli(["--store", str(self.f.root), "quarantine", bad, "--lessons", str(self.f.folder)]), 2)
 
     def failure(self, repo, agent="claude"):
         before = set((self.f.root / "failures").glob("*.json"))
@@ -1231,6 +1265,22 @@ class TranscriptDeliveryTests(unittest.TestCase):
         self.assertEqual([line.split("\t")[0] for line in self.cli("list")[1].splitlines()], ["L1", "L2", "L10"])
         with mock.patch.object(d, "FOLDER", ""), self.assertRaises(d.c.ColdfixError):
             d.main(["--store", str(self.f.root), "list"])
+
+    def test_quarantine_cancels_a_queued_reconsider_and_refuses_a_store_without_a_delivery_ledger(self):
+        self.f.ledger(dict(a=lead("First", "Rule one.")))
+        self.assertEqual(self.f.deliver()["added"], ["L2"])
+        (self.f.folder / "L2-first.md").unlink()
+        self.f.deliver()
+        d.reconsider(self.f.root, "L2")
+        empty = Path(self.f.root.parent / "elsewhere")
+        empty.mkdir()
+        with mock.patch.object(d, "HOOK_READ_SECONDS", 0), redirect_stdout(io.StringIO()):
+            self.assertEqual(quarantine_cli(["--store", str(empty), "quarantine", "L2", "--lessons", str(self.f.folder)]), 2)
+            self.assertEqual(os.listdir(empty), [])
+            self.assertEqual(quarantine_cli(["--store", str(self.f.root), "quarantine", "L2", "--lessons", str(self.f.folder)]), 0)
+        self.assertNotIn("reconsider", json.loads((self.f.root / d.DELIVERIES).read_text())["leads"]["a"])
+        self.assertEqual(self.f.deliver()["added"], [])
+        self.assertNotIn("lessons/L2-first.md", self.f.files())
 
     def test_reconsider_runs_the_gate_again_on_a_lesson_removed_without_a_recorded_reason(self):
         self.f.ledger(dict(a=lead("First", "Rule one."), b=lead("Second", "Rule two."), c=lead("Third", "Rule three.")))
@@ -1743,6 +1793,43 @@ class ProvenLessonDeliveryTests(unittest.TestCase):
         self.assertEqual(self.deliver()["added"], ["L4"])
         self.assertEqual(self.f.files() & {"lessons/L2-first.md", "lessons/L3-second.md"}, set())
         self.assertNotIn("L2", self.f.file("briefing.md"))
+
+    def test_quarantine_drops_a_proven_lesson_from_the_next_briefing_without_a_delivery_run(self):
+        self.proven = [proven_lesson("a" * 32, "x/one", "2026-11-11T00:00:00+00:00", "First"),
+                       proven_lesson("b" * 32, "x/one", "2026-11-12T00:00:00+00:00", "Second")]
+        self.deliver()
+        self.assertIn("- **L2 first** (replayed)", self.f.file("briefing.md"))
+        self.assertIn("- **L3 second** (replayed)", self.f.file("briefing.md"))
+        out = io.StringIO()
+        with mock.patch.object(d, "HOOK_READ_SECONDS", 0), redirect_stdout(out):
+            code = quarantine_cli(["--store", str(self.f.root), "quarantine", "L2", "--lessons", str(self.f.folder)])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out.getvalue()), dict(lesson="L2", status="retired", action="quarantine"))
+        self.assertNotIn("L2", self.f.file("briefing.md"))
+        self.assertIn("- **L3 second** (replayed)", self.f.file("briefing.md"))
+        meta = d.frontmatter(self.f.file("L2-first.md"))
+        self.assertEqual((meta["status"], meta["retired_by"], meta["retired_reason"]),
+                         ("retired", "quarantine", "quarantined by the owner"))
+        with mock.patch.object(d, "HOOK_READ_SECONDS", 0):
+            self.assertEqual(self.deliver()["removed"], ["L2"])
+            self.assertEqual(self.deliver()["added"], [])
+        self.assertNotIn("L2", self.f.file("briefing.md"))
+        self.assertNotIn("lessons/L2-first.md", self.f.files())
+
+    def test_quarantine_records_a_veto_for_a_proven_lesson_the_ledger_lost_so_delivery_cannot_restore_it(self):
+        self.proven = [proven_lesson("a" * 32, "x/one", "2026-11-11T00:00:00+00:00", "First")]
+        self.deliver()
+        path = self.f.root / d.DELIVERIES
+        saved = json.loads(path.read_text())
+        del saved["proven"]["a" * 32]
+        path.write_text(json.dumps(saved))
+        with mock.patch.object(d, "HOOK_READ_SECONDS", 0), redirect_stdout(io.StringIO()):
+            self.assertEqual(quarantine_cli(["--store", str(self.f.root), "quarantine", "L2", "--lessons", str(self.f.folder)]), 0)
+        self.assertEqual(json.loads(path.read_text())["proven"]["a" * 32]["status"], "vetoed")
+        with mock.patch.object(d, "HOOK_READ_SECONDS", 0):
+            self.assertEqual((self.deliver()["removed"], self.deliver()["added"]), (["L2"], []))
+        self.assertNotIn("L2", self.f.file("briefing.md"))
+        self.assertNotIn("lessons/L2-first.md", self.f.files())
 
     def check_line(self, name):
         return re.search(r"^check: (.*)$", self.f.file(name), re.M)[1]

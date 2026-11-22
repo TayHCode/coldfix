@@ -1,3 +1,4 @@
+import fcntl
 import json
 import hashlib
 import os
@@ -852,6 +853,20 @@ class HookOptionTests(ImageCase):
         self.assertEqual([job.wait() for job in jobs], [0] * 8)
         self.assertEqual(sorted(ref for row in self.logged() for ref in row["refs"]), sorted(set(ref for row in self.logged() for ref in row["refs"])))
         self.assertEqual(sum(len(row["refs"]) for row in self.logged()), 3)
+
+    def test_once_fails_open_while_the_session_lock_is_held(self):
+        seen = self.repo / ".coldrecall" / ("delivered-" + hashlib.sha256(b"s1").hexdigest() + ".json")
+        event = json.dumps(dict(cwd=str(self.repo), session_id="s1", tool_input=dict(file_path="guarded.py")))
+        with open(str(seen) + ".lock", "a", encoding="utf-8") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            result = subprocess.run(
+                [sys.executable, str(CLI), "hook", "--once", "--log", str(self.log)],
+                input=event, text=True, capture_output=True, timeout=2,
+            )
+            self.assertEqual((result.returncode, result.stdout), (0, ""))
+            self.assertFalse(seen.exists())
+            self.assertEqual(self.logged(), [])
+        self.assertEqual(len(self.hook("--once")["additionalContext"].splitlines()), 3)
 
     def test_once_in_a_repository_without_facts_leaves_it_untouched(self):
         with tempfile.TemporaryDirectory() as plain:

@@ -66,6 +66,13 @@ def load(path, empty):
     return json.loads(c.read_text(path)) if path.exists() else empty
 
 
+DELIVERY_GROUPS = ("leads", "proven", "speed", "fixes", "manual")
+
+
+def proven_vetoes(deliveries):
+    return {key for key, entry in deliveries.get("proven", {}).items() if entry["status"] == "vetoed"}
+
+
 def frontmatter(text):
     head = re.match(r"---\n(.*?)\n---\n", text, re.S)
     meta = dict(re.findall(r"^(\w+): ?(.*)$", head[1] if head else "", re.M))
@@ -486,8 +493,7 @@ def stage_delivery(root, stage, target, ask, route, tool, now, backlog=None):
                       and seen[k].get("scope_version", 1) < SCOPE_VERSION))),
                  key=lambda item: (item[1]["batch"], item[0]))
     existing = sorted(by_lead, key=lambda k: int(files[by_lead[k]]["id"][1:]))
-    number = max([int(m["id"][1:]) for m in files.values()] +
-                 [int(e["lesson"][1:]) for e in [*seen.values(), *deliveries.get("proven", {}).values()] if e.get("lesson")] + [0])
+    number = next_number(folder, deliveries) - 1
     for key in list(seen):
         entry = seen[key]
         if entry["status"] == "delivered" and key not in by_lead:
@@ -612,6 +618,13 @@ def stage_delivery(root, stage, target, ask, route, tool, now, backlog=None):
     if before and result.get("error"):
         return result
     if changed or not result.get("error"):
+        vetoed_files = {entry["lesson"]: entry for kind in ("manual", "speed", "fixes")
+                        for entry in deliveries.get(kind, {}).values() if entry.get("status") == "vetoed"}
+        for name, meta in lessons(folder).items():
+            entry = vetoed_files.get(meta["id"])
+            if entry and meta.get("status") != "retired":
+                switch_off(folder, meta["id"], reason=entry["reason"])
+                changed.append(name)
         build(stage, tool, target, approvals({**seen, **deliveries.get("speed", {}), **deliveries.get("fixes", {})}))
         hide(target, changed)
         generated = [n for n in ("INDEX.md", "briefing.md") if differs(folder, target, n)]
@@ -782,8 +795,7 @@ def proven_delivery(root, folder, deliveries, now, changed, added, removed, back
             changed.append(name)
             removed.append(entry["lesson"])
             entry["removed"] = now.isoformat()
-    number = max([int(m["id"][1:]) for m in lessons(folder).values()] +
-                 [int(e["lesson"][1:]) for e in [*deliveries["leads"].values(), *records.values()] if e.get("lesson")] + [0])
+    number = next_number(folder, deliveries) - 1
     for key, lesson in sorted(current.items(), key=lambda item: (item[1]["created"], item[0])):
         entry = records.get(key)
         check = lesson_check(lesson, named, check_records)
@@ -813,19 +825,7 @@ def proven_delivery(root, folder, deliveries, now, changed, added, removed, back
     return incomplete, len(renamed)
 
 
-def veto(root, lesson, folder=None):
-    path = root / DELIVERIES
-    deliveries = load(path, dict(leads={}))
-    entry = next((e for e in [*deliveries["leads"].values(), *deliveries.get("proven", {}).values()]
-                  if e.get("lesson") == lesson), None)
-    if entry is None:
-        return switch_off(Path(folder or FOLDER), lesson)
-    entry.update(status="vetoed", vetoed=datetime.now(timezone.utc).isoformat(), reason="vetoed by the owner")
-    entry.pop("reconsider", None)
-    c.atomic_create(path, c.encoded(deliveries), replace=True)
-
-
-def switch_off(folder, lesson):
+def switch_off(folder, lesson, by="veto", reason="vetoed by the owner"):
     name = next((n for n, m in lessons(folder).items() if m.get("id") == lesson), None) if str(folder) not in ("", ".") else None
     c.require(name is not None, f"no lesson {lesson}")
     content = (folder / name).read_text(encoding="utf-8")
@@ -833,8 +833,54 @@ def switch_off(folder, lesson):
     head, found = re.subn(r"^status: .*$", "status: retired", head, count=1, flags=re.M)
     c.require(separator and found == 1, f"cannot read the status of {lesson}")
     head = re.sub(r"^retired_(?:by|at|reason):.*\n?", "", head + "\n", flags=re.M).rstrip("\n")
-    head += f"\nretired_by: veto\nretired_at: {datetime.now(timezone.utc).isoformat()}\nretired_reason: vetoed by the owner"
+    head += f"\nretired_by: {by}\nretired_at: {datetime.now(timezone.utc).isoformat()}\nretired_reason: {reason}"
     c.atomic_create(folder / name, head + separator + body, replace=True, mode=0o664)
+    return name
+
+
+def quarantine(root, lesson, folder=None, action="quarantine"):
+    c.require(re.fullmatch(r"L[1-9][0-9]*", lesson) is not None, "lesson must be an id such as L6")
+    folder = Path(folder or FOLDER)
+    c.require(str(folder) not in ("", ".") and folder.is_dir(), "set COLDFIX_LESSONS_DIR to an existing lessons folder")
+    c.require((root / DELIVERIES).is_file(), f"no delivery ledger in {root}; pass the store that delivers the briefing")
+    with c.lesson_lock(root), c.lesson_lock(root, name=".transcript-delivery.lock"):
+        pending = veto(root, lesson, folder, action)
+    result = dict(lesson=lesson, status="retired", action=action)
+    if pending:
+        result["pending_refresh"] = pending
+    return result
+
+
+def veto(root, lesson, folder=None, action="veto"):
+    from agents_block import withdraw_copies
+    folder = Path(folder or FOLDER) if folder or FOLDER else None
+    reason = "vetoed by the owner" if action == "veto" else f"{action}d by the owner"
+    path = root / DELIVERIES
+    deliveries = load(path, dict(leads={}))
+    match = next(((kind, key, entry) for kind in DELIVERY_GROUPS for key, entry in deliveries.get(kind, {}).items()
+                  if entry.get("lesson") == lesson), None)
+    files = lessons(folder) if folder else {}
+    live = next(((name, m) for name, m in files.items() if m.get("id") == lesson), None)
+    c.require(match or live, f"no lesson {lesson}")
+    if match:
+        kind, key, entry = match
+    else:
+        name, meta = live
+        source = meta.get("source", "")
+        groups = ((PROVEN_SOURCES, "proven"), (SOURCE, "leads"), (SPEED_SOURCE, "speed"), (FIX_SOURCE, "fixes"))
+        kind = next((group for prefix, group in groups if source.startswith(prefix)), "manual")
+        key = lesson if kind == "manual" else source.split(":", 1)[1]
+        entry = deliveries.setdefault(kind, {})[key] = dict(lesson=lesson, file=name, title=meta.get("title", ""))
+    owner_veto = entry.get("reason") in ("vetoed by the owner", "quarantined by the owner", "retired by the owner")
+    if entry.get("status") != "vetoed" or not owner_veto or entry.get("reconsider"):
+        entry.update(status="vetoed", vetoed=datetime.now(timezone.utc).isoformat(), reason=reason)
+        entry.pop("reconsider", None)
+        c.atomic_create(path, c.encoded(deliveries), replace=True)
+    if live and live[1].get("status") != "retired" and (action != "veto" or kind not in ("leads", "proven")):
+        switch_off(folder, lesson, action, reason)
+    if folder and action != "veto":
+        hide(folder, [lesson + "-"])
+    return withdraw_copies(root, key) if kind == "proven" else []
 
 
 def held(folder):
@@ -1053,6 +1099,8 @@ def record_speed(root, folder, key, found, now, candidate=False):
     deliveries = load(path, dict(leads={}))
     records = deliveries.setdefault("speed", {})
     entry = records.get(key)
+    if entry and entry["status"] == "vetoed":
+        return dict(lesson=entry["lesson"], added=[])
     name = entry and entry["file"]
     if entry is None or not (folder / name).is_file():
         if not found:
@@ -1085,7 +1133,7 @@ def record_speed(root, folder, key, found, now, candidate=False):
 
 def next_number(folder, deliveries):
     return max([int(m["id"][1:]) for m in lessons(folder).values()] +
-               [int(e["lesson"][1:]) for kind in ("leads", "proven", "speed", "fixes")
+               [int(e["lesson"][1:]) for kind in DELIVERY_GROUPS
                 for e in deliveries.get(kind, {}).values() if e.get("lesson")] + [0]) + 1
 
 
@@ -1484,9 +1532,11 @@ def main(argv=None):
         return 0
     backlog = c.ordinary_path(args.backlog_store) if args.backlog_store else None
     c.require(backlog is None or (backlog / learn_daily.LEDGER).is_file(), "backlog store not found")
+    pending_refresh = []
+    if args.command == "veto":
+        with c.lesson_lock(root), c.lesson_lock(root, name=".transcript-delivery.lock"):
+            pending_refresh = veto(root, args.lesson)
     with c.lesson_lock(root, name=".transcript-delivery.lock"):
-        if args.command == "veto":
-            veto(root, args.lesson)
         if args.command == "reconsider":
             reconsider(root, args.lesson)
         if args.command == "speed":
@@ -1502,6 +1552,8 @@ def main(argv=None):
             c.require(FOLDER and Path(FOLDER).is_dir(), "set COLDFIX_LESSONS_DIR to an existing lessons folder")
             approve(root, args.lesson, args.by, args.repos, Path(FOLDER))
         result = deliver(root, backlog=backlog)
+        if pending_refresh:
+            result["pending_refresh"] = pending_refresh
         if args.command == "deliver" and not result.get("error"):
             project_holdout = Path(FOLDER) / HELD_BACK_PROJECTS
             if not project_holdout.exists() or c.read_text(project_holdout):

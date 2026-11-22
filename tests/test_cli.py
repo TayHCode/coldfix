@@ -161,7 +161,7 @@ class CliCase(unittest.TestCase):
             "home": ("home_path", "/home/example/private"),
             "root_home": ("home_path", "/root/example-private"),
             "named_home": ("home_path", "~example/private"),
-            "windows_home": ("home_path", "C:\\Users\\ExamplePerson\\private"),
+            "windows_home": ("home_path", "C:\\Users\\user\\private"),
             "token": ("credential", "ghp_" + "ExampleOnlyCanary1234567890"),
             "key": ("credential", "-----BEGIN " + "PRIVATE KEY-----"),
             "entropy": ("credential", "aB" + "3dE6gH9jK2mN5pQ8sT1vW4yZ7cF0iL"),
@@ -384,7 +384,11 @@ class CliTests(CliCase):
             os.environ.pop("COLDFIX_FLEET_CLI", None)
             self.assertEqual(json.loads(self.run_cli("doctor").stdout),
                              {"sandbox": "available", "fleet_cli": "off: set COLDFIX_FLEET_CLI to the command that " + c.FLEET_CLI_USE})
-        with patch.dict(os.environ, {"COLDFIX_FLEET_CLI": "acme"}):
+        tools = self.cwd / "tools"
+        tools.mkdir()
+        (tools / "acme").write_text("#!/bin/sh\n")
+        (tools / "acme").chmod(0o755)
+        with patch.dict(os.environ, {"COLDFIX_FLEET_CLI": "acme", "PATH": f"{tools}{os.pathsep}{os.environ['PATH']}"}):
             self.assertEqual(json.loads(self.run_cli("doctor").stdout)["fleet_cli"], "acme: " + c.FLEET_CLI_USE)
 
     def test_doctor_without_bwrap_names_the_missing_prerequisite_and_the_fix(self):
@@ -852,13 +856,13 @@ class CliTests(CliCase):
         group, _ = self.recurring()
         proposal = self.proposal(group)
         self.capture(error="unrelated", command="other")
-        self.run_cli("capture", "--command", "other", "--repo", "owner/coldfix", "--agent", "worker", stdin="unrelated")
+        self.run_cli("capture", "--command", "other", "--repo", "sample-org/coldfix", "--agent", "worker", stdin="unrelated")
         self.export(proposal, "protocol.md")
         self.assertIn("coldfix:failure:", (self.cwd / "protocol.md").read_text())
         inputs = self.public_inputs()
         gate = self.cwd / "gate.py"
         gate.write_text(gate.read_text().replace("assert 'example' in a.private_repo",
-            "assert 'example' in a.private_repo and 'owner/coldfix' in a.private_repo and 'coldfix' in a.private_repo"))
+            "assert 'example' in a.private_repo and 'sample-org/coldfix' in a.private_repo and 'coldfix' in a.private_repo"))
         self.run_cli("export", "--proposal", proposal, "--reviewed", "--output", "public-protocol.md", *inputs)
         self.assertTrue((self.cwd / "public-protocol.md").exists())
         self.run_cli("capture", "--command", "other", "--repo", "coldfix", "--agent", "worker", stdin="unrelated")
@@ -875,7 +879,7 @@ class CliTests(CliCase):
     def test_protocol_classification_refuses_a_candidate_path_with_history(self):
         group, _ = self.recurring()
         proposal = self.proposal(group)
-        self.run_cli("capture", "--command", "other", "--repo", "owner/coldfix", "--agent", "worker", stdin="unrelated")
+        self.run_cli("capture", "--command", "other", "--repo", "sample-org/coldfix", "--agent", "worker", stdin="unrelated")
         inputs = self.public_inputs()
         source = self.cwd / "gate-source"
         candidate = source / "exports/prior.md"
@@ -1144,10 +1148,10 @@ class CliTests(CliCase):
             subprocess.run(["git", "-C", str(source), *args], capture_output=True, check=True)
         self.run_cli("export", "--proposal", proposal, "--reviewed", "--output", "real-gate.md", *inputs)
         self.assertIn("# Verify the count", (self.cwd / "real-gate.md").read_text())
-        self.run_cli("capture", "--command", "other", "--repo", "owner/coldfix", "--agent", "worker", stdin="unrelated")
+        self.run_cli("capture", "--command", "other", "--repo", "sample-org/coldfix", "--agent", "worker", stdin="unrelated")
         self.run_cli("export", "--proposal", proposal, "--reviewed", "--output", "real-protocol.md", *inputs)
         self.assertTrue((self.cwd / "real-protocol.md").exists())
-        self.run_cli("capture", "--command", "other", "--repo", "owner/private-staging-label", "--agent", "worker", stdin="unrelated")
+        self.run_cli("capture", "--command", "other", "--repo", "sample-org/private-staging-label", "--agent", "worker", stdin="unrelated")
         (source / "SECURITY.md").write_text("Archive private-staging-label.\n")
         subprocess.run(["git", "-C", str(source), "add", "."], capture_output=True, check=True)
         subprocess.run(["git", "-C", str(source), "-c", "user.name=Stage Author", "-c", "user.email=stage-author",
@@ -1414,6 +1418,20 @@ class CliTests(CliCase):
 
 
 class ReleaseQuickstartTests(unittest.TestCase):
+    def test_first_run_finds_a_shipped_fixture_before_recurring_setup(self):
+        root = CLI.parent
+        readme = (root / "README.md").read_text()
+        fixture = "library/reject-linter-error-output/fixtures/bad"
+        scan = f"coldfix check {fixture}"
+        before_setup = readme.split("coldfix init --yes", 1)[0]
+        self.assertIn(scan, before_setup.splitlines())
+        self.assertIn(f"{fixture}/lint.py", (root / "public-export.txt").read_text().splitlines())
+        done = subprocess.run([sys.executable, str(CLI), "check", fixture], cwd=root,
+                              capture_output=True, text=True, timeout=120)
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn("reject-linter-error-output", done.stdout)
+        self.assertIn("lint.py:2", done.stdout)
+
     def test_each_quickstart_entry_names_its_readme_line(self):
         root = CLI.parent
         manifest = json.loads((root / "release-check.json").read_text())

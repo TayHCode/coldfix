@@ -85,6 +85,19 @@ class ReplayEnvTests(unittest.TestCase):
             self.assertTrue((first[0] / 'pyvenv.cfg').is_file())
             self.assertEqual(calls, [['attrs']])
 
+    def test_supplied_names_include_what_the_built_env_installed_under_another_import_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            revision = commit(root / 'repo', {'requirements.txt': 'PyYAML>=6\n'})
+            self.assertEqual(replay_env.supplied(root / 'cache', root / 'repo', revision), {'pyyaml'})
+
+            def install(env, requirements, roots, deadline):
+                (env / 'lib/python3/site-packages/yaml').mkdir(parents=True)
+                (env / 'pyvenv.cfg').write_text('home = /usr/bin\n', encoding='utf-8')
+            with mock.patch.object(replay_env, 'install', side_effect=install):
+                replay_env.build(root / 'cache', root / 'repo', revision)
+            self.assertEqual(replay_env.supplied(root / 'cache', root / 'repo', revision), {'pyyaml', 'yaml'})
+
     def test_failed_install_is_host_only_with_the_error_and_not_retried_the_same_day(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import shlex
 import subprocess
 import sys
 from urllib.parse import quote, urlsplit
@@ -57,7 +58,7 @@ def seconds(value):
 
 
 def instant(value):
-    need(isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})", value))
+    need(isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)", value))
     c.occurred(value)
     return value
 
@@ -276,6 +277,58 @@ def trace_events(content, repo, occurred):
     return events
 
 
+UNDO_STEP = "step_id timestamp agent command reversibility reason pre_snapshot_id post_snapshot_id changed_paths"
+
+
+def coldrewind_step(step):
+    fields(step, UNDO_STEP)
+    integer(step["step_id"])
+    instant(step["timestamp"])
+    line(step["agent"])
+    need(isinstance(step["command"], list) and step["command"])
+    for argument in step["command"]:
+        c.text(argument, "step command", optional=True)
+    need(step["reversibility"] in ("reversible", "partial", "irreversible"))
+    c.text(step["reason"], "step reason", optional=True)
+    for key in ("pre_snapshot_id", "post_snapshot_id"):
+        need(step[key] is None or isinstance(step[key], str) and line(step[key]))
+    need(isinstance(step["changed_paths"], list))
+    for path in step["changed_paths"]:
+        c.text(path, "changed path")
+    return step
+
+
+def coldrewind_event(value, repo, log=None):
+    fields(value, "schema_version step")
+    need(type(value["schema_version"]) is int and value["schema_version"] == 1)
+    step = coldrewind_step(value["step"])
+    command = step["command"]
+    need(step["agent"] == "coldrewind" and len(command) == 3 and command[:2] == ["coldrewind", "undo"]
+         and re.fullmatch(r"[1-9]\d*", command[2]))
+    metadata = dict(type="coldrewind", repo=repo, step=step)
+    undone = step
+    if log is not None:
+        fields(log, "schema_version steps")
+        need(type(log["schema_version"]) is int and log["schema_version"] == 1 and isinstance(log["steps"], list))
+        steps = {}
+        for row in log["steps"]:
+            need(coldrewind_step(row)["step_id"] not in steps)
+            steps[row["step_id"]] = row
+        undone = steps.get(int(command[2]))
+        need(undone is not None)
+        metadata["undone"] = undone
+    ref = f"coldrewind:{repo}:undo:{step['step_id']}:" + quote(step["timestamp"], safe="")
+    return dict(kind="revert", repo=repo, command=shlex.join(undone["command"]), error=c.encoded(metadata).strip(),
+                agent=undone["agent"], thread="", source_ref=ref, occurred=step["timestamp"])
+
+
+def coldrewind_content(metadata):
+    fields(metadata, "type repo step", "undone")
+    log = dict(schema_version=1, steps=[metadata["undone"]]) if "undone" in metadata else None
+    event = coldrewind_event(dict(schema_version=1, step=metadata["step"]), repo_name(metadata["repo"]), log)
+    return event["command"], c.encoded(sorted(metadata["step"]["changed_paths"])), False
+
+
 def unclassified(metadata):
     return {k: v for k, v in metadata.items() if k != "classification"}
 
@@ -323,6 +376,7 @@ GROUPING = {
     "settle-codex-lesson": settle_codex_content,
     "coldpass": coldpass_content,
     "t3": t3_content,
+    "coldrewind": coldrewind_content,
 }
 
 
@@ -610,6 +664,10 @@ def main(argv=None):
     command.add_argument("--input", required=True, help=".cold/verify-trace.jsonl from the repository root")
     command.add_argument("--repo", required=True)
     command.add_argument("--occurred", required=True, help="ISO timestamp with timezone for the verify run")
+    command = modes.add_parser("coldrewind", help="import one `coldrewind undo --json` result (schema_version 1) as revert evidence")
+    command.add_argument("--input", required=True)
+    command.add_argument("--repo", required=True)
+    command.add_argument("--log", help="`coldrewind log --json` output (schema_version 1); the undone step's agent and command are used")
     command = modes.add_parser("github", help="fetch and import one completed failed GitHub run")
     command.add_argument("--repo", required=True)
     command.add_argument("--run-id", type=int, required=True)
@@ -631,6 +689,10 @@ def main(argv=None):
         elif args.mode == "trace":
             rows = trace_events(c.read_text(args.input), repo_name(args.repo), args.occurred)
             result = import_records(root, [record(row) for row in rows])
+        elif args.mode == "coldrewind":
+            value = json.loads(c.read_text(args.input), object_pairs_hook=c.unique_object)
+            log = json.loads(c.read_text(args.log), object_pairs_hook=c.unique_object) if args.log else None
+            result = import_records(root, [record(coldrewind_event(value, repo_name(args.repo), log))])
         elif args.mode == "github":
             result = import_records(root, [fetch(repo_name(args.repo), integer(args.run_id))])
         else:

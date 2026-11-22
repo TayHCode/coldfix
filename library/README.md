@@ -85,6 +85,14 @@ python3 library/rerun.py closing-fence-length fence-info-strings
 
 Repository proofs fetch commits from GitHub, so they need network access.
 
+The runner counts each proof it starts, including incomplete attempts. With no lesson names,
+it lists entries without runnable proofs as `JUDGED` and runs the available proofs.
+
+- Exit `0` means at least one proof ran and all results matched expectations.
+- Exit `1` means a completed proof disagreed with expectations.
+- Exit `2` takes precedence for incomplete proofs, unknown lessons, explicitly requested lessons
+  without runnable proofs, or runs that started zero proofs.
+
 ## Add newly proven lessons
 
 `coldfix export --format library --output library --lessons <transcript lesson folder>` adds each proven

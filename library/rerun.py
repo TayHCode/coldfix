@@ -96,30 +96,44 @@ def proof_kind(lesson):
 
 
 def main(slugs):
+    requested = bool(slugs)
     slugs = slugs or sorted(name for name in os.listdir(LIBRARY)
                             if os.path.isfile(os.path.join(LIBRARY, name, "rule.md")))
-    failed = 0
+    executed = 0
+    failed = False
+    incomplete = False
     for slug in slugs:
         lesson = os.path.join(LIBRARY, slug)
         if not os.path.isfile(os.path.join(lesson, "rule.md")):
             print("UNKNOWN", slug)
-            failed += 1
+            incomplete = True
             continue
         prove = proof_kind(lesson)
         if prove is None:
-            print("JUDGED", slug)
+            if requested:
+                print("INCOMPLETE", slug, "(no runnable proof)")
+                incomplete = True
+            else:
+                print("JUDGED", slug)
             continue
         proofs = [prove]
         if prove is not repository_proof and os.path.isfile(os.path.join(lesson, "proof.json")):
             proofs.append(repository_proof)
         try:
-            ok = all(proof(lesson) for proof in proofs)
+            for proof in proofs:
+                executed += 1
+                if not proof(lesson):
+                    print("FAIL", slug)
+                    failed = True
+                    break
+            else:
+                print("PASS", slug)
         except (OSError, subprocess.CalledProcessError, Incomplete):
             print("INCOMPLETE", slug)
-            failed += 1
-            continue
-        failed += not ok
-        print("PASS" if ok else "FAIL", slug)
+            incomplete = True
+    print(f"Executed proofs: {executed}")
+    if incomplete or executed == 0:
+        return 2
     return 1 if failed else 0
 
 

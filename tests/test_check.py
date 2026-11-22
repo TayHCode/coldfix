@@ -1,5 +1,6 @@
 import contextlib
 import io
+import itertools
 import json
 import os
 from pathlib import Path
@@ -66,6 +67,28 @@ class CheckTests(unittest.TestCase):
         self.write(good)
         code, rows = self.lessons()
         self.assertEqual((code, rows[lesson]["status"], rows[lesson]["hits"]), (0, "PASS", []))
+
+    def action(self, environment, coldbox=None):
+        coldbox = {} if coldbox is None else coldbox
+        self.assertTrue((ROOT / "action.yml").is_file(), "action.yml is missing")
+        block = (ROOT / "action.yml").read_text().split("      run: |\n", 1)[1].splitlines(keepends=True)
+        script = "".join(line.removeprefix("        ") for line in itertools.takewhile(lambda line: line.startswith("        ") or not line.strip(), block))
+        subprocess.run(["git", "init", "-q", str(self.tree)], check=True)
+        env = {key: value for key, value in os.environ.items() if key != "COLDBOX_JOB_DIR"}
+        env.update(GITHUB_ACTION_PATH=str(ROOT), GITHUB_WORKSPACE=str(self.tree), RUNNER_ENVIRONMENT=environment, **coldbox)
+        return subprocess.run(["bash", "-c", script], cwd=ROOT, capture_output=True, text=True, timeout=300, env=env)
+
+    def test_action_fails_a_planted_hit_passes_clean_code_and_refuses_non_coldbox_runners(self):
+        self.write({"app.py": "def add(a, b):\n    return a + b\n"})
+        clean = self.action("self-hosted", dict(COLDBOX_JOB_DIR=str(self.tree.parent)))
+        self.assertEqual(clean.returncode, 0, clean.stdout + clean.stderr)
+        self.write({"notes.md": f"{OPEN} HEAD\nmine\n=======\ntheirs\n{CLOSE} branch\n"})
+        planted = self.action("self-hosted", dict(COLDBOX_JOB_DIR=str(self.tree.parent)))
+        self.assertEqual(planted.returncode, 1, planted.stdout + planted.stderr)
+        self.assertIn("FAIL: conflict-markers", planted.stdout)
+        for hosted in (self.action("github-hosted", dict(COLDBOX_JOB_DIR=str(self.tree.parent))), self.action("self-hosted")):
+            self.assertEqual((hosted.returncode, hosted.stdout), (2, ""))
+            self.assertIn("runs-on: [self-hosted, coldbox]", hosted.stderr)
 
     def test_module_level_unittest_test_is_a_hit(self):
         self.assert_scan(

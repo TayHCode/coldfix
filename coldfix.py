@@ -234,9 +234,16 @@ def fleet_cli():
 FLEET_CLI_USE = "resolves model roles (model get <role>) and labels imported review and verify records"
 
 
+def fleet_cli_missing(name):
+    return f"{name} is not installed; install it or set COLDFIX_MODEL_CMD to run standalone"
+
+
+MODEL_ROUTE_OFF = "model resolution is off: set COLDFIX_FLEET_CLI, or COLDFIX_MODEL_CMD to run standalone"
+
+
 def fleet_model(*args):
     cli = fleet_cli()
-    require(cli, "model resolution is off: set COLDFIX_FLEET_CLI")
+    require(cli, MODEL_ROUTE_OFF)
     return [cli, "model", *args]
 
 
@@ -265,6 +272,18 @@ def read_text(path):
         return stream.read()
 
 
+def read_install_record(path):
+    if not path.exists():
+        return {}
+    try:
+        record = json.loads(read_text(path), object_pairs_hook=unique_object)
+    except (ValueError, RecursionError):
+        raise ColdfixError("invalid installation ownership record") from None
+    require(isinstance(record, dict) and isinstance(record.get("store"), str) and Path(record["store"]).is_absolute(),
+            "invalid installation ownership record")
+    return record
+
+
 def atomic_create(path, content, *, replace=False, mode=None):
     path = ordinary_path(path)
     require(replace or not path.exists(), "destination already exists; left unchanged")
@@ -274,7 +293,8 @@ def atomic_create(path, content, *, replace=False, mode=None):
     try:
         if mode is not None:
             os.fchmod(fd, mode)
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        options = {"mode": "wb"} if isinstance(content, bytes) else {"mode": "w", "encoding": "utf-8"}
+        with os.fdopen(fd, **options) as stream:
             stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())
@@ -1519,8 +1539,10 @@ FORMATS = ("jsonl", "agentfleet", "cold-review", "cold-verify", "coldbox", "run-
 def doctor():
     import replay_isolation
     name = fleet_cli()
-    value = dict(replay_isolation.require_sandbox(),
-                 fleet_cli=f"{name}: {FLEET_CLI_USE}" if name else f"off: set COLDFIX_FLEET_CLI to the command that {FLEET_CLI_USE}")
+    state = (f"{name}: {FLEET_CLI_USE}" if name and shutil.which(name)
+             else "off: " + fleet_cli_missing(name) if name
+             else f"off: set COLDFIX_FLEET_CLI to the command that {FLEET_CLI_USE}")
+    value = dict(replay_isolation.require_sandbox(), fleet_cli=state)
     print(f"coldfix: private_hosts: {private_hosts_status()}", file=sys.stderr)
     return value
 
@@ -1645,6 +1667,7 @@ def draft(args, root, store):
         "Keep failure, fix, and rule concise and free of private source details.\n"
         + encoded(dict(group=args.group, evidence=evidence, **revisions, diff=diff)))
     fields = ("check_script", "expected_failure", "kind", "failure", "fix", "rule")
+    require(os.environ.get("COLDFIX_MODEL_CMD") or fleet_cli(), MODEL_ROUTE_OFF)
     try:
         if os.environ.get("COLDFIX_MODEL_CMD"):
             row = model_command("drafter", prompt, dict(type="object", additionalProperties=False, required=list(fields),
@@ -2128,18 +2151,21 @@ def admission_projection(admission):
 
 def export_lessons(args, root, store):
     from flakiness import detect
+    from transcript_delivery import DELIVERIES, load, proven_vetoes
 
+    vetoed = proven_vetoes(load(root / DELIVERIES, {}))
     flaky = detect(store)[1]
     invalidations = read_invalidations(root)
     if args.format == "briefing":
         require(args.lesson is None, "briefing exports all eligible latest lessons; omit --lesson")
         records = [row for row in latest_lessons(store).values()
-                   if lesson_scope(row, store) == "global" and row["status"] == "active" and row["verification"] == "proven"
+                   if row["lesson_id"] not in vetoed and lesson_scope(row, store) == "global" and row["status"] == "active" and row["verification"] == "proven"
                    and row.get("failure", "").strip() and row.get("fix", "").strip()
                    and invalidations.get(row["lesson_id"]) != row["id"]]
     else:
         require(args.lesson is not None, "Coldlocker export requires --lesson or --proposal")
         records = [current_lesson(args.lesson, store, by_lesson_id=True)]
+        require(records[0]["lesson_id"] not in vetoed, "lesson was vetoed")
         require(records[0]["status"] in LIVE and records[0]["verification"] == "proven",
                 "lesson export requires an active or enforced proven revision; run the next command replay printed")
     bodies = []
@@ -2290,8 +2316,11 @@ def check_library(tree="."):
     spec = importlib.util.spec_from_file_location("library_rerun", LIBRARY / "rerun.py")
     rerun = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(rerun)
-    tree = Path(tree).resolve()
-    require(tree.is_dir(), "check needs a directory to scan")
+    try:
+        tree = Path(tree).resolve(strict=True)
+    except (OSError, RuntimeError):
+        tree = None
+    require(tree and tree.is_dir(), "check needs a directory to scan")
     results = []
     for lesson in sorted(path for path in LIBRARY.iterdir() if (path / "rule.md").is_file()):
         rule = read_text(lesson / "rule.md")
@@ -2527,25 +2556,39 @@ def export(args, root, store):
     return {"exported": True, "proposal_id": proposal["id"], "evidence_count": len(proposal["evidence"])}
 
 
+EXIT_CONTRACT = ("Exit codes: 0 pass, 1 finding or failed check, 2 usage or error. "
+                 "With --json, stdout is one object with schema_version 1 and exit_code.")
+
+
+def wants_json(argv):
+    options = argv[:argv.index("--")] if "--" in argv else argv
+    return any(len(flag) > 2 and "--json".startswith(flag) for flag in (arg.partition("=")[0] for arg in options))
+
+
+def json_result(exit_code, value=None):
+    return encoded({**(value or {}), "schema_version": 1, "exit_code": exit_code})
+
+
 class Parser(argparse.ArgumentParser):
     def error(self, message):
         self.exit(2, "coldfix: invalid arguments; see --help\n")
 
 
 def parser():
-    result = Parser(description=__doc__)
+    result = Parser(description=__doc__, epilog=EXIT_CONTRACT)
     result.add_argument("--store", default=".coldfix", help="private local store (default: .coldfix in the current directory)")
     commands = result.add_subparsers(dest="action", required=True)
-    command = commands.add_parser("check", help="run the library's static portable checks on a directory and list each hit as file:line with its fix")
+    command = commands.add_parser("check", epilog=EXIT_CONTRACT, help="run the library's static portable checks on a directory and list each hit as file:line with its fix")
     command.add_argument("path", nargs="?", default=".", help="tree to scan (default: the current directory)")
     command.add_argument("--json", action="store_true", help="emit the results as JSON")
-    commands.add_parser("doctor", help="check that the replay sandbox (bubblewrap) can run here and print the fix if not")
+    command = commands.add_parser("doctor", epilog=EXIT_CONTRACT, help="check that the replay sandbox (bubblewrap) can run here and print the fix if not")
+    command.add_argument("--json", action="store_true", help="emit the diagnostic results as JSON")
     command = commands.add_parser("setup", help="check the automatic loop's prerequisites and run its first pass")
     command.add_argument("--owner", help="GitHub owner whose private repositories' CI failures to collect (default: the gh login)")
     command.add_argument("--transcripts", nargs="+", required=True, help="folders of agent transcripts, e.g. ~/.claude/projects")
     command.add_argument("--backend", choices=("local",), required=True, help="where replays run: local bubblewrap")
     command.add_argument("--limit", type=int, default=100, help="most transcripts scanned per run (default: 100)")
-    command = commands.add_parser("status", help="summarize one private store or its latest completed run without writes")
+    command = commands.add_parser("status", epilog=EXIT_CONTRACT, help="summarize one private store or its latest completed run without writes")
     command.add_argument("--json", action="store_true", help="emit the summary as JSON")
     command = commands.add_parser("agents", help="write the repository's replay-proven lessons into its AGENTS.md (and CLAUDE.md) block")
     command.add_argument("--repo", default=".", help="repository checkout (default: current directory)")
@@ -2555,6 +2598,8 @@ def parser():
     command.add_argument("--runs-on", nargs="+", default=["ubuntu-latest"], metavar="LABEL", help="runner labels for rule checks (default: ubuntu-latest)")
     command.add_argument("--repo", default=".", help="repository root (default: current directory)")
     command.add_argument("--dry-run", action="store_true", help="print the planned changes without writing")
+    command = commands.add_parser("uninstall", help="remove this store's learning schedule, model wrapper and managed repository hooks")
+    command.add_argument("--repo", help="repository where install was run (default: current directory if a repository)")
     command = commands.add_parser("run", help="ingest retained inputs and lessons into an isolated private measurement run")
     command.add_argument("--input", required=True, help="private JSON manifest; relative paths resolve beside this file")
     command = commands.add_parser("capture", help="record one failure without executing or echoing it")
@@ -2663,6 +2708,11 @@ def parser():
     command.add_argument("--timeout", type=float, default=300.0, help="per-witness timeout in seconds (default: 300)")
     command.add_argument("--notes", help="folder to write one Markdown note per proven lesson, with status and last re-check")
     command.add_argument("--backlog-store", help="backlog store whose replay proofs also back lessons in --lessons")
+    for action in ("quarantine", "retire"):
+        command = commands.add_parser(action, help="veto and retire one lesson in this store and lessons folder now; scripts/quarantine-lesson also updates the shared and desktop copies")
+        command.add_argument("lesson", help="lesson id, such as L6")
+        command.add_argument("--lessons", default=os.environ.get("COLDFIX_LESSONS_DIR"),
+                             help="shared lessons folder (default: COLDFIX_LESSONS_DIR)")
     command = commands.add_parser("export", help="export complete proven lessons or diagnostic proposals")
     source = command.add_mutually_exclusive_group()
     source.add_argument("--proposal")
@@ -2684,7 +2734,13 @@ def parser():
 
 
 def main(argv=None):
-    args = parser().parse_args(argv)
+    argv = sys.argv[1:] if argv is None else argv
+    try:
+        args = parser().parse_args(argv)
+    except SystemExit as stop:
+        if stop.code == 2 and wants_json(argv):
+            print(json_result(2), end="")
+        raise
     try:
         if args.action == "init":
             value = init_config(args)
@@ -2698,8 +2754,15 @@ def main(argv=None):
             from repo_install import install
             print(install(args))
             return 0
+        elif args.action == "uninstall":
+            from repo_install import uninstall
+            repo = ordinary_path(args.repo or ".")
+            uninstall(repo if args.repo or (repo / ".git").exists() else None, args.store)
+            return 0
         elif args.action == "check":
             value = check_library(args.path)
+            if args.json and value["_exit"] == 2:
+                print("coldfix: check incomplete; see each INCOMPLETE lesson's reason", file=sys.stderr)
             if not args.json:
                 for result in value["lessons"]:
                     print(f"{result['status']}: {result['lesson']} ({result['title']})")
@@ -2712,6 +2775,9 @@ def main(argv=None):
                 return value["_exit"]
         elif args.action == "doctor":
             value = doctor()
+        elif args.action in ("quarantine", "retire"):
+            from transcript_delivery import quarantine
+            value = quarantine(ordinary_path(args.store), args.lesson, args.lessons, args.action)
         elif args.action == "setup":
             from loop_setup import setup
             value = setup(args)
@@ -2746,12 +2812,17 @@ def main(argv=None):
                     handlers = {}
                 value = {**handlers, "learn": learn, "draft": draft, "ingest-and-propose": ingest_and_propose, "capture": capture, "ingest": ingest, "group": group, "propose": propose, "export": export, "lesson": lesson, "explain": explain, "replay": replay, "measure": measure}[args.action](args, root, store)
         exit_code = value.pop("_exit", 0) if isinstance(value, dict) else 0
-        print(encoded(value), end="")
+        print(json_result(exit_code, value) if getattr(args, "json", False) else encoded(value), end="")
         return exit_code
     except ColdfixError as error:
         print("coldfix: " + str(error), file=sys.stderr)
-    except (OSError, UnicodeError):
-        print("coldfix: cannot read or write local files; existing records left unchanged", file=sys.stderr)
+    except (OSError, UnicodeError) as error:
+        name = os.environ.get("COLDFIX_FLEET_CLI")
+        missing = name and getattr(error, "filename", None) == name
+        print("coldfix: " + ("model resolution is off: " + fleet_cli_missing(name) if missing
+                             else "cannot read or write local files; existing records left unchanged"), file=sys.stderr)
+    if getattr(args, "json", False):
+        print(json_result(2), end="")
     return 2
 
 

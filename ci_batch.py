@@ -129,17 +129,17 @@ def measure(root, ids):
     _, store = c.load_store(root)
     drafts = learn_daily_ledger(root)["drafts"]
     mine = {key: row for key, row in drafts.items() if set(row["evidence"]) & ids}
-    reasons = Counter()
-    for row in mine.values():
-        for attempt in row.get("replay_attempts", []):
-            if attempt.get("failure") in ids or attempt.get("failure") is None:
-                reasons[short(attempt["reason"])] += 1
+    attempts = [attempt for row in mine.values() for attempt in row.get("replay_attempts", [])
+                if attempt.get("failure") in ids or attempt.get("failure") is None]
+    reasons = Counter(short(attempt["reason"]) for attempt in attempts)
+    environments = learn_replay.rejection_environments(attempts)
     return dict(
         drafted=len(mine), draft_pass=sum(row["verdict"] == "PASS" for row in mine.values()),
         proven=sum(proved_here(store, row, ids) for row in mine.values()),
         rejected=sum(row.get("replay", {}).get("status") == "rejected" for row in mine.values()),
         unittest_diagnostics=sum(bool(DIAGNOSTIC.search(store["failures"][ref]["error"])) for ref in ids),
-        reject_reasons=dict(reasons.most_common(10)))
+        reject_reasons=dict(reasons.most_common(10)),
+        **(dict(rejection_environments=environments) if environments else {}))
 
 
 def proved_here(store, draft, ids):
