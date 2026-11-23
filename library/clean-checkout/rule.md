@@ -2,6 +2,10 @@
 id: clean-checkout
 title: Keep worktrees and runtime state out of git status
 proof: rerunnable
+scope: public
+category: git-and-ci
+rank: 16
+featured: false
 ---
 # Keep worktrees and runtime state out of git status
 

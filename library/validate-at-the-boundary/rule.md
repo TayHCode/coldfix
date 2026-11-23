@@ -2,6 +2,10 @@
 id: validate-at-the-boundary
 title: Validate at the boundary: reject, don't coerce
 proof: rerunnable
+scope: public
+category: data-and-parsing
+rank: 5
+featured: true
 ---
 # Validate at the boundary: reject, don't coerce
 

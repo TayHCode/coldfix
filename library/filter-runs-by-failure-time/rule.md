@@ -2,6 +2,10 @@
 id: filter-runs-by-failure-time
 title: Filter workflow runs by failure time, not creation time
 proof: rerunnable
+scope: public
+category: git-and-ci
+rank: 24
+featured: false
 ---
 # Filter workflow runs by failure time, not creation time
 

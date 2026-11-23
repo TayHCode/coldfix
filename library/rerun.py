@@ -48,6 +48,15 @@ def check_holds(check, cwd, exit_code):
 def fixture_proof(lesson, fixtures=None):
     fixtures = fixtures or os.path.join(lesson, "fixtures")
     check = os.path.join(lesson, "check.py")
+    if not os.path.isfile(check):
+        scan = os.path.join(lesson, "scan.py")
+        for side, status in (("bad", "FAIL"), ("good", "PASS")):
+            report = run_check(scan, os.path.join(fixtures, side))
+            hits = report.get("hits") if report else None
+            if (not isinstance(hits, list) or not all(isinstance(hit, str) for hit in hits)
+                    or bool(hits) != (side == "bad") or report["status"] != status):
+                return False
+        return True
     return (check_holds(check, os.path.join(fixtures, "bad"), 1)
             and check_holds(check, os.path.join(fixtures, "good"), 0))
 

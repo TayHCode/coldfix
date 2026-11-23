@@ -149,6 +149,21 @@ TEMPLATE = (NO_SRC_TEMPLATE
                      '        result = run(command, cwd=root, capture_output=True, text=True, errors="replace",\n'
                      '                     env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1", PYTHONPATH=pythonpath))\n', 1))
 
+PRE_DOCTEST_TEMPLATE = TEMPLATE
+TEMPLATE = (TEMPLATE[:TEMPLATE.index("    statuses = ")] + r'''    statuses = re.findall(
+        r"^(\w+) \(([\w.]+)\)(?:\n(.*?))? \.\.\. (ok|skipped|FAIL|ERROR)\b", result.stderr, re.M)
+    diagnosed = set()
+    skipped = []
+    for name, owner, description, status in statuses:
+        doctest = description == "Doctest: " + owner + "." + name
+        if target and name == target[1] and (not doctest or status == "skipped"):
+            diagnosed.add(status)
+        if status == "skipped" and (re.fullmatch(r"test\w*", name) or doctest):
+            skipped.append(owner + "." + name if doctest else name)
+    if skipped:
+        print("Skipped tests: " + ", ".join(skipped), file=sys.stderr)
+''' + TEMPLATE[TEMPLATE.index("    summary = "):])
+
 LEGACY_EXISTING_TEMPLATE = '''import hashlib
 import json
 import os

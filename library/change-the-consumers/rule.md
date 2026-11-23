@@ -2,6 +2,10 @@
 id: change-the-consumers
 title: When a producer changes, change every consumer in the same change
 proof: rerunnable
+scope: public
+category: data-and-parsing
+rank: 27
+featured: false
 ---
 # When a producer changes, change every consumer in the same change
 

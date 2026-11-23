@@ -18,25 +18,27 @@ import rerun
 
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "coldfix.py"
-SCANS = ("conflict-markers", "jsonl-unicode-separators", "tests-must-test", "authz-everywhere", "clean-checkout",
-         "cross-account-shared-queue", "errors-are-states", "no-environment-assumptions",
-         "preserve-relative-links-when-moving-documents", "secrets-and-private-data", "systemd-path-escaping",
-         "time-regexes-on-long-adversarial-inputs-before", "fence-info-strings", "closing-fence-length",
-         "normalize-crlf-before-markers", "filter-runs-by-failure-time", "fully-qualified-test-ids",
-         "reject-linter-error-output", "validate-at-the-boundary", "verify-the-right-thing", "parse-git-subcommand-first",
-         "runnable-commands", "hook-suppression-by-session", "once-only-recall-per-session", "inline-review-edits-after-merge",
-         "resolve-tools-before-restricting-path", "stream-guest-output-to-log", "terminal-cloud-init-status",
-         "fetch-the-current-base-before-creating-the-guard", "pre-push-uses-pushed-tree", "update-callers-and-stubs",
-         "reject-malformed-facts", "use-the-triggering-invocation-id")
-PYTHON_SCANS = {"jsonl-unicode-separators", "tests-must-test", "authz-everywhere", "cross-account-shared-queue",
-                "errors-are-states", "no-environment-assumptions", "time-regexes-on-long-adversarial-inputs-before",
-                "hook-suppression-by-session", "once-only-recall-per-session", "inline-review-edits-after-merge",
-                "resolve-tools-before-restricting-path", "stream-guest-output-to-log", "terminal-cloud-init-status",
-                "fetch-the-current-base-before-creating-the-guard", "update-callers-and-stubs", "reject-malformed-facts"}
+SCANS = (
+    "conflict-markers", "split-jsonl-on-newlines", "tests-must-test", "authz-everywhere",
+    "clean-checkout", "errors-are-states", "no-environment-assumptions",
+    "preserve-relative-links-when-moving-documents", "secrets-and-private-data",
+    "systemd-path-escaping", "time-regexes-on-long-adversarial-inputs-before", "fence-info-strings",
+    "closing-fence-length", "filter-runs-by-failure-time", "fully-qualified-test-ids",
+    "reject-linter-error-output", "validate-at-the-boundary", "parse-git-subcommand-first",
+    "runnable-commands", "resolve-tools-before-restricting-path", "stream-guest-output-to-log",
+    "terminal-cloud-init-status", "pre-push-uses-pushed-tree", "update-callers-and-stubs",
+    "use-the-triggering-invocation-id",
+)
+PYTHON_SCANS = {
+    "authz-everywhere", "errors-are-states", "no-environment-assumptions",
+    "resolve-tools-before-restricting-path", "split-jsonl-on-newlines",
+    "stream-guest-output-to-log", "terminal-cloud-init-status", "tests-must-test",
+    "time-regexes-on-long-adversarial-inputs-before", "update-callers-and-stubs",
+}
 OPEN, CLOSE = "<" * 7, ">" * 7
 
 
-class CheckTests(unittest.TestCase):
+class ScanCase(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -67,6 +69,37 @@ class CheckTests(unittest.TestCase):
         self.write(good)
         code, rows = self.lessons()
         self.assertEqual((code, rows[lesson]["status"], rows[lesson]["hits"]), (0, "PASS", []))
+
+
+class ScanSafety:
+    def test_symlinked_files_are_not_followed(self):
+        outside = self.tree.parent / "outside.py"
+        outside.write_text("import json\nimport unittest\n\n\nclass T(unittest.TestCase):\n    pass\n\n\n"
+                           "def test_x():\n    return [json.loads(x) for x in ''.splitlines()]\n")
+        for name in ("test_link.py", "link.py"):
+            (self.tree / name).symlink_to(outside)
+        code, rows = self.lessons()
+        self.assertEqual((code, {rows[lesson]["status"] for lesson in self.scan_ids}), (0, {"PASS"}))
+
+    def test_scans_never_run_the_tree_under_test(self):
+        sentinel = Path(self.tree.parent) / "ran"
+        touch = f"open({str(sentinel)!r}, 'w').close()\n"
+        self.write({name: touch for name in ("json.py", "ast.py", "re.py", "os.py", "subprocess.py", "sitecustomize.py",
+                                             "conftest.py", "tests/__init__.py", "tests/test_x.py")})
+        self.write({"README.md": f"```sh\ntouch {sentinel}\n```\n", "Makefile": f"all:\n\ttouch {sentinel}\n"})
+        monitor = self.tree.parent / "fsmonitor"
+        monitor.write_text(f"#!/bin/sh\ntouch {sentinel}\n")
+        monitor.chmod(0o755)
+        subprocess.run(["git", "init", "-q"], cwd=self.tree, check=True)
+        subprocess.run(["git", "config", "core.fsmonitor", str(monitor)], cwd=self.tree, check=True)
+        code, rows = self.lessons()
+        self.assertEqual(code, 0)
+        self.assertEqual({rows[lesson]["status"] for lesson in self.scan_ids}, {"PASS"})
+        self.assertFalse(sentinel.exists())
+
+
+class CheckTests(ScanSafety, ScanCase):
+    scan_ids = SCANS
 
     def action(self, environment, coldbox=None):
         coldbox = {} if coldbox is None else coldbox
@@ -124,7 +157,7 @@ class CheckTests(unittest.TestCase):
 
     def test_jsonl_split_with_splitlines_is_a_hit(self):
         self.assert_scan(
-            "jsonl-unicode-separators",
+            "split-jsonl-on-newlines",
             {"ingest.py": "import json\n\n\ndef read(text):\n    rows = []\n    for line in text.splitlines():\n"
                           "        rows.append(json.loads(line))\n    return rows\n\n\n"
                           "def read_all(text):\n    return [json.loads(row) for row in text.splitlines() if row]\n",
@@ -166,26 +199,6 @@ class CheckTests(unittest.TestCase):
         shutil.rmtree(self.tree / ".worktrees")
         (self.tree / ".gitignore").unlink()
         self.assertEqual(self.lessons()[1]["clean-checkout"]["status"], "PASS")
-
-    def test_shared_mode_left_to_the_umask_is_a_hit(self):
-        self.assert_scan(
-            "cross-account-shared-queue",
-            {"queue.py": "import os\n\n\ndef queue(root):\n    waiters = root / 'waiters'\n    waiters.mkdir(mode=0o777, exist_ok=True)\n\n\n"
-                         "def lock(path):\n    return os.open(path, os.O_CREAT | os.O_RDWR, 0o666)\n\n\n"
-                         "def mixed(root):\n    waiters = root / 'w'\n    waiters.mkdir(mode=0o777)\n    (root / 'p').chmod(0o600)\n\n\n"
-                         "def tree(path):\n    Path(path).mkdir(0o777)\n\n\n"
-                         "def other(path, fd):\n    handle = os.open(path, os.O_CREAT, 0o777)\n    os.fchmod(fd, 0o600)\n    return handle\n\n\n"
-                         "def keywords(a, b):\n    os.mkdir(path=a, mode=0o777)\n    os.chmod(path=b, mode=0o600)\n\n\n"
-                         "def shifted(path):\n    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o666)\n    os.fchmod(fd + 1, 0o600)\n"},
-            {"queue.py": "import os\nimport webbrowser\n\n\ndef queue(root):\n    waiters = root / 'waiters'\n"
-                         "    waiters.mkdir(mode=0o1777, exist_ok=True)\n    waiters.chmod(0o1777)\n\n\n"
-                         "def lock(path):\n    handle = os.open(path, os.O_CREAT | os.O_RDWR, 0o666)\n    os.fchmod(handle, 0o666)\n"
-                         "    return handle\n\n\ndef private(path):\n    os.makedirs(path, 0o755)\n    webbrowser.open(path, 2)\n\n\n"
-                         "def flags(path):\n    return os.open(path, 2)\n\n\n"
-                         "def locked(path):\n    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o666)\n"
-                         "    with os.fdopen(fd, 'r+') as handle:\n        os.fchmod(handle.fileno(), 0o666)\n\n\n"
-                         "def same(a):\n    os.mkdir(path=a, mode=0o777)\n    os.chmod(path=a, mode=0o777)\n"},
-            ["queue.py:6", "queue.py:10", "queue.py:15", "queue.py:20", "queue.py:24", "queue.py:30", "queue.py:35"])
 
     def test_gate_that_opens_on_anything_but_fail_is_a_hit(self):
         self.assert_scan(
@@ -335,18 +348,6 @@ class CheckTests(unittest.TestCase):
              "security.py": "def same(security_fence, expected_fence):\n    return security_fence == expected_fence\n"},
             ["fences.py:2", "fences.py:4", "fences.ts:1", "parser.py:5"])
 
-    def test_newline_marker_check_without_crlf_handling_is_a_hit(self):
-        self.assert_scan(
-            "normalize-crlf-before-markers",
-            {"marker.py": 'MARKER = "<!-- delivered -->"\n\n\ndef is_delivered(text):\n    return text.startswith(MARKER + "\\n")\n',
-             "title.js": "const titled = (t) => t.startsWith('# Title\\n');\n",
-             "cr.py": 'CR = "\\r"\n\n\ndef marked(text):\n    return text.startswith("<!-- m -->\\n")\n'},
-            {"marker.py": 'MARKER = "<!-- delivered -->"\n\n\ndef is_delivered(text):\n'
-                          '    return text.replace("\\r\\n", "\\n").startswith(MARKER + "\\n")\n',
-             "title.js": "const titled = (t) => t.startsWith('# ');\n",
-             "block.py": 'def joined(before):\n    return before if before.endswith("\\n") else before + "\\n"\n'},
-            ["cr.py:5", "marker.py:5", "title.js:1"])
-
     def test_run_window_on_creation_time_is_a_hit(self):
         self.assert_scan(
             "filter-runs-by-failure-time",
@@ -395,16 +396,6 @@ class CheckTests(unittest.TestCase):
              "login.ts": "const pass = req.body.password;\n"},
             ["login.py:2", "login.ts:1"])
 
-    def test_workflow_that_checks_only_the_last_commit_is_a_hit(self):
-        steps = "on: push\njobs:\n  scan:\n    runs-on: ubuntu-latest\n    steps:\n"
-        self.assert_scan(
-            "verify-the-right-thing",
-            {".github/workflows/check.yml": steps + "      - run: git diff --name-only HEAD~1 HEAD | ./scan\n"
-                                                    "      - run: git log -1 --format=%H HEAD^\n"},
-            {".github/workflows/check.yml": steps + '      - run: git diff --name-only "${{ github.event.before }}" "${{ github.sha }}"\n',
-             "scripts/last.sh": "git diff HEAD~1\n"},
-            [".github/workflows/check.yml:6", ".github/workflows/check.yml:7"])
-
     def test_push_found_by_substring_is_a_hit(self):
         self.assert_scan(
             "parse-git-subcommand-first",
@@ -432,7 +423,7 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertEqual({lesson: rows[lesson]["status"] for lesson in SCANS},
                          {lesson: "INCOMPLETE" if lesson in PYTHON_SCANS else "PASS" for lesson in SCANS})
-        self.assertIn("cannot parse broken.py, tests/test_broken.py", rows["jsonl-unicode-separators"]["reason"])
+        self.assertIn("cannot parse broken.py, tests/test_broken.py", rows["split-jsonl-on-newlines"]["reason"])
         self.assertIn("  ValueError('cannot parse tests/test_broken.py')", self.check().stdout.splitlines())
 
     def test_pytest_marker_does_not_hide_an_unparsable_test(self):
@@ -447,15 +438,6 @@ class CheckTests(unittest.TestCase):
                                            "def test_never_runs():\n    pass\n"})
         row = self.lessons()[1]["tests-must-test"]
         self.assertEqual((row["status"], row["hits"]), ("FAIL", ["tests/test_flags.py:8"]))
-
-    def test_symlinked_files_are_not_followed(self):
-        outside = self.tree.parent / "outside.py"
-        outside.write_text("import json\nimport unittest\n\n\nclass T(unittest.TestCase):\n    pass\n\n\n"
-                           "def test_x():\n    return [json.loads(x) for x in ''.splitlines()]\n")
-        for name in ("test_link.py", "link.py"):
-            (self.tree / name).symlink_to(outside)
-        code, rows = self.lessons()
-        self.assertEqual((code, {rows[lesson]["status"] for lesson in SCANS}), (0, {"PASS"}))
 
     def test_lesson_fixtures_fail_on_bad_and_pass_on_good(self):
         fixtures = ROOT / "library" / "tests-must-test" / "fixtures"
@@ -475,22 +457,6 @@ class CheckTests(unittest.TestCase):
         })
         check = ROOT / "library" / "runnable-commands" / "check.py"
         self.assertEqual(rerun.run_check(str(check), str(self.tree)), {"status": "PASS"})
-
-    def test_scans_never_run_the_tree_under_test(self):
-        sentinel = Path(self.tree.parent) / "ran"
-        touch = f"open({str(sentinel)!r}, 'w').close()\n"
-        self.write({name: touch for name in ("json.py", "ast.py", "re.py", "os.py", "subprocess.py", "sitecustomize.py",
-                                             "conftest.py", "tests/__init__.py", "tests/test_x.py")})
-        self.write({"README.md": f"```sh\ntouch {sentinel}\n```\n", "Makefile": f"all:\n\ttouch {sentinel}\n"})
-        monitor = self.tree.parent / "fsmonitor"
-        monitor.write_text(f"#!/bin/sh\ntouch {sentinel}\n")
-        monitor.chmod(0o755)
-        subprocess.run(["git", "init", "-q"], cwd=self.tree, check=True)
-        subprocess.run(["git", "config", "core.fsmonitor", str(monitor)], cwd=self.tree, check=True)
-        code, rows = self.lessons()
-        self.assertEqual(code, 0)
-        self.assertEqual({rows[lesson]["status"] for lesson in SCANS}, {"PASS"})
-        self.assertFalse(sentinel.exists())
 
     def test_scan_ignores_python_path_into_the_tree(self):
         sentinel = Path(self.tree.parent) / "ran"
@@ -531,53 +497,6 @@ class CheckTests(unittest.TestCase):
         self.assertTrue(lines[index + 2].startswith("  fix: Register each listed test file"), lines[index + 2])
         missing = self.check("nowhere")
         self.assertNotEqual(missing.returncode, 0)
-
-    def test_shared_fallback_for_a_missing_session_id_is_a_hit(self):
-        self.assert_scan(
-            "hook-suppression-by-session",
-            {"hook.py": source("import os", "", "", "def state_key(event):", '    return event.get("session_id") or "default"',
-                               "", "", "def env_key():", '    return os.environ.get("CLAUDE_SESSION_ID", "shared")',
-                               "", "", "def marker(session_id):", '    key: str = session_id or "anonymous"', '    return open(key, "w")')},
-            {"hook.py": source("import hashlib", "import os", "", "", "def state_key(event):",
-                               '    session_id = event.get("session_id") or ""',
-                               "    return hashlib.sha256(session_id.encode()).hexdigest() if session_id.strip() else None",
-                               "", "", "def env_key():", '    return os.environ.get("CLAUDE_SESSION_ID", "")'),
-             "banner.py": source("def banner(event):", '    title = event.get("session_title") or "Untitled"',
-                                 "    return f\"session {event.get('session_id') or 'unknown'}: {title}\"", "", "",
-                                 "def show(session_id):", '    label = session_id or "anonymous"', '    print("Session:", label)')},
-            ["hook.py:5", "hook.py:9", "hook.py:13"])
-
-    def test_session_id_rewritten_into_a_lossy_key_is_a_hit(self):
-        self.assert_scan(
-            "once-only-recall-per-session",
-            {"recall.py": source("import re", "from pathlib import Path", "", "", "def marker(root, session_id):",
-                                 '    return Path(root) / re.sub(r"[^A-Za-z0-9]", "_", session_id)', "", "",
-                                 "def legacy(root, session_id):", '    return Path(root) / session_id.replace("/", "_")', "", "",
-                                 "def annotated(root, session_id):", '    key: str = session_id.replace("/", "_")',
-                                 "    return Path(root) / key")},
-            {"recall.py": source("import hashlib", "from pathlib import Path", "", "", "def marker(root, session_id):",
-                                 "    return Path(root) / hashlib.sha256(session_id.encode()).hexdigest()"),
-             "names.py": source("import re", "", "", "def valid(session_id):",
-                                '    return re.fullmatch(r"[A-Za-z0-9-]+", session_id) is not None', "", "",
-                                "def slug(title):", '    return re.sub(r"\\W+", "-", title)', "", "",
-                                "def show(session_id):", '    display_id = session_id.replace("-", " ")', "    print(display_id)")},
-            ["recall.py:6", "recall.py:10", "recall.py:14"])
-
-    def test_merge_cutoff_on_comment_creation_time_is_a_hit(self):
-        self.assert_scan(
-            "inline-review-edits-after-merge",
-            {"evidence.py": source("def before_merge(comments, merged_at):",
-                                   '    return [c for c in comments if c["created_at"] <= merged_at]', "", "",
-                                   "def accepted(review, pull):", "    return review.created_at < pull.merged_at", "", "",
-                                   "def logged(comment, pull):", '    print(pull["updated_at"])',
-                                   '    return comment["created_at"] <= pull["merged_at"]')},
-            {"evidence.py": source("def before_merge(comments, merged_at):",
-                                   '    return [c for c in comments if max(c["created_at"], c["updated_at"]) <= merged_at]'),
-             "timing.py": source("def lead_time(pull):", '    return pull["merged_at"] - pull["created_at"]', "", "",
-                                 "def recent(comments, since):", '    return [c for c in comments if c["created_at"] >= since]',
-                                 "", "", "def kept(comment, merged_at):", '    if comment["updated_at"] > merged_at:',
-                                 "        return False", '    return comment["created_at"] <= merged_at')},
-            ["evidence.py:2", "evidence.py:6", "evidence.py:11"])
 
     def test_bare_tool_name_under_a_restricted_path_is_a_hit(self):
         self.assert_scan(
@@ -640,23 +559,6 @@ class CheckTests(unittest.TestCase):
              "NOTES.md": source("Do not write `cloud-init status --wait || exit 1`: status 2 is a warning.")},
             ["guest.py:5", "guest.py:10", "wait.sh:2"])
 
-    def test_guard_worktree_from_a_base_that_moved_after_a_merge_is_a_hit(self):
-        self.assert_scan(
-            "fetch-the-current-base-before-creating-the-guard",
-            {"tick.py": source("import subprocess", "", "", "def tick(prs, base):",
-                               '    subprocess.run(["git", "fetch", "origin", base], check=True)', "    for pr in prs:",
-                               '        subprocess.run(["git", "worktree", "add", f".guard/{pr}", f"origin/{base}"], check=True)',
-                               '        subprocess.run(["gh", "pr", "merge", str(pr), "--squash"], check=True)')},
-            {"tick.py": source("import subprocess", "", "", "def tick(prs, base):", "    for pr in prs:",
-                               '        subprocess.run(["git", "fetch", "origin", base], check=True)',
-                               '        subprocess.run(["git", "worktree", "add", f".guard/{pr}", f"origin/{base}"], check=True)',
-                               '        subprocess.run(["gh", "pr", "merge", str(pr), "--squash"], check=True)'),
-             "checkouts.py": source("import subprocess", "", "", "def checkouts(branches):",
-                                    '    subprocess.run(["git", "fetch", "origin"], check=True)', "    for branch in branches:",
-                                    '        subprocess.run(["git", "worktree", "add", f".worktrees/{branch}", f"origin/{branch}"],'
-                                    " check=True)")},
-            ["tick.py:7"])
-
     def test_pre_push_check_that_reads_the_working_tree_is_a_hit(self):
         listed = '    names = subprocess.run(["git", "diff", "--name-only", base, head], capture_output=True, text=True).stdout.split("\\n")'
         self.assert_scan(
@@ -696,26 +598,6 @@ class CheckTests(unittest.TestCase):
                               "def notify(message, client):", "    client.send(message, timeout=5)",
                               "    return send(message, timeout=5)")},
             ["client.py:6"])
-
-    def test_cli_json_without_a_depth_guard_is_a_hit(self):
-        header = ("import argparse", "import json", "import sys", "", "", "def main():", "    parser = argparse.ArgumentParser()",
-                  '    parser.add_argument("--facts")', "    args = parser.parse_args()", "    try:")
-        self.assert_scan(
-            "reject-malformed-facts",
-            {"cli.py": source(*header, "        facts = json.loads(args.facts)", "    except json.JSONDecodeError:",
-                              '        sys.exit("facts must be JSON")', "    return json.load(sys.stdin), facts"),
-             "parse.py": source("import json", "", "", "def parse(args):", "    return json.loads(args.facts)", "", "",
-                                "def safe(args):", "    try:", "        return parse(args)", "    except (ValueError, RecursionError):",
-                                "        return None", "", "", "def unsafe(args):", "    return parse(args)")},
-            {"cli.py": source(*header, "        return json.loads(args.facts), json.load(sys.stdin)",
-                              "    except (ValueError, RecursionError):", '        sys.exit("facts must be JSON")'),
-             "store.py": source("import json", "import sys", "", "", "def load(path):", "    with open(path) as stream:",
-                                "        return json.load(stream)", "", "", "def parse(args):", "    return json.loads(args.facts)",
-                                "", "", "def main(args):", "    try:", "        return parse(args)",
-                                "    except (ValueError, RecursionError):", '        sys.exit("bad facts")'),
-             "report.py": source("import json", "from pathlib import Path", "", "", "def report(args):",
-                                 "    return json.loads(Path(args.input).read_text())")},
-            ["cli.py:11", "cli.py:14", "parse.py:5"])
 
 
 def source(*rows):

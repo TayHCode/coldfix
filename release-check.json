@@ -2680,14 +2680,14 @@
    "kind": "export-path-review",
    "path": "public-export.txt",
    "reason": "Public file list of this export; the layout, environment-literal and packaging tests read it at the export root.",
-   "source_sha256": "418e7c053b388a918985bd26aa23fe279f2a715c50a6e7ae133d796c9c2c139c"
+   "source_sha256": "9c4daa4f6fde10013e2ab5a7cf3937598a4ea91737385510027ce41886567b4c"
   },
   {
    "scope": "tree",
    "kind": "export-path-review",
    "path": "library/state-safety/rule.md",
    "reason": "Public proven-lesson rule; the directory name is the lesson id state-safety, not a STATE notes file.",
-   "source_sha256": "3456627fee92aa31e527d06cdbd4bbc4a2067453404f2462eb29d5953f004b69"
+   "source_sha256": "bb75ee9aef15b88f9cf87f2ea812cf20c51ac3ce44c574a82270ec06f7be0229"
   },
   {
    "scope": "tree",

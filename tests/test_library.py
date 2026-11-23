@@ -18,17 +18,79 @@ sys.path.insert(0, LIBRARY)
 import rerun
 
 
-def lessons():
-    return sorted(name for name in os.listdir(LIBRARY) if os.path.isfile(os.path.join(LIBRARY, name, "rule.md")))
+class LibraryInventory:
+    def lessons(self):
+        return sorted(name for name in os.listdir(self.library) if os.path.isfile(os.path.join(self.library, name, "rule.md")))
 
 
-def frontmatter(slug):
-    with open(os.path.join(LIBRARY, slug, "rule.md")) as stream:
-        head = stream.read().split("---\n")[1]
-    return dict(line.split(": ", 1) for line in head.splitlines())
+    def frontmatter(self, slug):
+        with open(os.path.join(self.library, slug, "rule.md")) as stream:
+            head = stream.read().split("---\n")[1]
+        return dict(line.split(": ", 1) for line in head.splitlines())
 
 
-class LibraryTests(unittest.TestCase):
+    def test_proof_level_matches_the_shipped_proof(self):
+        for slug in self.lessons():
+            with self.subTest(slug):
+                front = self.frontmatter(slug)
+                self.assertEqual(front["id"], slug)
+                self.assertTrue(front["title"])
+                shipped = rerun.proof_kind(os.path.join(self.library, slug))
+                if shipped is None:
+                    self.assertIn(front["proof"], ("judged", "judged (opinion)", "replayed"))
+                else:
+                    self.assertIn(front["proof"], ("rerunnable", "rerunnable (opinion)"))
+
+    def test_index_lists_every_lesson_with_its_proof_level(self):
+        with open(os.path.join(self.library, "README.md")) as stream:
+            rows = re.findall(r"^\| \[.+\]\(([^/]+)/rule\.md\) \| ([^|]+?) \|$", stream.read(), re.M)
+        self.assertEqual(sorted(rows), [(slug, self.frontmatter(slug)["proof"]) for slug in self.lessons()])
+
+    def test_index_lists_every_portable_scan(self):
+        with open(os.path.join(self.library, "README.md")) as stream:
+            listed = re.findall(r"^- \[([^\]]+)\]\(([^/]+)/scan\.py\): ", stream.read(), re.M)
+        self.assertEqual(sorted(listed), [(slug, slug) for slug in self.lessons()
+                                          if os.path.isfile(os.path.join(self.library, slug, "scan.py"))])
+
+    def test_fixture_proofs_fail_on_bad_and_pass_on_good(self):
+        kinds = (rerun.fixture_proof, rerun.generated_proof)
+        fixtures = [slug for slug in self.lessons() if rerun.proof_kind(os.path.join(self.library, slug)) in kinds]
+        self.assertTrue(fixtures)
+        for slug in fixtures:
+            with self.subTest(slug):
+                lesson = os.path.join(self.library, slug)
+                self.assertTrue(rerun.proof_kind(lesson)(lesson))
+
+    def test_repository_proofs_pin_a_github_repository_and_their_check(self):
+        for slug in self.lessons():
+            path = os.path.join(self.library, slug, "proof.json")
+            if not os.path.isfile(path):
+                continue
+            with self.subTest(slug):
+                with open(path) as stream:
+                    proof = json.load(stream)
+                with open(os.path.join(self.library, slug, "check.py"), "rb") as stream:
+                    self.assertEqual(hashlib.sha256(stream.read()).hexdigest(), proof["check_sha256"])
+                self.assertRegex(proof["repo"], r"^https://github\.com/[\w.-]+/[\w.-]+$")
+                self.assertEqual((proof["before"]["exit"], proof["after"]["exit"]), (1, 0))
+                for side in ("before", "after"):
+                    self.assertRegex(proof[side]["commit"], r"^[0-9a-f]{40}$")
+
+
+class LibraryTests(LibraryInventory, unittest.TestCase):
+    library = LIBRARY
+
+    def test_release_file_list_contains_only_promoted_lesson_ids(self):
+        library = Path(self.library)
+        exported = (library.parent / "public-export.txt").read_text().splitlines()
+        self.assertFalse(any(path.startswith("docs/internal-library/") for path in exported))
+        catalog = json.loads((library / "library.json").read_text())
+        ids = {row["id"] for row in catalog["lessons"]}
+        files = [Path(path) for path in exported if path.startswith("library/") and len(Path(path).parts) >= 3]
+        self.assertEqual({path.parts[1] for path in files}, ids)
+        self.assertEqual({str(path) for path in files if len(path.parts) == 3 and path.name == "rule.md"},
+                         {f"library/{slug}/rule.md" for slug in ids})
+
     def test_requested_proof_exit_and_count(self):
         with tempfile.TemporaryDirectory() as root:
             root = Path(root)
@@ -60,43 +122,11 @@ class LibraryTests(unittest.TestCase):
                     result = subprocess.run([sys.executable, "-B", runner, *slugs], capture_output=True, text=True)
                     self.assertEqual((result.returncode, result.stdout), (code, output), result.stderr)
 
-    def test_proof_level_matches_the_shipped_proof(self):
-        for slug in lessons():
-            with self.subTest(slug):
-                front = frontmatter(slug)
-                self.assertEqual(front["id"], slug)
-                self.assertTrue(front["title"])
-                shipped = rerun.proof_kind(os.path.join(LIBRARY, slug))
-                if shipped is None:
-                    self.assertIn(front["proof"], ("judged", "judged (opinion)", "replayed"))
-                else:
-                    self.assertIn(front["proof"], ("rerunnable", "rerunnable (opinion)"))
-
-    def test_index_lists_every_lesson_with_its_proof_level(self):
-        with open(os.path.join(LIBRARY, "README.md")) as stream:
-            rows = re.findall(r"^\| \[.+\]\(([^/]+)/rule\.md\) \| ([^|]+?) \|$", stream.read(), re.M)
-        self.assertEqual(sorted(rows), [(slug, frontmatter(slug)["proof"]) for slug in lessons()])
-
-    def test_index_lists_every_portable_scan(self):
-        with open(os.path.join(LIBRARY, "README.md")) as stream:
-            listed = re.findall(r"^- \[([^\]]+)\]\(([^/]+)/scan\.py\): ", stream.read(), re.M)
-        self.assertEqual(sorted(listed), [(slug, slug) for slug in lessons()
-                                          if os.path.isfile(os.path.join(LIBRARY, slug, "scan.py"))])
-
-    def test_fixture_proofs_fail_on_bad_and_pass_on_good(self):
-        kinds = (rerun.fixture_proof, rerun.generated_proof)
-        fixtures = [slug for slug in lessons() if rerun.proof_kind(os.path.join(LIBRARY, slug)) in kinds]
-        self.assertTrue(fixtures)
-        for slug in fixtures:
-            with self.subTest(slug):
-                lesson = os.path.join(LIBRARY, slug)
-                self.assertTrue(rerun.proof_kind(lesson)(lesson))
-
     def test_conflict_marker_and_jsonl_lessons_rerun_on_generated_fixtures(self):
         with contextlib.redirect_stdout(io.StringIO()) as output, \
                 mock.patch.object(rerun, "repository_proof", lambda lesson: True):
-            code = rerun.main(["conflict-markers", "jsonl-unicode-separators"])
-        self.assertEqual((code, output.getvalue()), (0, "PASS conflict-markers\nPASS jsonl-unicode-separators\n"
+            code = rerun.main(["conflict-markers", "split-jsonl-on-newlines"])
+        self.assertEqual((code, output.getvalue()), (0, "PASS conflict-markers\nPASS split-jsonl-on-newlines\n"
                                                      "Executed proofs: 3\n"))
 
     def test_a_generated_proof_whose_check_passes_on_bad_is_not_a_proof(self):
@@ -229,21 +259,6 @@ class LibraryTests(unittest.TestCase):
     def test_a_non_object_status_line_fails_the_proof_and_the_rerun_continues(self):
         code, output = self.rerun_fixture_lesson("import sys\nprint('null')\nsys.exit(1)\n")
         self.assertEqual((code, output), (2, "FAIL lesson\nUNKNOWN also-missing\nExecuted proofs: 1\n"))
-
-    def test_repository_proofs_pin_a_github_repository_and_their_check(self):
-        for slug in lessons():
-            path = os.path.join(LIBRARY, slug, "proof.json")
-            if not os.path.isfile(path):
-                continue
-            with self.subTest(slug):
-                with open(path) as stream:
-                    proof = json.load(stream)
-                with open(os.path.join(LIBRARY, slug, "check.py"), "rb") as stream:
-                    self.assertEqual(hashlib.sha256(stream.read()).hexdigest(), proof["check_sha256"])
-                self.assertRegex(proof["repo"], r"^https://github\.com/[\w.-]+/[\w.-]+$")
-                self.assertEqual((proof["before"]["exit"], proof["after"]["exit"]), (1, 0))
-                for side in ("before", "after"):
-                    self.assertRegex(proof[side]["commit"], r"^[0-9a-f]{40}$")
 
 
 if __name__ == "__main__":

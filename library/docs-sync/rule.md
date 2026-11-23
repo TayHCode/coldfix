@@ -2,6 +2,10 @@
 id: docs-sync
 title: Change docs in the same commit as the code they describe
 proof: rerunnable
+scope: public
+category: testing
+rank: 28
+featured: false
 ---
 # Change docs in the same commit as the code they describe
 

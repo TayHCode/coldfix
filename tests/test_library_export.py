@@ -37,9 +37,48 @@ class LibraryExportTests(CliCase):
         super().setUp()
         self.library = self.cwd / "library"
         self.library.mkdir()
-        for name in ("README.md", "rerun.py"):
-            shutil.copy(LIBRARY / name, self.library / name)
-        shutil.copytree(LIBRARY / "use-the-configured-ssh-alias", self.library / "use-the-configured-ssh-alias")
+        shutil.copy(LIBRARY / "rerun.py", self.library)
+        name = "use-the-configured-ssh-alias"
+        lesson = self.library / name
+        lesson.mkdir()
+        (lesson / "rule.md").write_text(f"---\nid: {name}\ntitle: Use a configured alias\n"
+                                        "proof: judged (opinion)\n---\n# Use a configured alias\n\nConnect by alias.\n")
+        (self.library / "README.md").write_text("## Repository-specific lessons\n\n## Agent conduct lessons\n"
+                                                f"| [Use a configured alias]({name}/rule.md) | judged (opinion) |\n")
+
+    def test_oss_admission_into_curated_checkout_only_updates_internal_bank(self):
+        self.proven_lesson()
+        oss, _ = self.oss_store()
+        for asset in ("README.md", "library.json"):
+            shutil.copy(LIBRARY / asset, self.library)
+        before = {p: p.read_bytes() for p in self.library.rglob("*") if p.is_file()}
+        with mock.patch("coldfix.LIBRARY", self.library):
+            result = json.loads(self.export_library("--oss-store", str(oss)).stdout)
+            self.assertEqual(json.loads(self.export_library("--oss-store", str(oss)).stdout)["already_in_library"], 1)
+        self.assertEqual(result["added"], ["verify-the-count"])
+        self.assertEqual(before, {p: p.read_bytes() for p in self.library.rglob("*") if p.is_file()})
+        rule = self.cwd / "docs/internal-library/verify-the-count/rule.md"
+        self.assertIn("\nscope: internal\n", rule.read_text())
+
+    def test_public_summary_can_change_without_readmitting_original_rule(self):
+        self.proven_lesson()
+        oss, _ = self.oss_store()
+        public = self.library / "count-validation"
+        public.mkdir()
+        (public / "rule.md").write_text("---\nid: count-validation\ntitle: Count validation\n"
+                                        "summary: Compare actual and expected totals.\nscope: public\n---\n"
+                                        "# Count validation\n\nRequire the expected count.\n")
+        with mock.patch("coldfix.LIBRARY", self.library):
+            result = json.loads(self.export_library("--oss-store", str(oss)).stdout)
+        self.assertEqual((result["added"], result["already_in_library"]), ([], 1))
+        self.assertFalse((self.cwd / "docs/internal-library/verify-the-count").exists())
+
+    def test_unrelated_readme_and_staged_public_library_are_refused(self):
+        (self.library / "library.json").write_text("{}")
+        self.assertIn("staged public catalog", self.export_library(code=2).stderr)
+        (self.library / "rerun.py").unlink()
+        self.assertIn("library directory", self.export_library(code=2).stderr)
+        self.assertFalse((self.cwd / "docs").exists())
 
     def proven_lesson(self, revision=None):
         revision = revision or self.author_lesson()
@@ -64,7 +103,7 @@ class LibraryExportTests(CliCase):
         self.proven_lesson()
         result = json.loads(self.export_library().stdout)
         self.assertEqual(result["added"], ["verify-the-count"])
-        self.assertEqual(self.frontmatter("verify-the-count"), dict(id="verify-the-count", title="Verify the count", proof="replayed"))
+        self.assertEqual(self.frontmatter("verify-the-count"), dict(id="verify-the-count", title="Verify the count", scope="internal", proof="replayed"))
         self.assertEqual(sorted(p.name for p in (self.library / "verify-the-count").iterdir()), ["rule.md"])
         rule = (self.library / "verify-the-count" / "rule.md").read_text()
         self.assertIn("Require the expected count.", rule)

@@ -2,6 +2,10 @@
 id: errors-are-states
 title: Treat errors as states: PASS, FAIL or INCOMPLETE
 proof: rerunnable
+scope: public
+category: concurrency-and-state
+rank: 6
+featured: true
 ---
 # Treat errors as states: PASS, FAIL or INCOMPLETE
 

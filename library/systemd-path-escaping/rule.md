@@ -2,6 +2,10 @@
 id: systemd-path-escaping
 title: Do not wrap PathChanged= values in JSON quotes
 proof: rerunnable
+scope: public
+category: ops-and-infra
+rank: 14
+featured: false
 ---
 # Do not wrap PathChanged= values in JSON quotes
 

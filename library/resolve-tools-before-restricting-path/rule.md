@@ -1,7 +1,11 @@
 ---
 id: resolve-tools-before-restricting-path
 title: Resolve tools before restricting the child PATH
-proof: judged
+proof: rerunnable
+scope: public
+category: ops-and-infra
+rank: 15
+featured: false
 ---
 # Resolve tools before restricting the child PATH
 

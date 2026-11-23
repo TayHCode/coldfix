@@ -2,6 +2,10 @@
 id: no-environment-assumptions
 title: Don't assume the environment
 proof: rerunnable
+scope: public
+category: testing
+rank: 12
+featured: false
 ---
 # Don't assume the environment
 

@@ -1,7 +1,11 @@
 ---
 id: parse-git-subcommand-first
 title: Parse the git subcommand before applying publication restrictions
-proof: judged
+proof: rerunnable
+scope: public
+category: git-and-ci
+rank: 25
+featured: false
 ---
 # Parse the git subcommand before applying publication restrictions
 

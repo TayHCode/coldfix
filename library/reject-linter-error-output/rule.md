@@ -2,6 +2,10 @@
 id: reject-linter-error-output
 title: Reject usage and error diagnostics in linter output
 proof: rerunnable
+scope: public
+category: git-and-ci
+rank: 8
+featured: false
 ---
 # Reject usage and error diagnostics in linter output
 

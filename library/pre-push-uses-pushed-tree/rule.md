@@ -1,7 +1,11 @@
 ---
 id: pre-push-uses-pushed-tree
 title: Pre-push checks must select targets from the pushed tree, not the working tree
-proof: judged
+proof: rerunnable
+scope: public
+category: git-and-ci
+rank: 11
+featured: false
 ---
 # Pre-push checks must select targets from the pushed tree, not the working tree
 

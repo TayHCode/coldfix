@@ -556,7 +556,7 @@ def check_pins(check_script, test_sha256, admission=None):
             script, _, digest = regression_adapter.build(data["path"], data["patch"], names, data["diagnostic"])
             if check_script in {script.replace(regression_adapter.TEMPLATE, older)
                                 for older in (regression_adapter.LEGACY_TEMPLATE, regression_adapter.PREVIOUS_TEMPLATE,
-                                              regression_adapter.NO_SRC_TEMPLATE)}:
+                                              regression_adapter.NO_SRC_TEMPLATE, regression_adapter.PRE_DOCTEST_TEMPLATE)}:
                 script = check_script
         return (script == check_script and digest == test_sha256 and data["names"] == names
                 and (admission is None or (admission["test_paths"] == [data["path"]]
@@ -2312,10 +2312,16 @@ def rule_fix(rule):
     return next((part.strip().replace("\n", " ") for part in body.split("\n\n") if part.strip()), "")
 
 
+def library_runner():
+    path = Path(__file__).resolve().parent / "library" / "rerun.py"
+    spec = importlib.util.spec_from_file_location("library_rerun", path)
+    runner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runner)
+    return runner
+
+
 def check_library(tree="."):
-    spec = importlib.util.spec_from_file_location("library_rerun", LIBRARY / "rerun.py")
-    rerun = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(rerun)
+    rerun = library_runner()
     try:
         tree = Path(tree).resolve(strict=True)
     except (OSError, RuntimeError):
@@ -2349,10 +2355,17 @@ def export_library(args, root, store):
     import transcript_delivery
 
     library = ordinary_path(Path(args.output).expanduser())
-    require((library / "rerun.py").is_file() and (library / "README.md").is_file(),
-            "library export needs --output pointing at the library directory")
-    require(root != library and root not in library.parents, "export must be outside the private store")
     require(not args.public, "library export has no release-check gate; run release-check on the library separately")
+    require(root != library and root not in library.parents, "export must be outside the private store")
+    internal = LIBRARY.parent / "docs" / "internal-library"
+    require((library / "README.md").is_file() and (library == internal or (library / "rerun.py").is_file()),
+            "library export needs --output pointing at the library directory")
+    curated = library == LIBRARY
+    require(curated or not (library / "library.json").exists(), "cannot admit lessons into a staged public catalog")
+    public_rules = library_rule_texts(LIBRARY) if curated or library == internal else {}
+    if curated:
+        library = ordinary_path(internal)
+    require(root != library and root not in library.parents, "export must be outside the private store")
     terms = privacy_sources(args, store)
     stores = [(root, store, terms)]
     oss_source = args.oss_store or os.environ.get("COLDFIX_OSS_STORE")
@@ -2365,10 +2378,16 @@ def export_library(args, root, store):
         stores[0] = (root, store, terms)
         stores.append((oss_root, oss_store, terms))
     known = library_rule_texts(library)
+    if curated and not (library / "README.md").exists():
+        headings = "\n\n".join(f"{section}\n\n| Lesson | Proof |\n| --- | --- |" for section in LIBRARY_SECTIONS.values())
+        atomic_create(library / "README.md", f"# Internal lesson bank\n\n{headings}\n")
     index = read_text(library / "README.md")
     require(all(heading + "\n" in index for heading in LIBRARY_SECTIONS.values()), "library README lacks a lesson section")
     added, excluded, present = [], {}, 0
     for section, title, rule, body, screen in list(library_candidates(args, stores)):
+        if rule.strip() in public_rules:
+            present += 1
+            continue
         if rule.strip() in known:
             present += 1
             name = known[rule.strip()]
@@ -2395,7 +2414,7 @@ def export_library(args, root, store):
         if counts:
             excluded[name] = "privacy screen: " + ", ".join(sorted(counts))
             continue
-        atomic_create(library / name / "rule.md", f"---\nid: {name}\ntitle: {title}\nproof: {LIBRARY_PROOF[section]}\n---\n# {title}\n\n{body}\n")
+        atomic_create(library / name / "rule.md", f"---\nid: {name}\ntitle: {title}\nscope: internal\nproof: {LIBRARY_PROOF[section]}\n---\n# {title}\n\n{body}\n")
         index = add_library_row(index, section, library_row(title, name, LIBRARY_PROOF[section]))
         atomic_create(library / "README.md", index, replace=True)
         known[rule.strip()] = name
@@ -2416,7 +2435,7 @@ def snapshot_fixture_proof(draft, snapshot):
     return None
 
 
-def fixture_proof_refusal(library, draft, terms):
+def fixture_proof_refusal(draft, terms):
     paths = [draft / "check.py", draft / "fixtures", *sorted((draft / "fixtures").rglob("*"))]
     if any(path.is_symlink() for path in paths):
         return "proof contains a symlink"
@@ -2433,9 +2452,7 @@ def fixture_proof_refusal(library, draft, terms):
         counts = privacy_counts(f"{path.relative_to(draft)}\n{content}", terms, filename_exempt=True)
         if counts:
             return f"privacy screen in {path.relative_to(draft)}: " + ", ".join(sorted(counts))
-    spec = importlib.util.spec_from_file_location("library_rerun", library / "rerun.py")
-    rerun = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(rerun)
+    rerun = library_runner()
     for side, exit_code in (("bad", 1), ("good", 0)):
         with tempfile.TemporaryDirectory() as clean:
             lesson = Path(clean) / "lesson"
@@ -2463,7 +2480,7 @@ def prove_library_lessons(library, proofs, terms):
             continue
         with tempfile.TemporaryDirectory() as staging:
             snapshot = Path(staging) / "proof"
-            reason = snapshot_fixture_proof(draft, snapshot) or fixture_proof_refusal(library, snapshot, terms)
+            reason = snapshot_fixture_proof(draft, snapshot) or fixture_proof_refusal(snapshot, terms)
             if reason:
                 refused[name] = reason
                 continue

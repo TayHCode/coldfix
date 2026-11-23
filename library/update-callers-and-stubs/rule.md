@@ -1,7 +1,11 @@
 ---
 id: update-callers-and-stubs
 title: Update every caller and test stub when a function signature changes
-proof: judged
+proof: rerunnable
+scope: public
+category: testing
+rank: 17
+featured: false
 ---
 # Update every caller and test stub when a function signature changes
 

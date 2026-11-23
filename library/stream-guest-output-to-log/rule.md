@@ -1,7 +1,12 @@
 ---
 id: stream-guest-output-to-log
 title: Stream guest command output to its log on timeout paths
-proof: judged
+proof: rerunnable
+scope: public
+category: ops-and-infra
+rank: 19
+featured: false
+summary: Redirect a subprocess’s output to its log before waiting. If the subprocess times out, the log still contains the output that preceded the timeout.
 ---
 # Stream guest command output to its log on timeout paths
 

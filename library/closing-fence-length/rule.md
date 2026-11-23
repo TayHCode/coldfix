@@ -2,6 +2,10 @@
 id: closing-fence-length
 title: Accept closing fences of the same length or longer, with trailing whitespace
 proof: rerunnable
+scope: public
+category: data-and-parsing
+rank: 22
+featured: false
 ---
 # Accept closing fences of the same length or longer, with trailing whitespace
 

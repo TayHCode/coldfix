@@ -2,6 +2,10 @@
 id: runnable-commands
 title: Run every documented command exactly as written
 proof: rerunnable
+scope: public
+category: testing
+rank: 18
+featured: false
 ---
 # Run every documented command exactly as written
 

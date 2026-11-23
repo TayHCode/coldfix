@@ -2,6 +2,10 @@
 id: tests-must-test
 title: A test must exercise the failure it names
 proof: rerunnable
+scope: public
+category: testing
+rank: 2
+featured: true
 ---
 # A test must exercise the failure it names
 

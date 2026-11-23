@@ -1,7 +1,12 @@
 ---
 id: secrets-and-private-data
 title: Keep secrets and private data out of everything you write or publish
-proof: judged
+proof: rerunnable
+scope: public
+category: security
+rank: 3
+featured: true
+summary: Scan tracked files for credentials before publishing. Redact personal data from logs, fixtures and free-text fields before those values reach the repository.
 ---
 # Keep secrets and private data out of everything you write or publish
 

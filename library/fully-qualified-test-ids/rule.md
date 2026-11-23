@@ -2,6 +2,10 @@
 id: fully-qualified-test-ids
 title: Key test results by fully qualified test ID
 proof: rerunnable
+scope: public
+category: testing
+rank: 9
+featured: false
 ---
 # Key test results by fully qualified test ID
 

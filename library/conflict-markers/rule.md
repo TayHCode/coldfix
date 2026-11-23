@@ -2,6 +2,10 @@
 id: conflict-markers
 title: Never commit unresolved merge markers
 proof: rerunnable
+scope: public
+category: git-and-ci
+rank: 4
+featured: true
 ---
 # Never commit unresolved merge markers
 

@@ -2,6 +2,10 @@
 id: authz-everywhere
 title: Authorize every privileged action against identity and owner
 proof: rerunnable
+scope: public
+category: security
+rank: 1
+featured: true
 ---
 # Authorize every privileged action against identity and owner
 

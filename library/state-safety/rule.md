@@ -2,6 +2,11 @@
 id: state-safety
 title: Persist state atomically and retry interrupted effects safely
 proof: rerunnable
+scope: public
+category: concurrency-and-state
+rank: 26
+featured: false
+summary: Write a complete replacement file and rename it atomically. For operations that update both local and external state, record completion only after the effect succeeds and make retries safe.
 ---
 # Persist state atomically and retry interrupted effects safely
 

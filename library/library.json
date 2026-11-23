@@ -1,0 +1,305 @@
+{
+  "count": 30,
+  "lessons": [
+    {
+      "id": "authz-everywhere",
+      "title": "Authorize every privileged action against identity and owner",
+      "summary": "Bind every privileged action to the authenticated identity and the resource owner or tenant. Path-prefix middleware checks (startsWith) leave routes open. Check cross-origin submissions, and check scope on error and replay paths too.",
+      "category": "security",
+      "rank": 1,
+      "featured": true,
+      "proof": "rerunnable",
+      "scan": true
+    },
+    {
+      "id": "tests-must-test",
+      "title": "A test must exercise the failure it names",
+      "summary": "A test must exercise the failure it names (a \"malformed 2xx\" test needs a malformed body), avoid racing deadlines, assert specific values rather than aggregates, keep the imports it uses, and be registered where the runner finds it.",
+      "category": "testing",
+      "rank": 2,
+      "featured": true,
+      "proof": "rerunnable",
+      "scan": true
+    },
+    {
+      "id": "secrets-and-private-data",
+      "title": "Keep secrets and private data out of everything you write or publish",
+      "summary": "Scan tracked files for credentials before publishing. Redact personal data from logs, fixtures and free-text fields before those values reach the repository.",
+      "category": "security",
+      "rank": 3,
+      "featured": true,
+      "proof": "rerunnable",
+      "scan": true
+    },
+    {
+      "id": "conflict-markers",
+      "title": "Never commit unresolved merge markers",
+      "summary": "Never commit unresolved merge markers (<<<<<<<, =======, >>>>>>>), especially in changelogs and generated docs.",
+      "category": "git-and-ci",
+      "rank": 4,
+      "featured": true,
+      "proof": "rerunnable",
+      "scan": true
+    },
+    {
+      "id": "validate-at-the-boundary",
+      "title": "Validate at the boundary: reject, don't coerce",
+      "summary": "Reject, don't coerce: parse dates strictly (a lenient parser normalizes 2026-02-31), never trim passwords, drain request bodies before rejecting, check that a validated object is bound to the identity, version or snapshot it was produced for, check expiry at use time, and check every field and array element, not just the first.",
+      "category": "data-and-parsing",
+      "rank": 5,
+      "featured": true,
+      "proof": "rerunnable",
+      "scan": true
+    },
+    {
+      "id": "errors-are-states",
+      "title": "Treat errors as states: PASS, FAIL or INCOMPLETE",
+      "summary": "Do not collapse ambiguous outcomes into success or failure: separate definitive outcomes (4xx) from uncertain ones (timeout, lost response). A checker that exits non-zero must fail the check. Exit when the upstream exits. Every failure branch must still record accounting and receipts and clean up. Return PASS, FAIL or INCOMPLETE from every check; errors and unavailable tools are INCOMPLETE, and only PASS may open a gate or advance state.",
+      "category": "concurrency-and-state",
+      "rank": 6,
+      "featured": true,
+      "proof": "rerunnable",
+      "scan": true
+    },
+    {
+      "id": "split-jsonl-on-newlines",
+      "title": "Parse JSONL at newline record boundaries",
+      "summary": "Parse JSONL at newline record boundaries. Verify that Unicode separators inside strings survive ingestion unchanged.",
+      "category": "data-and-parsing",
+      "rank": 7,
+      "featured": true,
+      "proof": "rerunnable",
+      "scan": true
+    },
+    {
+      "id": "reject-linter-error-output",
+      "title": "Reject usage and error diagnostics in linter output",
+      "summary": "Before accepting exit code 1 as expected lint findings, scan all combined stdout and stderr for usage or bare Error: diagnostics. Accept the undocumented-exit exception only when no such operational diagnostic appears anywhere in the output.",
+      "category": "git-and-ci",
+      "rank": 8,
+      "featured": false,
+      "proof": "rerunnable",
+      "scan": true
+    },
+    {
+      "id": "fully-qualified-test-ids",
+      "title": "Key test results by fully qualified test ID",
+      "summary": "When parsing or comparing test results, match each result by its fully qualified ID (module, class, and method), not the bare method name. A same-named test in another class must never validate a lesson or a regression. If a bare name is ambiguous, reject it instead of guessing.",
+      "category": "testing",
+      "rank": 9,
+      "featured": false,
+      "proof": "rerunnable",
+      "scan": true
+    },
+    {
+      "id": "time-regexes-on-long-adversarial-inputs-before",
+      "title": "Time regexes on long adversarial inputs before merging",
+      "summary": "Time regular expressions on long strings that almost match. Repeated separators followed by a failing suffix expose patterns that repeatedly scan the same input.",
+      "category": "data-and-parsing",
+      "rank": 10,
+      "featured": false,
+      "proof": "rerunnable",
+      "scan": true
+    },
+    {
+      "id": "pre-push-uses-pushed-tree",
+      "title": "Pre-push checks must select targets from the pushed tree, not the working tree",
+      "summary": "The pre-push fast checks must decide which files to check from the pushed commit's tree, not from what exists in the working tree. A file deleted locally but still committed must still be checked. Run the pre-push hook tests before pushing.",
+      "category": "git-and-ci",
+      "rank": 11,
+      "featured": false,
+      "proof": "rerunnable",
+      "scan": true
+    },
+    {
+      "id": "no-environment-assumptions",
+      "title": "Don't assume the environment",
+      "summary": "No hardcoded hosts, paths, timezones, checkout directory names, runner pools or versions. Resolve binaries in the repository checkout's context, use explicit timezones for date boundaries, and register tests and exports in the config that discovers them.",
+      "category": "testing",
+      "rank": 12,
+      "featured": false,
+      "proof": "rerunnable",
+      "scan": true
+    },
+    {
+      "id": "preserve-relative-links-when-moving-documents",
+      "title": "Preserve relative links when moving documents",
+      "summary": "When moving a document, update its relative links to preserve their targets. Verify that every relative destination resolves from the document’s new location.",
+      "category": "data-and-parsing",
+      "rank": 13,
+      "featured": false,
+      "proof": "rerunnable",
+      "scan": true
+    },
+    {
+      "id": "systemd-path-escaping",
+      "title": "Do not wrap PathChanged= values in JSON quotes",
+      "summary": "systemd's PathChanged= does not strip JSON-style quotes, so the quoting used for Environment= and ExecStart= must not be reused for path settings. Serialize Path* values with systemd escaping (for example \\x20 for spaces and \\x5c for backslashes, with % doubled) and check the generated unit with systemd-analyze verify before installing it. Keep the empty assignment that clears the original watch paired with a valid absolute replacement.",
+      "category": "ops-and-infra",
+      "rank": 14,
+      "featured": false,
+      "proof": "rerunnable",
+      "scan": true
+    },
+    {
+      "id": "resolve-tools-before-restricting-path",
+      "title": "Resolve tools before restricting the child PATH",
+      "summary": "When building a sanitized replay environment, resolve the absolute paths of tools such as tsc and node with shutil.which before replacing PATH, pass those absolute paths to the child, and invoke the tools by absolute path. Do not restrict PATH first, because the toolchain then reports as unavailable.",
+      "category": "ops-and-infra",
+      "rank": 15,
+      "featured": false,
+      "proof": "rerunnable",
+      "scan": true
+    },
+    {
+      "id": "clean-checkout",
+      "title": "Keep worktrees and runtime state out of git status",
+      "summary": "Each repository's own committed .gitignore must ignore /.worktrees/ and every runtime-state, snapshot, budget or host-config path the tool writes inside the checkout. git status --porcelain must be empty after a run in a fresh clone.",
+      "category": "git-and-ci",
+      "rank": 16,
+      "featured": false,
+      "proof": "rerunnable",
+      "scan": true
+    },
+    {
+      "id": "update-callers-and-stubs",
+      "title": "Update every caller and test stub when a function signature changes",
+      "summary": "When you rename or remove a keyword argument, update every call site and every test stub that accepts it, and do not keep passing the removed keyword. Run the affected tests before pushing to confirm the stubs match the new signature.",
+      "category": "testing",
+      "rank": 17,
+      "featured": false,
+      "proof": "rerunnable",
+      "scan": true
+    },
+    {
+      "id": "runnable-commands",
+      "title": "Run every documented command exactly as written",
+      "summary": "Every documented or emitted command (README, onboarding, fallbacks, subprocess calls) must work as written from a clean state: include required arguments and flags, never hardcode directory names, set the working directory explicitly, include staged and merge-commit changes when diffing (git diff --name-only HEAD, --cached), and regenerate generated clients before use. Run every command you document, exactly as written, in a fresh clone before pushing.",
+      "category": "testing",
+      "rank": 18,
+      "featured": false,
+      "proof": "rerunnable",
+      "scan": true
+    },
+    {
+      "id": "stream-guest-output-to-log",
+      "title": "Stream guest command output to its log on timeout paths",
+      "summary": "Redirect a subprocess’s output to its log before waiting. If the subprocess times out, the log still contains the output that preceded the timeout.",
+      "category": "ops-and-infra",
+      "rank": 19,
+      "featured": false,
+      "proof": "rerunnable",
+      "scan": true
+    },
+    {
+      "id": "terminal-cloud-init-status",
+      "title": "Handle terminal cloud-init statuses instead of retrying forever",
+      "summary": "Handle cloud-init’s recoverable-error status separately from success and fatal errors. Bound readiness retries so a guest that never becomes ready cannot hang the build.",
+      "category": "ops-and-infra",
+      "rank": 20,
+      "featured": false,
+      "proof": "rerunnable",
+      "scan": true
+    },
+    {
+      "id": "use-the-triggering-invocation-id",
+      "title": "Use the triggering invocation ID in async failure handlers",
+      "summary": "An asynchronous failure handler must identify the invocation that triggered it, preferring the MONITOR_INVOCATION_ID passed in by the trigger over the unit's current InvocationID. A failed or unreadable journal must return unknown so the stored state is kept, not an empty set. Test that a later run starting before the handler does not hide a new failure from the triggering run.",
+      "category": "ops-and-infra",
+      "rank": 21,
+      "featured": false,
+      "proof": "rerunnable",
+      "scan": true
+    },
+    {
+      "id": "closing-fence-length",
+      "title": "Accept closing fences of the same length or longer, with trailing whitespace",
+      "summary": "A Markdown code fence closes on the same fence character repeated at least as many times as the opener, optionally followed by spaces or tabs. Do not require an exact string match with the opener, or later headings and the final record get swallowed. Add regression tests for a longer closer and a closer with trailing whitespace before pushing.",
+      "category": "data-and-parsing",
+      "rank": 22,
+      "featured": false,
+      "proof": "rerunnable",
+      "scan": true
+    },
+    {
+      "id": "fence-info-strings",
+      "title": "Recognize Markdown fence info strings before tracking fence state",
+      "summary": "A Markdown fence opener can include an info string such as c++ or python3. A letters-only pattern misses these blocks and can mistake their contents for document headings.",
+      "category": "data-and-parsing",
+      "rank": 23,
+      "featured": false,
+      "proof": "rerunnable",
+      "scan": true
+    },
+    {
+      "id": "filter-runs-by-failure-time",
+      "title": "Filter workflow runs by failure time, not creation time",
+      "summary": "When collecting workflow runs for a time window, do not exclude runs by creation time before the window, because a rerun can fail long after it was created. Gather candidates from a lookback that covers reruns, then apply the event-time cutoff on updated_at. Check truncation separately for each conclusion listing.",
+      "category": "git-and-ci",
+      "rank": 24,
+      "featured": false,
+      "proof": "rerunnable",
+      "scan": true
+    },
+    {
+      "id": "parse-git-subcommand-first",
+      "title": "Parse the git subcommand before applying publication restrictions",
+      "summary": "Before applying push or publication restrictions, identify the actual git executable and subcommand, including global options, so read-only commands that merely mention push in their arguments are allowed while publication subcommands stay denied.",
+      "category": "git-and-ci",
+      "rank": 25,
+      "featured": false,
+      "proof": "rerunnable",
+      "scan": true
+    },
+    {
+      "id": "state-safety",
+      "title": "Persist state atomically and retry interrupted effects safely",
+      "summary": "Write a complete replacement file and rename it atomically. For operations that update both local and external state, record completion only after the effect succeeds and make retries safe.",
+      "category": "concurrency-and-state",
+      "rank": 26,
+      "featured": false,
+      "proof": "rerunnable",
+      "scan": false
+    },
+    {
+      "id": "change-the-consumers",
+      "title": "When a producer changes, change every consumer in the same change",
+      "summary": "When a producer changes (schema, model, route, flag, enum), grep every consumer and validator in the same change. A database schema change needs a migration. A UI call to a backend route needs the route to exist first. Validators must not be stricter than the producer.",
+      "category": "data-and-parsing",
+      "rank": 27,
+      "featured": false,
+      "proof": "rerunnable",
+      "scan": false
+    },
+    {
+      "id": "docs-sync",
+      "title": "Change docs in the same commit as the code they describe",
+      "summary": "Docs describing behavior (README, runbooks, specs, templates, agent instructions, changelogs, inventories, ledgers) must change in the same commit as the code they describe. Numbers, hashes, byte sizes, dates and \"last refreshed\" fields must be regenerated from the final state, never typed from memory. Do not document a fix before the code implements it.",
+      "category": "testing",
+      "rank": 28,
+      "featured": false,
+      "proof": "rerunnable",
+      "scan": false
+    },
+    {
+      "id": "races",
+      "title": "Guard read-then-write on shared state",
+      "summary": "Use a conditional update to claim shared work. Two workers can both read a pending job before either writes, so only the worker whose update changes the row may proceed.",
+      "category": "concurrency-and-state",
+      "rank": 29,
+      "featured": false,
+      "proof": "judged",
+      "scan": false
+    },
+    {
+      "id": "persist-diagnostics-before-cleanup",
+      "title": "Persist setup-failure diagnostics before deleting the guest",
+      "summary": "Copy the failed command and its output out of the sandbox before removing it. Exercise the setup-failure path and check that the log survives cleanup.",
+      "category": "ops-and-infra",
+      "rank": 30,
+      "featured": false,
+      "proof": "judged",
+      "scan": false
+    }
+  ]
+}

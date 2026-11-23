@@ -1,7 +1,11 @@
 ---
 id: use-the-triggering-invocation-id
 title: Use the triggering invocation ID in async failure handlers
-proof: judged
+proof: rerunnable
+scope: public
+category: ops-and-infra
+rank: 21
+featured: false
 ---
 # Use the triggering invocation ID in async failure handlers
 

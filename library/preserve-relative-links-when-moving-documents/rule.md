@@ -2,6 +2,10 @@
 id: preserve-relative-links-when-moving-documents
 title: Preserve relative links when moving documents
 proof: rerunnable
+scope: public
+category: data-and-parsing
+rank: 13
+featured: false
 ---
 # Preserve relative links when moving documents
 

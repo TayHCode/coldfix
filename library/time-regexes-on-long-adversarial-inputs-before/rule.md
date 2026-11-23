@@ -2,6 +2,11 @@
 id: time-regexes-on-long-adversarial-inputs-before
 title: Time regexes on long adversarial inputs before merging
 proof: rerunnable
+scope: public
+category: data-and-parsing
+rank: 10
+featured: false
+summary: Time regular expressions on long strings that almost match. Repeated separators followed by a failing suffix expose patterns that repeatedly scan the same input.
 ---
 # Time regexes on long adversarial inputs before merging
 

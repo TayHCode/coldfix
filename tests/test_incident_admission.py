@@ -1071,6 +1071,29 @@ class AdapterTests(unittest.TestCase):
                 "    def test_b(self):\n        self.skipTest(\"no history\")\n")
         self.assertEqual(self.run_patch_check(body), self.PASS)
 
+    def test_load_tests_adds_an_unrelated_skipped_doctest(self):
+        suite = ("import doctest\n\n"
+                 "def example():\n    '''An example.\n\n    >>> 1 + 1\n    2\n    '''\n\n"
+                 "def skip_example(test):\n    raise unittest.SkipTest('example unavailable')\n\n"
+                 "def load_tests(loader, tests, pattern):\n"
+                 "    tests.addTests(doctest.DocTestSuite(setUp=skip_example))\n    return tests\n\n")
+        for example, statement, expected in (("example", "pass", self.PASS),
+                                             ("example", "self.skipTest('unavailable')", self.INCOMPLETE),
+                                             ("test_a", "pass", self.INCOMPLETE)):
+            with self.subTest(example=example, statement=statement):
+                body = suite.replace("def example():", f"def {example}():")
+                body += "class T(unittest.TestCase):\n    def test_a(self):\n        " + statement + "\n"
+                self.assertEqual(self.run_patch_check(body), expected)
+
+    def test_patch_check_from_before_named_doctest_support_still_pins(self):
+        patch = "+    def test_a(self):\n"
+        template = regression_adapter.PRE_DOCTEST_TEMPLATE
+        self.assertEqual(hashlib.sha256(template.encode()).hexdigest(),
+                         "06bd654892822bf9ecc337b9be11fc4b1e1536ab91c82d653e21d128631e55b0")
+        script, _, digest = regression_adapter.build("tests/t.py", patch, ["test_a"], "FAIL: test_a", template)
+        self.assertTrue(c.check_pins(script, digest))
+        self.assertFalse(c.check_pins(script.replace(digest, "0" * 64), digest))
+
     def test_skipped_diagnosed_test_is_incomplete(self):
         body = ("class T(unittest.TestCase):\n    def test_a(self):\n        self.skipTest(\"no history\")\n\n"
                 "    def test_b(self):\n        pass\n")
