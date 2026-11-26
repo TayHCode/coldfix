@@ -139,6 +139,25 @@ class AgentsBlockTests(CliCase):
         self.run_cli("retire", lesson, "--lessons", str(fixture.folder))
         self.assertFalse(target.exists())
 
+    def test_revising_a_lesson_to_retired_withdraws_registered_instruction_copies(self):
+        repo, before, after = self.history()
+        proven = json.loads(self.run_replay(self.author_lesson(), repo, before, after, "--status", "active").stdout)
+        offline = self.cwd / "offline"
+        subprocess.run(["git", "clone", "--quiet", str(repo), str(offline)], check=True)
+        (repo / "CLAUDE.md").write_text("Keep local notes.\n")
+        for checkout in (repo, offline):
+            self.assertEqual(self.agents(checkout)["lessons"], [proven["lesson_id"]])
+        moved = offline.rename(self.cwd / "unmounted")
+        result = json.loads(self.run_cli("lesson", "--revise", proven["id"], "--status", "retired").stdout)
+        self.assertEqual(result["status"], "retired")
+        self.assertFalse((repo / "AGENTS.md").exists())
+        self.assertEqual((repo / "CLAUDE.md").read_text(), "Keep local notes.\n")
+        self.assertEqual(result["pending_refresh"], [str(offline / "AGENTS.md")])
+        moved.rename(offline)
+        for checkout in (repo, offline):
+            self.assertEqual(self.agents(checkout)["lessons"], [])
+            self.assertFalse((checkout / "AGENTS.md").exists())
+
     def test_an_existing_test_delivery_carries_its_rule_into_the_repository_export(self):
         revision = self.author_lesson()
         repo, before, after = self.history()

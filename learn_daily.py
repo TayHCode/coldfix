@@ -108,15 +108,18 @@ def ask(model, prompt, shape, work, deadline=None, tools=""):
     if model["provider"] == "command":
         return c.model_command(model["role"], prompt, shape, cwd=work, timeout=timeout)
     c.require_cheap(model["model"])
-    environment = c.model_environment()
     if model["provider"] == "claudeAgent":
         command = ["claude", "-p", "--model", model["model"], "--tools", tools, "--no-session-persistence",
                    "--setting-sources", "", "--output-format", "json", "--json-schema", json.dumps(shape)]
-        reply = json.loads(subprocess.run(command, input=prompt, text=True, env=environment, cwd=work,
+        reply = json.loads(subprocess.run(command, input=prompt, text=True, env=c.model_environment(), cwd=work,
                                           capture_output=True, check=True, timeout=timeout).stdout)
         c.require(not reply.get("is_error") and isinstance(reply.get("structured_output"), dict),
                   "claude returned no structured output")
         return reply["structured_output"]
+    return codex_ask(model, prompt, shape, work, timeout)
+
+
+def codex_ask(model, prompt, shape, work, timeout):
     schema_path, output = work / "schema.json", work / "reply.json"
     schema_path.write_text(json.dumps(shape))
     output.unlink(missing_ok=True)
@@ -126,7 +129,7 @@ def ask(model, prompt, shape, work, deadline=None, tools=""):
                "--output-schema", str(schema_path), "--output-last-message", str(output)]
     if model.get("effort", "default") != "default":
         command += ["-c", "model_reasoning_effort=" + json.dumps(model["effort"])]
-    subprocess.run([*command, "-"], input=prompt, text=True, env=environment, cwd=work,
+    subprocess.run([*command, "-"], input=prompt, text=True, env=c.model_environment(), cwd=work,
                    capture_output=True, check=True, timeout=timeout)
     return json.loads(output.read_text())
 
@@ -240,10 +243,18 @@ def rule_key(rule):
     return " ".join(rule.casefold().split())
 
 
-def taken_rules(store, ledger, superseded=None):
+def taken_rules(store, ledger, superseded=None, retry_draft=None):
     superseded = superseded or {}
-    taken = {rule_key(row["rule"]): "lesson " + row["lesson_id"] for row in c.latest_lessons(store).values()
-             if row["status"] in ("proposed", "active", "conditional", "enforced") and row["lesson_id"] not in superseded.values()}
+    taken = {}
+    for lesson in c.latest_lessons(store).values():
+        if lesson["status"] not in ("proposed", "active", "conditional", "enforced") or lesson["lesson_id"] in superseded.values():
+            continue
+        key = rule_key(lesson["rule"])
+        if (retry_draft and lesson.get("admission") and lesson["verification"] == "unproven"
+                and key == rule_key(retry_draft["draft"]["rule"])
+                and not set(retry_draft["evidence"]).isdisjoint(lesson["evidence"])):
+            continue
+        taken[key] = "lesson " + lesson["lesson_id"]
     for fingerprint, row in ledger["drafts"].items():
         if row["verdict"] == "PASS" and fingerprint not in superseded:
             taken.setdefault(rule_key(row["draft"]["rule"]), "draft " + fingerprint)
@@ -261,7 +272,7 @@ def peer_rules(path):
     return taken_rules(c.load_store(root)[1], drafts)
 
 
-def waiting(store, ledger, pairs, rechecks=()):
+def waiting(store, ledger, pairs, rechecks=(), *, screened_oss=False):
     rows = candidates(store, pairs=pairs)
     waiting = []
     for row in rows:
@@ -285,7 +296,12 @@ def waiting(store, ledger, pairs, rechecks=()):
                 row['recheck_pair'] = matched[0]
                 row['evidence'] = [matched[0]['failure_id']]
         elif previous:
-            continue
+            if not screened_oss or previous.get('replay', {}).get('status') in ('proven', 'delivered'):
+                continue
+            history = ledger.get('revisions', {}).get(row['fingerprint'], [])
+            attempted = {ref for draft in [previous, *history] for ref in draft['evidence']}
+            if not set(row['evidence']) - attempted:
+                continue
         if row['replayable'] or not row['transcript']:
             waiting.append(row)
     eligible = {pair['finding_url'] for pair in pairs if pair.get('flagged_only')}
@@ -293,16 +309,19 @@ def waiting(store, ledger, pairs, rechecks=()):
         store['failures'][ref].get('source_ref') in eligible for ref in row['evidence'])))
 
 
-def run(root, today, route=route, ask=ask, reserved_rules=None, projects=None):
+def run(root, today, route=route, ask=ask, reserved_rules=None, projects=None, screened_pairs=None):
     path = root / LEDGER
     ledger = json.loads(path.read_text()) if path.exists() else dict(drafts={}, runs=[])
     store = c.load_store(root)[1]
-    pairs = fix_pairs(root, coldpass_inputs=True)
-    coldpass_replay.prepare_pairs(root, store, pairs, projects)
+    if screened_pairs is None:
+        pairs = fix_pairs(root, coldpass_inputs=True)
+        coldpass_replay.prepare_pairs(root, store, pairs, projects)
+    else:
+        pairs = screened_pairs
     from coldpass_sources import RECHECKS
     recheck_path = root / RECHECKS
     rechecks = json.loads(c.read_text(recheck_path)) if recheck_path.exists() else []
-    picked = [row for row in waiting(store, ledger, pairs, rechecks)
+    picked = [row for row in waiting(store, ledger, pairs, rechecks, screened_oss=screened_pairs is not None)
               if 'readiness' not in row or row['readiness']['ready'] or row.get("recheck_pair")]
     used_today = any(row["day"] == today and row.get("calls") for row in ledger["runs"])
     summary = dict(day=today, candidates=len(picked), calls=0, drafted=0, passed=0)
@@ -334,6 +353,8 @@ def run(root, today, route=route, ask=ask, reserved_rules=None, projects=None):
                       "reviewer must differ from the drafter")
             superseded = {}
             for row in picked:
+                if screened_pairs is not None and row['fingerprint'] in ledger['drafts']:
+                    superseded[row['fingerprint']] = None
                 if row.get('input_digest'):
                     old = ledger['drafts'].get(row['fingerprint'], {})
                     proof = old.get('replay', {}).get('proof', {})
@@ -343,7 +364,8 @@ def run(root, today, route=route, ask=ask, reserved_rules=None, projects=None):
 
             def taken_for(fingerprint):
                 own = {fingerprint: superseded[fingerprint]} if fingerprint in superseded else {}
-                taken = taken_rules(store, ledger, own)
+                retry_draft = ledger["drafts"].get(fingerprint) if screened_pairs is not None else None
+                taken = taken_rules(store, ledger, own, retry_draft)
                 taken.update(reserved_rules or {})
                 taken.update(accepted)
                 return taken
@@ -434,7 +456,10 @@ def run(root, today, route=route, ask=ask, reserved_rules=None, projects=None):
                             if not previous or record['verdict'] == 'PASS':
                                 ledger['drafts'][fingerprint] = dict(record)
                         else:
-                            ledger['drafts'][row['fingerprint']] = record
+                            fingerprint = row['fingerprint']
+                            if screened_pairs is not None and fingerprint in ledger['drafts']:
+                                ledger.setdefault('revisions', {}).setdefault(fingerprint, []).append(ledger['drafts'][fingerprint])
+                            ledger['drafts'][fingerprint] = record
                         summary['passed'] += record['verdict'] == 'PASS'
                     save()
         summary.pop("error", None)

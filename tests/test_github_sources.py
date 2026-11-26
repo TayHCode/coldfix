@@ -958,5 +958,243 @@ class PublicRepoTests(unittest.TestCase):
         self.assertEqual(self.fake.calls, [])
 
 
+def _check_run(name, conclusion, title="", summary=""):
+    return dict(__typename="CheckRun", name=name, conclusion=conclusion, status="COMPLETED",
+                title=title, summary=summary, detailsUrl=URL + f"runs/{name}")
+
+
+def _pr_commit_node(oid, message, state, contexts):
+    return dict(commit=dict(
+        oid=oid, message=message, committedDate=DATE,
+        statusCheckRollup=dict(state=state, contexts=dict(nodes=contexts)) if state is not None else None,
+    ))
+
+
+class FakeGraphQLOssPairs:
+    def __init__(self, repos, *, remaining=4500, cost=5, reset_at="2099-01-01T00:00:00Z"):
+        self.repos = repos
+        self.remaining = remaining
+        self.cost = cost
+        self.reset_at = reset_at
+        self.calls = []
+
+    def run(self, command, **kwargs):
+        self.calls.append((command, kwargs))
+        assert command[:7] == ["gh", "api", "--hostname", "github.com", "--method", "POST", "graphql"]
+        payload = json.loads(kwargs["input"])
+        assert payload["query"] == sources.OSS_PR_CHECKS
+        v = payload["variables"]
+        slug = f"{v['owner']}/{v['name']}"
+        repo = self.repos[slug]
+        self.remaining = max(0, self.remaining - self.cost)
+        prs = repo.get("pulls", [])
+        start = int(v["cursor"] or 0)
+        end = start + v["first"]
+        page = prs[start:end]
+        body = dict(data=dict(
+            rateLimit=dict(cost=self.cost, remaining=self.remaining, resetAt=self.reset_at),
+            repository=dict(
+                isPrivate=repo.get("private", False),
+                licenseInfo=dict(spdxId=repo["license"]) if repo.get("license") is not None else None,
+                pullRequests=dict(
+                    pageInfo=dict(hasNextPage=end < len(prs), endCursor=str(end)),
+                    nodes=page,
+                ),
+            ),
+        ))
+        return subprocess.CompletedProcess(command, 0, json.dumps(body), "")
+
+
+def _make_git_fixture(root):
+    repo = root / "origin"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "uploadpack.allowAnySHA1InWant", "true"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "uploadpack.allowFilter", "true"], check=True)
+    git = ["git", "-C", str(repo), "-c", "user.name=Example", "-c", "user.email=example"]
+    shas = {}
+
+    def commit_files(key, files, message, allow_empty=False):
+        for rel, content in files.items():
+            path = repo / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        subprocess.run(git + ["add", "."], check=True)
+        cmd = git + ["commit", "-qm", message] + (["--allow-empty"] if allow_empty else [])
+        subprocess.run(cmd, check=True)
+        shas[key] = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+
+    commit_files("red_bug", {"src/calc.py": "def add(a, b):\n    return a - b\n"}, "feat: add calc")
+    commit_files("green_fix", {"src/calc.py": "def add(a, b):\n    return a + b\n"}, "fix: use addition")
+    commit_files("red_flaky", {"src/flaky.py": "x = 1\n"}, "feat: flaky")
+    commit_files("green_empty", {}, "ci: retrigger checks", allow_empty=True)
+    commit_files("red_docs", {"README.md": "hello\n"}, "feat: doc red")
+    commit_files("green_docs", {"README.md": "hello world\n"}, "docs: update readme")
+    commit_files("red_ws", {"src/calc.py": "def add(a, b):\n    return a + b\n"}, "feat: ws red", allow_empty=True)
+    commit_files("green_ws", {"src/calc.py": "def add(a, b):\n    return a + b   \n"}, "format: trailing space")
+    commit_files("red_still", {"src/bug.py": "val = 0\n"}, "feat: broken")
+    commit_files("red_still_2", {"src/bug.py": "val = 1\n"}, "fix: attempt one")
+    commit_files("red_secret", {"src/cfg.py": "k = ''\n"}, "feat: cfg")
+    commit_files("green_secret", {"src/cfg.py": "k = 'gh" + "p_" + "A" * 36 + "'\n"}, "fix: add sample key")
+    commit_files("red_owner", {"src/note.py": "msg = 'a'\n"}, "feat: note")
+    commit_files("green_owner", {"src/note.py": "msg = 'contact ExampleOwner on buildhouse'\n"}, "fix: note")
+    return repo, shas
+
+
+class OssCiPairsTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+
+    def test_oss_repos_loads_json_catalog_and_filters_non_permissive_licenses(self):
+        self.assertTrue(hasattr(sources, "OSS_PR_CHECKS"))
+        catalog = self.root / "oss-repos.json"
+        catalog.write_text(json.dumps(dict(repos=[
+            dict(repo="example/alpha", license="MIT"),
+            dict(repo="example/copyleft", license="GPL-3.0"),
+            dict(repo="example/unlicensed", license=None),
+            dict(repo="example/beta", license="Apache-2.0"),
+            dict(repo="example/alpha", license="MIT"),
+        ])))
+        self.assertEqual(sources.oss_repos(catalog), ["example/alpha", "example/beta"])
+
+    def test_stage1_skips_private_and_unlicensed_and_stops_below_rate_limit_with_checkpoint_resume(self):
+        self.assertTrue(hasattr(sources, "OSS_PR_CHECKS"))
+        sha1, sha2 = f"{1:040x}", f"{2:040x}"
+        pr = dict(number=10, title="Fix parser", url=URL + "pull/10", mergedAt=DATE,
+                  commits=dict(nodes=[
+                      _pr_commit_node(sha1, "feat: break", "FAILURE", [_check_run("pytest", "FAILURE", "1 failed", "AssertionError")]),
+                      _pr_commit_node(sha2, "fix: repair", "SUCCESS", [_check_run("pytest", "SUCCESS")]),
+                  ]))
+        fake = FakeGraphQLOssPairs({
+            "example/private": dict(private=True, license="MIT", pulls=[pr]),
+            "example/nolicense": dict(private=False, license=None, pulls=[pr]),
+            "example/one": dict(private=False, license="MIT", pulls=[pr]),
+            "example/two": dict(private=False, license="Apache-2.0", pulls=[pr]),
+        }, remaining=1010, cost=5)
+        out = self.root / "out"
+        with patch.object(sources.subprocess, "run", side_effect=fake.run):
+            summary, receipt = sources.oss_gather(
+                ["example/private", "example/nolicense", "example/one", "example/two"],
+                mode="ci_pairs", output_dir=out, stage="stage1", min_remaining=1000)
+        self.assertEqual(summary["repo_status"]["example/private"]["status"], "skipped_private")
+        self.assertEqual(summary["repo_status"]["example/nolicense"]["status"], "skipped_no_license")
+        self.assertEqual(summary["repo_status"]["example/one"]["status"], "ok")
+        self.assertEqual(summary["repo_status"]["example/two"]["status"], "rate_limited")
+        self.assertTrue(receipt["stopped_early"])
+        self.assertEqual((receipt["calls"], receipt["total_cost"], receipt["min_remaining"]), (3, 15, 995))
+
+        # Resume after reset: already checkpointed repos make zero new GraphQL calls.
+        fake2 = FakeGraphQLOssPairs({"example/two": dict(private=False, license="Apache-2.0", pulls=[pr])},
+                                    remaining=4800, cost=4)
+        receipt_path = out / "rate_limit_receipt.json"
+        saved = json.loads(receipt_path.read_text())
+        saved["last_reset_at"] = "2020-01-01T00:00:00Z"
+        receipt_path.write_text(json.dumps(saved))
+        with patch.object(sources.subprocess, "run", side_effect=fake2.run):
+            summary2, receipt2 = sources.oss_gather(
+                ["example/private", "example/nolicense", "example/one", "example/two"],
+                mode="ci_pairs", output_dir=out, stage="stage1", min_remaining=1000)
+        self.assertEqual(len(fake2.calls), 1)
+        self.assertEqual(summary2["repo_status"]["example/two"]["status"], "ok")
+        self.assertEqual((receipt2["calls"], receipt2["total_cost"], receipt2["min_remaining"]), (4, 19, 995))
+
+    def test_two_stage_mining_classifies_positives_hard_negatives_and_screens_privacy_with_zero_stage2_api(self):
+        self.assertTrue(hasattr(sources, "OSS_PR_CHECKS"))
+        origin, shas = _make_git_fixture(self.root)
+        pulls = [
+            dict(number=1, title="Real bug fix", url=URL + "pull/1", mergedAt=DATE, commits=dict(nodes=[
+                _pr_commit_node(shas["red_bug"], "feat: add calc", "FAILURE",
+                                [_check_run("pytest", "FAILURE", "test_add failed", "expected 5 got -1")]),
+                _pr_commit_node(shas["green_fix"], "fix: use addition", "SUCCESS", [_check_run("pytest", "SUCCESS")]),
+            ])),
+            dict(number=2, title="Flaky empty rerun", url=URL + "pull/2", mergedAt=DATE, commits=dict(nodes=[
+                _pr_commit_node(shas["red_flaky"], "feat: flaky", "FAILURE",
+                                [_check_run("e2e", "FAILURE", "timeout", "flaked"),
+                                 _check_run("e2e", "SUCCESS")]),
+                _pr_commit_node(shas["green_empty"], "ci: retrigger checks", "SUCCESS", [_check_run("e2e", "SUCCESS")]),
+            ])),
+            dict(number=3, title="Docs and whitespace", url=URL + "pull/3", mergedAt=DATE, commits=dict(nodes=[
+                _pr_commit_node(shas["red_docs"], "feat: doc red", "FAILURE", [_check_run("lint", "FAILURE", "md")]),
+                _pr_commit_node(shas["green_docs"], "docs: update readme", "SUCCESS", [_check_run("lint", "SUCCESS")]),
+                _pr_commit_node(shas["red_ws"], "feat: ws red", "FAILURE", [_check_run("lint", "FAILURE", "ws")]),
+                _pr_commit_node(shas["green_ws"], "format: trailing space", "SUCCESS", [_check_run("lint", "SUCCESS")]),
+            ])),
+            dict(number=4, title="Still red", url=URL + "pull/4", mergedAt=DATE, commits=dict(nodes=[
+                _pr_commit_node(shas["red_still"], "feat: broken", "FAILURE", [_check_run("unit", "FAILURE", "fail 1")]),
+                _pr_commit_node(shas["red_still_2"], "fix: attempt one", "FAILURE", [_check_run("unit", "FAILURE", "fail 2")]),
+            ])),
+            dict(number=5, title="Privacy leaky fixes", url=URL + "pull/5", mergedAt=DATE, commits=dict(nodes=[
+                _pr_commit_node(shas["red_secret"], "feat: cfg", "FAILURE", [_check_run("unit", "FAILURE", "missing")]),
+                _pr_commit_node(shas["green_secret"], "fix: add sample key", "SUCCESS", [_check_run("unit", "SUCCESS")]),
+                _pr_commit_node(shas["red_owner"], "feat: note", "FAILURE", [_check_run("unit", "FAILURE", "missing")]),
+                _pr_commit_node(shas["green_owner"], "fix: note", "SUCCESS", [_check_run("unit", "SUCCESS")]),
+            ])),
+        ]
+        fake = FakeGraphQLOssPairs({"example/demo": dict(private=False, license="MIT", pulls=pulls)}, remaining=4500, cost=6)
+        policy_file = self.root / "policy.json"
+        policy_file.write_text(json.dumps(dict(
+            owner_names=["ExampleOwner"], private_repos=["secret-repo"], private_hosts=["buildhouse"])))
+        out = self.root / "pairs-out"
+        # Stage 1 only (GraphQL)
+        with patch.object(sources.subprocess, "run", side_effect=fake.run):
+            sources.oss_gather(["example/demo"], mode="ci_pairs", output_dir=out, stage="stage1")
+        self.assertEqual(len(fake.calls), 1)
+        # Stage 2 only: zero GitHub API calls allowed (patch GitHub.api to explode if touched)
+        with patch.object(sources.GitHub, "api", side_effect=AssertionError("Stage 2 must not call GitHub API")):
+            summary, receipt = sources.oss_gather(
+                ["example/demo"], mode="ci_pairs", output_dir=out, stage="stage2",
+                privacy_policy=policy_file, clone_dir=self.root / "clones",
+                repo_url_fn=lambda repo: origin.as_uri())
+        rows = [json.loads(line) for line in (out / "pairs.jsonl").read_text().splitlines() if line.strip()]
+        self.assertEqual(summary["total_pairs"], len(rows))
+        self.assertEqual(summary["positive"], 1)
+        self.assertEqual(summary["negative_breakdown"], {"docs_format_chore": 2, "flaky": 2, "still_red": 1})
+        self.assertEqual(summary["privacy_dropped"], 2)
+        self.assertEqual(receipt["calls"], 1)
+        self.assertTrue(all(row["license"] == "MIT" for row in rows))
+        pos = next(row for row in rows if row["label"] == "positive")
+        self.assertIn("-    return a - b", pos["diff"])
+        self.assertIn("+    return a + b", pos["diff"])
+        self.assertEqual(pos["failed_checks"][0]["name"], "pytest")
+        self.assertEqual(pos["failed_checks"][0]["title"], "test_add failed")
+        for neg in (row for row in rows if row["label"] == "negative"):
+            self.assertIsNone(neg["rule"])
+        raw = (out / "pairs.jsonl").read_text()
+        self.assertNotIn("ExampleOwner", raw)
+        self.assertNotIn("buildhouse", raw)
+        self.assertNotIn("gh" + "p_", raw)
+
+    def test_stage1_halves_page_size_on_transient_graphql_error(self):
+        self.assertTrue(hasattr(sources, "OSS_PR_CHECKS"))
+        sha1, sha2 = f"{3:040x}", f"{4:040x}"
+        pr = dict(number=20, title="Retry page", url=URL + "pull/20", mergedAt=DATE, commits=dict(nodes=[
+            _pr_commit_node(sha1, "feat: break", "FAILURE", [_check_run("pytest", "FAILURE", "fail")]),
+            _pr_commit_node(sha2, "fix: ok", "SUCCESS", [_check_run("pytest", "SUCCESS")]),
+        ]))
+        fake = FakeGraphQLOssPairs({"example/big": dict(private=False, license="MIT", pulls=[pr])}, remaining=4500, cost=5)
+        seen_first = []
+
+        def flaky_run(command, **kwargs):
+            first = json.loads(kwargs["input"])["variables"]["first"]
+            seen_first.append(first)
+            if first > 12:
+                return subprocess.CompletedProcess(command, 1, "", "gh: HTTP 504")
+            return fake.run(command, **kwargs)
+
+        with patch.object(sources.subprocess, "run", side_effect=flaky_run):
+            result = sources.oss_collect(sources.PublicGitHub("example/big", min_remaining=1000),
+                                         mode="ci_pairs", max_prs=25, pr_page_size=25)
+        self.assertEqual(seen_first, [25, 12])
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(len(result["candidates"]), 1)
+
+    def test_oss_repos_catalog_uses_facebook_react(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        catalog_repos = sources.oss_repos(repo_root / "oss-repos.json")
+        self.assertIn("facebook/react", catalog_repos)
+        self.assertNotIn("react/react", catalog_repos)
+
+
 if __name__ == "__main__":
     unittest.main()

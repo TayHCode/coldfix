@@ -1,4 +1,5 @@
 import importlib.util
+import inspect
 import json
 from pathlib import Path
 import subprocess
@@ -187,6 +188,22 @@ class OssReplayTests(unittest.TestCase):
             self.assertEqual(report['by_reason']['seed proven']['total'], 1)
             self.assertEqual(report['outcomes'], {'repository is not public': 1})
             self.assertIn('| repository is not public | 1 |', (reports[0].parent / 'report.md').read_text())
+
+    def test_anonymous_clone_blobless_fetches_revisions_and_diffs_locally(self):
+        self.assertIn('blobless', inspect.signature(oss_replay.anonymous_clone).parameters)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            origin, (before, after) = fixture_repo(root)
+            subprocess.run(['git', '-C', str(origin), 'config', 'uploadpack.allowFilter', 'true'], check=True)
+            clone = root / 'bare.git'
+            env = oss_replay.anonymous_clone(origin.as_uri(), [before, after], clone, 30, blobless=True)
+            is_bare = subprocess.check_output(['git', '-C', str(clone), 'rev-parse', '--is-bare-repository'],
+                                              text=True, env=env).strip()
+            diff = subprocess.check_output(['git', '-C', str(clone), '-c', 'credential.helper=',
+                                            'diff', '--no-color', before, after], text=True, env=env)
+        self.assertEqual(is_bare, 'true')
+        self.assertIn('-bad', diff)
+        self.assertIn('+good', diff)
 
 
 if __name__ == '__main__':

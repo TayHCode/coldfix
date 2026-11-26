@@ -3,9 +3,11 @@ import argparse
 import ast
 import collections
 import hashlib
+import os
 from pathlib import Path
 import re
 import shlex
+import subprocess
 import tempfile
 import tokenize
 
@@ -226,6 +228,44 @@ def full_suite(root, repo, before, after, timeout, deadline=None):
                 after=suite_counts(fixed), **(dict(before=suite_counts(base)) if base else {}))
 
 
+def generated_controls(repo, before, after, test_path, scratch, timeout, deadline=None):
+    def git(checkout, *args, input=None):
+        try:
+            return c.privacy_git(checkout, *args, input=input, timeout=c.remaining_timeout(timeout, deadline))
+        except subprocess.TimeoutExpired:
+            raise c.ColdfixError("generated replay control timed out") from None
+
+    changes = git(repo, "diff", "--raw", "--no-abbrev", "--no-renames", "-z", before, after, "--", ".",
+                  ":(exclude,literal)" + test_path).split(b"\0")
+    documents, removed, added = [], [], []
+    for offset in range(0, len(changes) - 1, 2):
+        header, path = changes[offset:offset + 2]
+        old_mode, mode, _, blob, status = header[1:].split()
+        name = Path(os.fsdecode(path))
+        suffix = name.suffix.lower()
+        if (suffix in {".md", ".markdown", ".mdx", ".rst", ".adoc"}
+                or suffix in {"", ".txt"} and name.stem.lower() in {"readme", "changelog", "contributing", "authors", "news"}
+                or suffix == ".txt" and any(part.lower() in {"doc", "docs"} for part in name.parts[:-1])):
+            documents.append(":(literal)" + str(name))
+        if status == b"D":
+            removed.append(b"0 " + b"0" * len(blob) + b"\t" + path + b"\0")
+        elif status == b"A" or mode == b"120000" or old_mode[:2] != mode[:2]:
+            added.append((mode, blob, path))
+    if documents:
+        patch = git(repo, "diff", "--no-ext-diff", "--no-textconv", "--binary", "--full-index", "--no-renames", before, after, "--", *documents)
+        yield "documentation", after, patch, "PASS"
+    if removed or added:
+        index = scratch / "namespace"
+        git(repo, "clone", "--quiet", "--shared", "--no-checkout", "--", str(repo), str(index))
+        git(index, "read-tree", before)
+        empty = git(index, "hash-object", "-w", "--stdin", input=b"").strip()
+        entries = removed + [mode + b" " + (empty if mode.startswith(b"100") else blob) + b"\t" + path + b"\0"
+                             for mode, blob, path in added]
+        git(index, "update-index", "-z", "--index-info", input=b"".join(entries))
+        patch = git(index, "diff", "--no-ext-diff", "--no-textconv", "--cached", "-R", "--binary", "--full-index", "--no-renames", before, "--")
+        yield "file presence", before, patch, "FAIL"
+
+
 def admit(args, root, store):
     failure = store["failures"].get(args.failure)
     c.require(failure is not None and failure["version"] == 2 and failure.get("source_ref"),
@@ -238,7 +278,7 @@ def admit(args, root, store):
                   and coldpass_replay.matches(failure, coldpass), 'identity_mismatch')
         coldpass_replay.validate_screen(coldpass, args.coldpass_entry, args.coldpass_script)
     named = re.fullmatch(r"(?:FAIL|ERROR): test\w*", args.diagnostic)
-    observed = re.findall(r"(?:FAIL|ERROR): test\w*", failure["error"]) if named else []
+    observed = failure_ingest.unittest_diagnostics(failure) if named else []
     if coldpass is not None:
         c.require(args.diagnostic == regression_adapter.payload(args.coldpass_script)["diagnostic"], "wrong_failure")
     elif failure.get("kind") == "review":

@@ -8,6 +8,9 @@
   "briefs",
   "docs",
   "evals",
+  "training/*",
+  "tests/test_training_data.py",
+  "tests/test_eval_gguf.py",
   "scripts",
   "speed/bench.sh",
   "speed/investigate.py",
@@ -39,6 +42,7 @@
   "tests/test_agentlocker_import.py",
   "tests/test_workflow_runners.py",
   "tests/test_speed_parse.py",
+  "tests/test_scale_oss_ci_pairs.py",
   "checks/lesson-checks.json"
  ],
  "quickstart": [
@@ -2680,7 +2684,7 @@
    "kind": "export-path-review",
    "path": "public-export.txt",
    "reason": "Public file list of this export; the layout, environment-literal and packaging tests read it at the export root.",
-   "source_sha256": "9c4daa4f6fde10013e2ab5a7cf3937598a4ea91737385510027ce41886567b4c"
+   "source_sha256": "8be5037fd96a52862d53ff241a584b49de282c4cea19a431627e3af8ad55f42a"
   },
   {
    "scope": "tree",
@@ -2723,7 +2727,7 @@
    "path": "tests/test_cli.py",
    "line": 164,
    "fingerprint": "8d6b26862863e91a",
-   "source_sha256": "cb042c8c8c066fbe9ed41d3e760a87df2e3a9be9314adfa2daf11de2f102a9a0",
+   "source_sha256": "cedc8ae65bf7199ffb414b6eab12262be996cc9db45d1493b5d2c2cd73bbfa18",
    "classification": "false-positive",
    "reason": "Synthetic test input for literal path recognition."
   },
@@ -2783,7 +2787,7 @@
    "path": "tests/test_cli.py",
    "line": 164,
    "fingerprint": "8d6b26862863e91a",
-   "source_sha256": "cb042c8c8c066fbe9ed41d3e760a87df2e3a9be9314adfa2daf11de2f102a9a0",
+   "source_sha256": "cedc8ae65bf7199ffb414b6eab12262be996cc9db45d1493b5d2c2cd73bbfa18",
    "classification": "false-positive",
    "reason": "Synthetic test input for literal path recognition."
   },

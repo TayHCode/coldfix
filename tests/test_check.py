@@ -28,7 +28,9 @@ SCANS = (
     "runnable-commands", "resolve-tools-before-restricting-path", "stream-guest-output-to-log",
     "terminal-cloud-init-status", "pre-push-uses-pushed-tree", "update-callers-and-stubs",
     "use-the-triggering-invocation-id",
+    "agents-md-drift", "agent-config-secrets",
 )
+BUILTIN_TREE_SCANS = ("agents-md-drift", "agent-config-secrets")
 PYTHON_SCANS = {
     "authz-everywhere", "errors-are-states", "no-environment-assumptions",
     "resolve-tools-before-restricting-path", "split-jsonl-on-newlines",
@@ -470,10 +472,41 @@ class CheckTests(ScanSafety, ScanCase):
     def test_lessons_without_a_scan_are_listed_as_not_checked(self):
         code, rows = self.lessons()
         library = sorted(path.name for path in (ROOT / "library").iterdir() if (path / "rule.md").is_file())
-        self.assertEqual((code, sorted(rows)), (0, library))
+        self.assertEqual((code, sorted(rows)), (0, sorted([*library, *BUILTIN_TREE_SCANS])))
         for lesson, row in rows.items():
             with self.subTest(lesson):
                 self.assertEqual(row["status"], "PASS" if lesson in SCANS else "NO_PORTABLE_CHECK")
+
+    def test_diff_reports_only_hits_in_changed_and_untracked_files(self):
+        uncollected = ("import unittest\n\n\nclass DemoTests(unittest.TestCase):\n    pass\n\n\n"
+                       "def test_never_collected():\n    pass\n")
+        self.write({"test_old.py": uncollected, "test_edited.py": "import unittest\n"})
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t", "-c", "commit.gpgsign=false"]
+        subprocess.run(git + ["init", "-q"], cwd=self.tree, check=True)
+        subprocess.run(git + ["add", "-A"], cwd=self.tree, check=True)
+        subprocess.run(git + ["commit", "-qm", "base"], cwd=self.tree, check=True)
+        clean = self.check("--diff", "--json")
+        self.assertEqual(clean.returncode, 0, clean.stderr)
+        self.assertEqual({row["hits"] == [] for row in json.loads(clean.stdout)["lessons"]}, {True})
+        self.write({"test_edited.py": uncollected, "test_new.py": uncollected})
+        code = self.check("--diff", "--json")
+        rows = {row["lesson"]: row for row in json.loads(code.stdout)["lessons"]}
+        self.assertEqual((code.returncode, rows["tests-must-test"]["hits"]), (1, ["test_edited.py:8", "test_new.py:8"]))
+        self.assertEqual(self.lessons()[1]["tests-must-test"]["hits"], ["test_edited.py:8", "test_new.py:8", "test_old.py:8"])
+        self.assertNotEqual(self.check("--diff", "no-such-revision").returncode, 0)
+
+    def test_diff_of_a_subdirectory_reports_its_edited_tracked_files(self):
+        uncollected = ("import unittest\n\n\nclass DemoTests(unittest.TestCase):\n    pass\n\n\n"
+                       "def test_never_collected():\n    pass\n")
+        self.write({"pkg/test_edited.py": "import unittest\n"})
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t", "-c", "commit.gpgsign=false"]
+        subprocess.run(git + ["init", "-q"], cwd=self.tree, check=True)
+        subprocess.run(git + ["add", "-A"], cwd=self.tree, check=True)
+        subprocess.run(git + ["commit", "-qm", "base"], cwd=self.tree, check=True)
+        self.write({"pkg/test_edited.py": uncollected, "pkg/test_new.py": uncollected})
+        code = self.check("pkg", "--diff", "--json")
+        rows = {row["lesson"]: row for row in json.loads(code.stdout)["lessons"]}
+        self.assertEqual((code.returncode, rows["tests-must-test"]["hits"]), (1, ["test_edited.py:8", "test_new.py:8"]))
 
     def test_plain_output_lists_each_hit_under_its_rule(self):
         self.write({"test_demo.py": "import unittest\n\n\nclass DemoTests(unittest.TestCase):\n    pass\n\n\n"
@@ -602,6 +635,20 @@ class CheckTests(ScanSafety, ScanCase):
 
 def source(*rows):
     return "\n".join(rows) + "\n"
+
+
+class HookTests(unittest.TestCase):
+    def test_hook_runs_the_coldrecall_hook_and_always_exits_0(self):
+        with tempfile.TemporaryDirectory() as folder:
+            def cli(*args, stdin=""):
+                result = subprocess.run([sys.executable, str(CLI), *args], input=stdin, cwd=folder,
+                                        capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                return result.stdout
+
+            self.assertIn("hook", cli("--help"))
+            self.assertIn("--budget", cli("hook", "--help"))
+            self.assertEqual(cli("hook", stdin="not json"), "")
 
 
 class IncompleteTests(unittest.TestCase):

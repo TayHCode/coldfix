@@ -43,7 +43,8 @@ else:
     print(json.dumps(dict(lessons=[dict(id=case["id"], verdict="lesson", source="owner", kind="conduct",
                                         finding_class="none", title="Never pop a shared stash", what_went_wrong="The agent popped another stash.",
                                         rule="Use a tagged stash and apply it by SHA.", how_to_check="Look for a bare stash pop.",
-                                        duplicate_of="", wrong_message="w1", fixed_message="f1") for case in data["cases"]])))
+                                        duplicate_of="", wrong_message="w1", fixed_message="f1", check_pattern="", bad_code="",
+                                        good_code="") for case in data["cases"]])))
 """
 
 
@@ -60,7 +61,8 @@ def judge(flag=("git stash pop",), general=.9, follows=("by SHA",)):
 def lesson(case, **changes):
     row = dict(id=case["id"], verdict="lesson", source="owner", kind="conduct", finding_class="none", title="Never pop a shared stash",
                what_went_wrong="The agent popped another session's stash.", rule="Use a tagged stash and apply it by SHA.",
-               how_to_check="Look for a bare stash pop.", duplicate_of="", wrong_message="w1", fixed_message="f1")
+               how_to_check="Look for a bare stash pop.", duplicate_of="", wrong_message="w1", fixed_message="f1",
+               check_pattern="", bad_code="", good_code="")
     row.update(changes)
     return row
 
@@ -334,6 +336,51 @@ class TranscriptLessonsTests(unittest.TestCase):
         self.assertEqual(self.run_batch(counting)["proven"], 1)
         self.assertEqual([shape for shape in self.shapes if shape in (td.SUMMARIES, tl.REPLAYS)], [td.SUMMARIES, tl.REPLAYS])
 
+    def test_coolant_advice_stays_in_domain_review_before_replay(self):
+        record = self.lead(wrong="I guessed which coolant this hatchback needs.",
+                           owner="Check the vehicle handbook first.")
+        self.replies[record["id"]] = lambda case: lesson(
+            case, title="Check the specification", rule="Verify the specification before advising.",
+            what_went_wrong="The agent guessed without checking the manual.")
+        submit = self.ask
+
+        def ask(model, prompt, shape, work):
+            reply = submit(model, prompt, shape, work)
+            if shape is td.SUMMARIES:
+                candidate = json.loads(prompt.split("\n", 1)[1])["new_lessons"][0]
+                if any("coolant" in turn["text"] for turn in candidate.get("source_turns", [])):
+                    reply["lessons"][0]["scope"] = "content"
+            return reply
+
+        self.ask = ask
+        batch = self.run_batch()
+        self.assertEqual((batch["rejected"], batch["proven"]), (1, 0))
+        self.assertNotIn(tl.REPLAYS, self.shapes)
+        self.assertIn(record["id"], td.pending(self.store))
+        self.assertIn("engineering domain review (1)", td.pending(self.store))
+
+    def test_oversized_duplicate_catalog_checks_whole_rules_before_replay(self):
+        for name in ("first", "last"):
+            (self.coldlocker / "rules" / (name + ".md")).write_text(name * 140_000)
+        record = self.lead()
+        expected = td.known_lessons(self.lessons)
+        submit = self.ask
+
+        def ask(model, prompt, shape, work):
+            self.assertLessEqual(len(prompt), 1_048_576)
+            if shape is td.SUMMARIES:
+                catalog = json.loads(prompt.split("\n", 1)[1])["known_lessons"]
+                if expected[-1] in catalog:
+                    self.duplicate_of[record["id"]] = expected[-1]["id"]
+            return submit(model, prompt, shape, work)
+
+        self.ask = ask
+        batch = self.run_batch()
+        self.assertEqual((batch["duplicate"], batch["errors"]), (1, 0))
+        self.assertEqual([row for group in self.compared for row in group], expected)
+        self.assertEqual(batch["calls"], len(self.shapes))
+        self.assertNotIn(tl.REPLAYS, self.shapes)
+
     def test_leads_grouped_under_a_delivery_duplicate_are_duplicates_of_the_same_lesson(self):
         first, second = self.lead(), self.lead(wrong="Running git stash pop again.")
         self.group = [first["id"], second["id"]]
@@ -364,6 +411,36 @@ class TranscriptLessonsTests(unittest.TestCase):
         batch = self.run_batch()
         self.assertEqual((batch["errors"], batch["proven"], batch["reasons"]),
                          (0, 0, {"unprovable: code mistake needs repository replay": 1}))
+
+    def test_a_code_bug_whose_check_pattern_fails_the_mistake_and_passes_the_fix_is_diff_proven(self):
+        record = self.lead(wrong="I wrapped it as try: parse() except: pass", fixed="Now it reads try: parse() except ValueError: pass")
+        self.replies[record["id"]] = lambda case: lesson(case, kind="code", finding_class="bug", check_pattern=r"except\s*:",
+                                                         bad_code="except: pass", good_code="except ValueError: pass")
+        batch = self.run_batch()
+        self.assertEqual((batch["errors"], batch["proven"]), (0, 1))
+        lead = self.ledger()["leads"][record["id"]]
+        self.assertEqual({key: lead["proof"][key] for key in ("proof_tier", "pattern", "before", "after")},
+                         dict(proof_tier="diff", pattern=r"except\s*:", before="FAIL", after="PASS"))
+        self.assertTrue(tl.proven(lead))
+
+    def test_a_diff_check_is_rejected_unless_it_fails_the_quoted_mistake_and_passes_the_quoted_fix(self):
+        rows = [dict(role="owner", id="r1", text="Parse it."), dict(role="assistant", id="w1", text="try: parse() except: pass"),
+                dict(role="assistant", id="f1", text="try: parse() except ValueError: pass")]
+        code = dict(kind="code", finding_class="bug", bad_code="except: pass", good_code="except ValueError: pass")
+        cases = [(dict(check_pattern=r"except"), "check fails the corrected code"),
+                 (dict(check_pattern=r"finally"), "check misses the mistake"),
+                 (dict(check_pattern=r"except\s*:", bad_code="except Exception: pass"), "bad code is not in the mistaken message"),
+                 (dict(check_pattern=r"except\s*:", good_code="except OSError: pass"), "good code is not in the corrected message"),
+                 (dict(check_pattern=r"(a+)+$", bad_code="except: pass"), "check misses the mistake")]
+        for changes, reason in cases:
+            with self.subTest(reason=reason, changes=changes):
+                status, why, _ = tl.prove(lesson(dict(id="x"), **dict(code, **changes)), rows, None, [], judge())
+                self.assertEqual((status, why), ("rejected", reason))
+        fix_first = tl.prove(lesson(dict(id="x"), **dict(code, check_pattern=r"except\s*:")), [rows[0], rows[2], rows[1]],
+                             None, [], judge())
+        self.assertEqual(fix_first[:2], ("rejected", "corrected message is not a later agent message"))
+        self.assertEqual(tl.prove(lesson(dict(id="x"), kind="code", finding_class="bug"), rows, None, [], judge())[:2],
+                         ("unprovable", "code mistake needs repository replay"))
 
     def test_a_design_security_or_maintainability_finding_waits_for_owner_approval_with_its_evidence(self):
         for finding_class in ("design", "security", "maintainability"):
@@ -466,7 +543,84 @@ class TranscriptLessonsTests(unittest.TestCase):
     def test_a_lead_too_long_to_read_whole_is_not_recorded_as_having_no_mistake(self):
         record = self.lead(wrong="x" * tl.CASE_CHARS + " git stash pop")
         self.replies[record["id"]] = lambda case: lesson(case, verdict="no_mistake")
-        self.assertEqual(self.run_batch()["reasons"], {"unprovable: lead too long to read whole": 1})
+        self.assertEqual(self.run_batch()["reasons"], {"unprovable: no_mistake in focused window": 1})
+        [case] = json.loads(self.prompts[0].split("\n", 1)[1])["cases"]
+        self.assertEqual(case["turns"][-1]["text"], FIXED)
+
+    def test_flagged_long_rollout_extracts_the_correction_with_nearby_command_context(self):
+        path = self.dir / "rollout-window.jsonl"
+        messages = []
+        for i in range(60):
+            role, text = "assistant", "Testing the fix. " + "x" * 1000
+            if i == 46:
+                text = "I ran git stash pop before testing the parser."
+            if i == 47:
+                role, text = "user", "That is wrong. Apply your own stash and re-run the parser test."
+            if i == 48:
+                text = "You're right. " + FIXED
+            messages.append(dict(type="response_item", timestamp="2026-01-01T00:00:00Z",
+                                 payload=dict(type="message", role=role, content=text)))
+            if i == 47:
+                messages.append(dict(type="response_item", timestamp="2026-01-01T00:00:00Z",
+                                     payload=dict(type="function_call", name="exec_command",
+                                                  arguments=json.dumps(dict(cmd="pytest tests/test_parser.py")))))
+        path.write_text("\n".join(map(json.dumps, messages)))
+        scan = self.dir / "window.sqlite"
+        with mock.patch.object(tm, "score", return_value=.9) as score:
+            tm.scan([path], scan, self.store, "http://example.invalid", "jev", None, 1, 1, .6)
+        self.assertNotIn("pytest tests/test_parser.py", str(score.call_args))
+        [record] = c.load_store(self.store)[1]["failures"].values()
+        def extract(case):
+            shown = {row["id"]: row["text"] for row in case["turns"]}
+            if "git stash pop" in shown.get("L47", "") and FIXED in shown.get("L50", ""):
+                return lesson(case, wrong_message="L47", fixed_message="L50")
+            return lesson(case, verdict="no_mistake")
+        self.replies[record["id"]] = extract
+        batch = self.run_batch()
+        [case] = json.loads(self.prompts[0].split("\n", 1)[1])["cases"]
+        self.assertEqual([r["id"] for r in case["turns"]],
+                         [f"L{i}" for i in range(38, 60) if i != 49])
+        self.assertEqual(batch["focused"], 1)
+        self.assertIn("exec_command pytest test_parser.py", json.dumps(case))
+        self.assertEqual(batch["proven"], 1)
+        source_ids = record["source_ref"].split("#messages=")[1].split(",")
+        self.assertIn("L47", source_ids)
+        self.assertIn("L50", source_ids)
+
+    def test_windowed_extraction_rejects_an_invented_message_id(self):
+        record = self.lead(wrong="git stash pop " * 2000)
+        self.replies[record["id"]] = lambda case: lesson(case, fixed_message="invented")
+        self.assertEqual(self.run_batch()["reasons"], {"rejected: message outside focused evidence": 1})
+
+    def test_windowed_lesson_still_needs_a_later_corrected_message(self):
+        record = self.lead(wrong="git stash pop " * 2000)
+        self.replies[record["id"]] = lambda case: lesson(case, fixed_message="w1")
+        self.assertEqual(self.run_batch()["reasons"], {"rejected: corrected message is not a later agent message": 1})
+
+    def test_extraction_alone_uses_sol(self):
+        self.lead()
+        self.lead(wrong="Another git stash pop.")
+        seen = []
+        def ask(model, prompt, shape, work):
+            seen.append((shape, model["model"]))
+            return self.ask(model, prompt, shape, work)
+        with mock.patch.object(tl.learn_daily, "route", return_value=LUNA):
+            tl.run(self.store, self.coldlocker, self.scans, tl.BATCH, judge(), ask=ask)
+        self.assertEqual([model for shape, model in seen if shape == tl.LESSONS], ["gpt-6.2-sol"])
+        self.assertEqual({model for shape, model in seen if shape != tl.LESSONS}, {"luna"})
+
+    def test_sol_exec_is_limited_to_the_extraction_schema(self):
+        def respond(command, **kwargs):
+            self.assertEqual(command[command.index("--model") + 1], "gpt-6.2-sol")
+            Path(command[command.index("--output-last-message") + 1]).write_text('{"lessons": []}')
+        with mock.patch.dict(os.environ, COLDFIX_MODEL_CMD=""), \
+                mock.patch.object(tl.subprocess, "run", side_effect=respond) as launch:
+            model = tl.model_route("transcript-extraction")
+            self.assertEqual(tl.ask_model(model, "extract", tl.LESSONS, self.dir), {"lessons": []})
+            for shape in (tl.GROUPS, tl.REPLAYS, td.SUMMARIES):
+                with self.subTest(shape=next(iter(shape["properties"]))), self.assertRaises(c.ColdfixError):
+                    tl.ask_model(model, "other", shape, self.dir)
+            launch.assert_called_once()
 
     def test_a_grouping_that_omits_an_id_groups_nothing(self):
         first = self.lead()
@@ -622,11 +776,13 @@ class TranscriptLessonsTests(unittest.TestCase):
         self.assertEqual(self.main()[1]["judge"], "claude-haiku-5-5")
 
     def test_a_run_scans_the_next_transcripts_then_logs_scanned_flagged_and_proven(self):
-        counts = dict(scanned=100, jev_flagged=30, errors=0)
+        counts = dict(scanned=100, archives_scanned=6, jev_flagged=30, errors=0, jev_calls=61, imported=30)
         with mock.patch.object(tl.transcript_mistakes, "scan", return_value=counts) as scan, \
              mock.patch.object(tl, "run", return_value=dict(picked=100, proven=8, errors=0)):
             code, line = self.main("--transcripts", str(self.dir))
         self.assertEqual((code, line["scanned"], line["flagged"], line["proven"]), (0, 100, 30, 8))
+        self.assertEqual((line["archives_scanned"], line["scan_errors"], line["scan_jev_calls"], line["scan_imported"]),
+                         (6, 0, 61, 30))
         self.assertEqual(scan.call_args.args[6:8], (tl.BATCH, tl.BATCH))
 
     def test_the_transcript_batch_runs_on_the_model_command_without_jev_or_cold(self):

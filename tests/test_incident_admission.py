@@ -8,10 +8,12 @@ import subprocess
 import re
 import sys
 import tempfile
+import textwrap
 import time
 import unittest
 from unittest import mock
 
+import ci_batch
 import coldfix as c
 import coldrecall
 import incident_admission
@@ -34,6 +36,152 @@ SOURCE = "https://github.com/example/calc/pull/7"
 
 FLAGGED_LESSON = dict(id="a" * 32, check_script="", expected_failure="FAIL", check_command="python3 {check}",
                       admission=dict(test_sha256="b" * 64))
+
+PYTEST_STUB = r"""import ast
+import os
+from pathlib import Path
+import re
+import sys
+import types
+import unittest
+
+_OPS = {
+    "Eq": lambda a, b: a == b,
+    "NotEq": lambda a, b: a != b,
+    "Lt": lambda a, b: a < b,
+    "LtE": lambda a, b: a <= b,
+    "Gt": lambda a, b: a > b,
+    "GtE": lambda a, b: a >= b,
+    "In": lambda a, b: a in b,
+    "NotIn": lambda a, b: a not in b,
+    "Is": lambda a, b: a is b,
+    "IsNot": lambda a, b: a is not b,
+}
+_SYMBOLS = {
+    "Eq": "==", "NotEq": "!=", "Lt": "<", "LtE": "<=", "Gt": ">",
+    "GtE": ">=", "In": "in", "NotIn": "not in", "Is": "is", "IsNot": "is not",
+}
+
+
+class _Mark:
+    @staticmethod
+    def parametrize(names, values):
+        keys = [name.strip() for name in names.split(",")] if isinstance(names, str) else list(names)
+
+        def decorate(func):
+            func._parametrize = [tuple(row) if len(keys) > 1 else (row,) for row in values]
+            return func
+
+        return decorate
+
+
+mark = _Mark()
+
+
+def _assert_cmp(left, op_name, right):
+    if not _OPS[op_name](left, right):
+        raise AssertionError(f"assert {left!r} {_SYMBOLS[op_name]} {right!r}")
+
+
+class _AssertRewriter(ast.NodeTransformer):
+    def visit_Assert(self, node):
+        self.generic_visit(node)
+        if (node.msg is None and isinstance(node.test, ast.Compare)
+                and len(node.test.ops) == 1 and type(node.test.ops[0]).__name__ in _OPS):
+            call = ast.Call(
+                func=ast.Name(id="_pytest_assert_cmp", ctx=ast.Load()),
+                args=[node.test.left, ast.Constant(type(node.test.ops[0]).__name__), node.test.comparators[0]],
+                keywords=[],
+            )
+            return ast.copy_location(ast.Expr(value=call), node)
+        return node
+
+
+def _parse_nodeid(argv):
+    skip = False
+    for arg in argv:
+        if skip:
+            skip = False
+        elif arg == "-p":
+            skip = True
+        elif not arg.startswith("-"):
+            return arg
+    return ""
+
+
+def _load(filepath):
+    source = filepath.read_text(encoding="utf-8")
+    tree = ast.fix_missing_locations(_AssertRewriter().visit(ast.parse(source, str(filepath))))
+    module = types.ModuleType(filepath.stem)
+    module.__file__ = str(filepath.resolve())
+    module._pytest_assert_cmp = _assert_cmp
+    sys.modules[module.__name__] = module
+    exec(compile(tree, module.__file__, "exec"), module.__dict__)
+    return module
+
+
+_SEP = ":" * 2
+
+
+def _resolve(module, parts):
+    if len(parts) == 3:
+        cls = getattr(module, parts[1])
+        if isinstance(cls, type) and issubclass(cls, unittest.TestCase):
+            return cls(parts[2]).debug
+        return getattr(cls(), parts[2])
+    if len(parts) == 2:
+        match = re.fullmatch(r"(\w+)(?:\[([^\]]+)\])?", parts[1])
+        if match is None:
+            raise ValueError(f"unsupported nodeid: {_SEP.join(parts)}")
+        func = getattr(module, match[1])
+        if match[2] is None:
+            return func
+        cases = getattr(func, "_parametrize", [])
+        chosen = next(case for case in cases if "-".join(str(item) for item in case) == match[2])
+        return lambda: func(*chosen)
+    raise ValueError(f"unsupported nodeid: {_SEP.join(parts)}")
+
+
+def main(argv=None):
+    sys.modules.setdefault("pytest", sys.modules[__name__])
+    nodeid = _parse_nodeid(sys.argv[1:] if argv is None else argv)
+    parts = nodeid.split(_SEP)
+    filepath = Path(parts[0])
+    try:
+        module = _load(filepath)
+    except Exception as exc:
+        print(f"ImportError while importing test module '{filepath.resolve()}'.")
+        print(f"E   {type(exc).__name__}: {exc}")
+        print("1 error in 0.01s")
+        return 2
+    try:
+        runner = _resolve(module, parts)
+    except Exception as exc:
+        print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+    try:
+        runner()
+    except Exception as exc:
+        text = str(exc)
+        if isinstance(exc, AssertionError) and text.startswith("assert "):
+            detail = text
+        elif text:
+            detail = f"{type(exc).__name__}: {text}"
+        else:
+            detail = type(exc).__name__
+        width = int(os.environ.get("COLUMNS", "80"))
+        print("F")
+        print(f"FAILED {nodeid} - {detail}"[:width])
+        print("1 failed in 0.01s")
+        return 1
+    print(".")
+    print("1 passed in 0.01s")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+"""
 
 
 class AdmissionCase(unittest.TestCase):
@@ -90,6 +238,144 @@ class AdmissionCase(unittest.TestCase):
 
 
 class AdmissionTests(AdmissionCase):
+    def generated_incident(self, body, *, rejection="", changed_docs=True):
+        path = "tests/test_coldfix_proof_0123456789ab.py"
+        repo = self.cwd / "project"
+        (repo / "tests").mkdir(parents=True)
+        self.git(repo, "init", "-q")
+        self.git(repo, "config", "user.name", "Fixture")
+        self.git(repo, "config", "user.email", "fixture@example.invalid")
+        for doc in ("README.md", "CONTRIBUTING.md", "BRIEFING.md"):
+            (repo / doc).write_text("old route")
+        (repo / "weights.txt").write_text("2")
+        (repo / "scale.py").write_text("from pathlib import Path\ndef scale(x): return x * int(Path('weights.txt').read_text())\n")
+        (repo / "manifest.json").write_text("[]")
+        (repo / "ramp.py").write_text("def decision(): return 'GO'\n")
+        self.git(repo, "add", ".")
+        self.git(repo, "commit", "-qm", "before")
+        before = self.git(repo, "rev-parse", "HEAD")
+        if changed_docs:
+            for doc in ("README.md", "CONTRIBUTING.md", "BRIEFING.md"):
+                (repo / doc).write_text("new heading, PyYAML, product --version")
+        (repo / "weights.txt").write_text("3")
+        (repo / "manifest.json").write_text('[{"file":"README.md","command":"product --version"}]')
+        (repo / "ramp.py").write_text("def decision(): return 'STOP'\n")
+        (repo / "product.py").write_text("enabled = True\n")
+        (repo / path).write_text("import json, os, runpy, unittest\nfrom pathlib import Path\n"
+                                 "class Proof(unittest.TestCase):\n    def test_add_sums(self):\n"
+                                 + textwrap.indent(body, "        ") + "\n")
+        self.git(repo, "add", ".")
+        self.git(repo, "commit", "-qm", "after")
+        result = self.admit(self.failure(), repo, before, "HEAD", test_path=path, code=2 if rejection else 0)
+        if rejection:
+            self.assertIn("incident not admitted; " + rejection, result.stderr)
+            self.assertEqual(self.proven(), [])
+        return result
+
+    def test_generated_readme_heading_cannot_prove_an_incident(self):
+        self.generated_incident("self.assertIn('new heading', Path('README.md').read_text())", rejection="documentation control FAIL; expected PASS")
+
+    def test_generated_dependency_prose_cannot_prove_an_incident(self):
+        self.generated_incident("for name in ('README.md', 'CONTRIBUTING.md'):\n"
+                                "    self.assertRegex(Path(name).read_text(), 'PyYAML')", rejection="documentation control FAIL; expected PASS")
+
+    def test_generated_readme_pin_cannot_prove_an_incident(self):
+        self.generated_incident("pins = json.loads(Path('manifest.json').read_text())\n"
+                                "self.assertTrue(pins)\nfor pin in pins:\n"
+                                "    self.assertIn(pin['command'], Path(pin['file']).read_text())", rejection="documentation control FAIL; expected PASS")
+
+    def test_generated_routing_prose_cannot_prove_an_incident(self):
+        self.generated_incident("self.assertNotIn('old route', Path('BRIEFING.md').read_text())", rejection="documentation control FAIL; expected PASS")
+
+    def test_generated_missing_target_cannot_prove_an_incident(self):
+        self.generated_incident("target = Path('product.py')\nself.assertTrue(target.is_file())", rejection="file presence control PASS; expected FAIL")
+
+    def test_generated_directory_listing_cannot_prove_an_incident(self):
+        self.generated_incident("self.assertIn('product.py', os.listdir('.'))", rejection="file presence control PASS; expected FAIL")
+
+    def test_generated_behavior_red_after_passing_file_checks_still_counts(self):
+        self.generated_incident("self.assertTrue(Path('ramp.py').is_file())\n"
+                                "self.assertIn('old route', Path('README.md').read_text())\n"
+                                "ramp = runpy.run_path('ramp.py')\nself.assertEqual(ramp['decision'](), 'STOP')",
+                                changed_docs=False)
+        self.assertEqual(len(self.proven()), 1)
+
+    def test_generated_product_behavior_can_depend_on_text_data(self):
+        self.generated_incident("self.assertEqual(runpy.run_path('scale.py')['scale'](5), 15)")
+        self.assertEqual(len(self.proven()), 1)
+
+    def test_screened_oss_replay_proves_only_the_identified_upstream_regression(self):
+        repo, before, after = self.repo()
+        ref = self.failure(kind="review", error="Wrong rounding result for the sum.")
+        draft = dict(evidence=[ref], verdict="PASS", headline="Addition returned a difference.",
+                     draft=dict(kind="test", title="Sum operands", rule="Keep add summing its operands."))
+        legacy = dict(draft, evidence=["unreviewed"])
+        ledger = dict(drafts=dict(current=draft, old=legacy))
+        pair = dict(oss_failure=ref, repo="example/fixture-app", before=before, after=after,
+                    path="calc.py", start_line=2, end_line=2)
+        with mock.patch.object(ci_batch.learn_replay, "source_repo", return_value=repo), \
+                mock.patch.object(ci_batch.learn_replay, "generated_proof", side_effect=AssertionError):
+            result = ci_batch.replay_oss(self.store, ledger, self.cwd, [pair], 120)
+        self.assertEqual(result["proven"], 1)
+        self.assertNotIn("replay", legacy)
+        [receipt] = self.records("receipts")
+        self.assertEqual([receipt[side]["status"] for side in ("before", "after", "reversed")], ["FAIL", "PASS", "FAIL"])
+
+    def test_recurring_oss_proof_uses_the_new_test_only_after_prior_evidence_passes_rescreening(self):
+        repo, before, after = self.repo()
+        body = "Wrong rounding result for the sum."
+        old = self.failure(kind="review", error=body, source=SOURCE + "#discussion_r1")
+        fresh = self.failure(kind="review", error=body, source=SOURCE + "#discussion_r2")
+        draft = dict(evidence=[fresh], verdict="PASS", headline="Addition returned a difference.",
+                     draft=dict(kind="test", title="Sum operands", rule="Keep add summing its operands."))
+        base = dict(repo="example/fixture-app", before=before, after=after, path="calc.py",
+                    start_line=2, end_line=2, oss_pr=7)
+        older = dict(base, oss_failure=old, finding_url=SOURCE + "#discussion_r1")
+        current = dict(base, oss_failure=fresh, finding_url=SOURCE + "#discussion_r2")
+        batches = [dict(oss_pairs=[older])]
+        entry = dict(oss_pairs=[current])
+        ledger = dict(drafts=dict(current=draft))
+        pull = dict(number=7, title="Correct rounding", body="", labels=[dict(name="security")])
+        comments = [dict(body=body, original_commit_id=before, html_url=older["finding_url"])]
+        def api(endpoint, **kwargs):
+            if "/comments?" in endpoint:
+                return comments
+            if "/files?" in endpoint:
+                return [dict(filename="calc.py", patch="-a-b\n+a+b", additions=1, deletions=1)]
+            return pull
+        with mock.patch.object(ci_batch.learn_replay, "source_repo", return_value=repo):
+            def replay():
+                refs = ci_batch.screened_recurrences(self.store, batches, entry, [current["repo"]], api)
+                return ci_batch.replay_oss(self.store, ledger, self.cwd, [current], 120, refs)
+            self.assertEqual(replay()["proven"], 0)
+            self.assertFalse(self.records("receipts"))
+            pull["labels"] = []
+            self.assertEqual(replay()["proven"], 1)
+        [lesson] = self.proven()
+        self.assertEqual(lesson["admission"]["source_ref"], current["finding_url"])
+        self.assertCountEqual(lesson["evidence"], [fresh, old])
+
+    def test_reversed_replay_preserves_updated_test_support(self):
+        test = REAL_TEST.replace(", 5)", ", EXPECTED)")
+        repo, _, _ = self.repo(test.replace("import calc", "import calc\nEXPECTED = 5"))
+        (repo / "calc.py").write_text(BUGGY)
+        self.git(repo, "commit", "-qam", "record the failing revision")
+        before = self.git(repo, "rev-parse", "HEAD")
+
+        (repo / "calc.py").write_text(FIXED)
+        (repo / "tests" / "operands.py").write_text("EXPECTED = 5\n")
+        (repo / "tests" / "test_calc.py").write_text(
+            test.replace("import calc", "import calc\nfrom operands import EXPECTED"))
+        self.git(repo, "add", ".")
+        self.git(repo, "commit", "-qm", "fix addition and move the test fixture")
+        after = self.git(repo, "rev-parse", "HEAD")
+
+        self.admit(self.failure(), repo, before, after)
+
+        [receipt] = self.records("receipts")
+        self.assertEqual([receipt[side]["status"] for side in ("before", "after", "reversed")],
+                         ["FAIL", "PASS", "FAIL"])
+
     def path_without_bwrap(self, fake_bwrap=None):
         tools = self.cwd / "tools"
         tools.mkdir()
@@ -212,6 +498,7 @@ class AdmissionTests(AdmissionCase):
         self.git(repo, 'config', 'user.name', 'Fixture')
         self.git(repo, 'config', 'user.email', 'fixture@example.invalid')
         (repo / 'calc.py').write_text(BUGGY)
+        (repo / 'pytest.py').write_text(PYTEST_STUB)
         (repo / 'tests/test_calc.py').write_text(test_source)
         self.git(repo, 'add', '.')
         self.git(repo, 'commit', '-qm', 'bug and existing test')
@@ -800,18 +1087,19 @@ class AdmissionTests(AdmissionCase):
         store = c.load_store(self.store)[1]
         self.assertEqual(c.incomplete_cause("noise\nINCOMPLETE: ValueError: bad value 3\n", store), "ValueError: bad value 3")
         self.assertEqual(c.incomplete_cause("INCOMPLETE: ValueError: mail ops" + chr(64) + "corp-mail.org\n", store),
-                         "cause withheld by the privacy screen")
+                         "cause withheld by the privacy screen (email, hostname)")
         self.assertEqual(c.incomplete_cause("INCOMPLETE: ValueError: bad token Zq8vLmw3Kp\n", store),
-                         "cause withheld by the privacy screen")
+                         "cause withheld by the privacy screen (captured_credential)")
         self.assertEqual(c.incomplete_cause("INCOMPLETE: ValueError: " + "x" * 290 + " Zq8vLmw3Kp\n", store),
-                         "cause withheld by the privacy screen")
+                         "cause withheld by the privacy screen (captured_credential)")
         self.assertEqual(c.incomplete_cause("INCOMPLETE: ValueError: " + "x" * 400 + "\n", store), ("ValueError: " + "x" * 400)[:300])
         self.assertEqual(c.incomplete_cause("Check timed out", store), "")
         row = dict(commit="", tree="", status="INCOMPLETE", exit=2, stdout="", stderr="")
         reversed_only = dict(failures={}, receipts=dict(r=dict(repo="x", before=row, after=row,
                                                               reversed=dict(row, stderr="=".join(("password", "Wq7nRbx4Td"))))))
         self.assertEqual(c.incomplete_cause("INCOMPLETE: ValueError: Wq7nRbx4Td\n", reversed_only),
-                         "cause withheld by the privacy screen")
+                         "cause withheld by the privacy screen (captured_credential)")
+        self.assertNotIn("Zq8vLmw3Kp", c.incomplete_cause("INCOMPLETE: ValueError: bad token Zq8vLmw3Kp\n", store))
 
     def test_repeated_credential_screens_scan_each_store_text_once(self):
         self.failure(error="FAIL: test_login\npassword=Zq8vLmw3Kp")

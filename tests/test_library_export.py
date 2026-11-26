@@ -8,6 +8,7 @@ import subprocess
 import sys
 from unittest import mock
 
+import transcript_delivery
 from test_cli import CliCase
 
 LIBRARY = Path(__file__).resolve().parents[1] / "library"
@@ -119,6 +120,15 @@ class LibraryExportTests(CliCase):
     def test_an_unproven_lesson_is_refused(self):
         self.author_lesson()
         self.assertEqual(json.loads(self.export_library().stdout)["added"], [])
+        self.assertFalse((self.library / "verify-the-count").exists())
+
+    def test_a_vetoed_lesson_is_excluded_from_library_export(self):
+        revision = self.proven_lesson()
+        lesson_id = self.lesson_record(revision)["lesson_id"]
+        (self.store / transcript_delivery.DELIVERIES).write_text(
+            json.dumps(dict(proven={lesson_id: dict(status="vetoed", lesson="L1")})))
+        result = json.loads(self.export_library().stdout)
+        self.assertEqual(result["added"], [])
         self.assertFalse((self.library / "verify-the-count").exists())
 
     def test_public_staging_is_refused(self):

@@ -72,7 +72,7 @@ found a problem.
 
 ## Check your repository
 
-`coldfix check` runs the library's static portable checks on the current directory. They only read files: they never run your code, your tests or your README's commands, and never use the network. Each hit names the lesson, the `file:line` and the fix, and the command exits 1 when anything is hit. `coldfix check <path>` scans another tree. The block below makes a repository with a test that unittest never collects; in your own repository, just run `coldfix check`.
+`coldfix check` runs the library's static portable checks plus built-in checks (`agents-md-drift` for stale `AGENTS.md`/`CLAUDE.md`/`.cursorrules` paths and commands, `agent-config-secrets` for literal credentials in committed `.claude/settings*.json`, `.codex/*`, and `.cursor/*` files) on the current directory. They only read files: they never run your code, your tests or your README's commands, and never use the network. Each hit names the lesson, the `file:line` and the fix, and the command exits 1 when anything is hit. `coldfix check <path>` scans another tree. `coldfix check --diff [BASE]` reports only hits in files changed since `BASE` (default `HEAD`) and untracked files, plus `anti-test-weakening` on the diff; it scans a copy of those files and rechecks any hit against the whole tree, so a clean change returns in about a second. `coldfix check --staged` scans staged changes, and `--only CHECK` limits a run to named check(s). `coldfix hook` is the agent hook: it reads a hook event on stdin, adds the matching proven facts and always exits 0. The block below makes a repository with a test that unittest never collects; in your own repository, just run `coldfix check`.
 
 ```sh
 mkdir demo && cd demo && git init -q

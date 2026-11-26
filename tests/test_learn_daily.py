@@ -82,6 +82,44 @@ class LearnDailyTests(unittest.TestCase):
         self.assertEqual(self.daily("2026-11-08"), dict(day="2026-11-08", candidates=0, calls=0, drafted=0, passed=0))
         self.assertEqual(len(self.calls), 4)
 
+    def test_new_screened_oss_evidence_revises_a_rejected_fingerprint_only_once(self):
+        url = "https://github.com/example/project/pull/7#discussion_r17"
+        row = c.event_record(dict(kind="review", command="PR review finding", error="Wrong sort order",
+                                  repo="example/project", agent="oss-review", source_ref=url,
+                                  occurred="2026-10-20T12:00:00Z"), "github")
+        c.save(self.store, "failures", row)
+        key, headline = learn_candidates.fingerprint(row, {})
+        previous = dict(verdict="PASS", evidence=["old"], headline="old-only marker",
+                        draft=dict(rule="Run the tests for " + headline + "."),
+                        replay=dict(status="rejected", reason="old test stayed green"))
+        path = self.store / learn_daily.LEDGER
+        path.write_text(json.dumps(dict(drafts={key: previous}, runs=[])))
+        pair = dict(repo=row["repo"], finding_url=url, before="a" * 40, after="b" * 40, oss_failure=row["id"])
+        def ask(model, prompt, shape, work):
+            self.assertNotIn("old-only marker", prompt)
+            self.assertIn("Wrong sort order", prompt)
+            return self.ask(model, prompt, shape, work)
+        rejected_lesson = dict(status="proposed", verification="unproven", lesson_id="old-lesson",
+                               rule=previous["draft"]["rule"], evidence=["old"], admission={"source_ref": "old-url"})
+        with patch.object(learn_daily, "compare", return_value=""), \
+                patch.object(c, "latest_lessons", return_value={"old-lesson": rejected_lesson}):
+            def run():
+                return learn_daily.run(self.store, "batch-two", route=self.route, ask=ask, screened_pairs=[pair])
+            self.assertEqual(run()["passed"], 1)
+            self.assertEqual(run()["calls"], 0)
+            revised = self.ledger()
+            for override in (dict(evidence=["unrelated"]), dict(verification="proven")):
+                with patch.object(c, "latest_lessons", return_value={"old-lesson": dict(rejected_lesson, **override)}):
+                    self.assertIn(learn_daily.rule_key(rejected_lesson["rule"]),
+                                  learn_daily.taken_rules({}, revised, {key: None}, previous))
+            self.assertEqual(revised["revisions"][key], [previous])
+            self.assertEqual(revised["drafts"][key]["evidence"], [row["id"]])
+            self.assertEqual(revised["drafts"][key]["verdict"], "PASS")
+            self.assertNotIn("replay", revised["drafts"][key])
+            revised["drafts"][key].update(evidence=["other"], replay=dict(status="proven"))
+            path.write_text(json.dumps(revised))
+            self.assertEqual(run()["calls"], 0)
+
     def test_fixed_pairs_are_drafted_with_recurring_failures_and_the_drafter_sees_the_fix(self):
         for name in "abcd":
             self.recurring(name)

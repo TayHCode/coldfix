@@ -17,6 +17,16 @@ import coldfix as c
 import coldpass_sources
 import failure_ingest as fi
 
+TAR_FORMATS = ('coldbox-tar', 'vm02-tar', 'cold-review-tar')
+
+
+def awaits_log(path):
+    try:
+        receipt = json.loads(path.read_text())
+        return receipt.get('verdict') == 'fail' and not path.with_name(receipt['id'] + '.log').exists()
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
+        return False
+
 
 def stable(record):
     return {key: value for key, value in record.items() if key != "created"}
@@ -105,8 +115,10 @@ def collect(root, config):
             if source['format'] == 'cold-review-tar' and not c.fleet_cli():
                 total.update(unavailable=1, reason='review receipt import is off: set COLDFIX_FLEET_CLI')
                 continue
-            data = subprocess.run(source['command'], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                  check=True, timeout=120).stdout
+            run = subprocess.run(source['command'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+            if run.returncode and not (run.returncode == 1 and run.stdout and source['format'] in TAR_FORMATS):
+                run.check_returncode()
+            data = run.stdout
             if source['format'] == 'coldbox-tar':
                 with tempfile.TemporaryDirectory(dir=root) as directory:
                     with tarfile.open(fileobj=io.BytesIO(data), mode='r:*') as archive:
@@ -118,6 +130,9 @@ def collect(root, config):
                             with archive.extractfile(member) as stream, target.open('wb') as out:
                                 out.write(stream.read())
                             os.utime(target, (member.mtime, member.mtime))
+                    deferred = [path for path in Path(directory).glob('*.json') if run.returncode and awaits_log(path)]
+                    for path in deferred:
+                        path.unlink()
                     ledger = root / 'collected-receipts.json'
                     before = json.loads(ledger.read_text()) if ledger.exists() else {}
                     before = dict.fromkeys(before, 'imported') if isinstance(before, list) else before
@@ -125,6 +140,8 @@ def collect(root, config):
                     reasons = Counter()
                     result = receipts(root, directory, on_reject=lambda reason: reasons.update([reason or 'unknown error']))
                 total.update(imported=result['imported'], deduped=result['skipped'] + sum(before.get(name) == 'imported' for name in names), rejected=result['rejected'], known_invalid=result['known_invalid'], rejection_reasons=dict(reasons))
+                if deferred:
+                    total['deferred'] = len(deferred)
             elif source['format'] == 'vm02-tar':
                 results[name] = vm02_jobs(root, data)
             elif source['format'] == 'failure-json':
@@ -161,5 +178,5 @@ def collect(root, config):
                 raise ValueError('unknown source format')
         except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError, tarfile.TarError, subprocess.SubprocessError, c.ColdfixError) as error:
             total['unavailable'] = 1
-            total['reason'] = type(error).__name__
+            total['reason'] = type(error).__name__ + (f' exit {error.returncode}' if isinstance(error, subprocess.CalledProcessError) else '')
     return results

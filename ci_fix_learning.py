@@ -143,6 +143,7 @@ class GitHub:
 
     def pages(self, endpoint, key=None, query="", bounded=False, limit=None):
         rows, seen, total = [], {}, None
+        pull_files = re.fullmatch(r"pulls/[0-9]+/files", endpoint) is not None
         page = 1
         size = min(100, limit) if limit else 100
         while True:
@@ -160,6 +161,9 @@ class GitHub:
                 need(isinstance(row, dict))
                 identity = row.get("id", row.get("sha"))
                 need(isinstance(identity, (str, int)))
+                if pull_files:
+                    identity = row.get("filename")
+                    need(isinstance(identity, str) and identity)
                 if identity in seen:
                     need(seen[identity] == row)
                     continue

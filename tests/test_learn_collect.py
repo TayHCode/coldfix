@@ -280,7 +280,7 @@ class LearnCollectTests(unittest.TestCase):
         self.assertEqual((first["sources"]["review"]["imported"], second["sources"]["review"]["deduped"]), (1, 1))
         self.assertEqual(first["sources"]["review"]["rejected"], 1)
         self.assertEqual(first["sources"]["broken"]["unavailable"], 1)
-        self.assertEqual(first["sources"]["broken"]["reason"], "CalledProcessError")
+        self.assertEqual(first["sources"]["broken"]["reason"], "CalledProcessError exit 1")
         self.assertEqual(first["coldbox"]["imported"], 1)
         self.assertEqual(len(self.failures()), 3)
         records = list(self.failures().values())

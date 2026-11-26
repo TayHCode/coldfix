@@ -124,6 +124,20 @@ class LearnStallTests(unittest.TestCase):
         self.assertNotIn("STALLED", recovered)
         self.assertEqual(json.loads(self.state.read_text())["active"], {})
 
+    def test_transcript_proof_stall_counts_daily_replays_within_24_hours(self):
+        rows = [
+            entry(25, COLLECT, dict(day="2026-11-22", transcript_replay=dict(proven=9))),
+            entry(2, TRANSCRIPTS, dict(scanned=4, proven=0)),
+            entry(1, COLLECT, dict(day="2026-11-23", transcript_replay=dict(proven=0))),
+        ]
+        self.assertEqual(self.check("\n".join(rows) + "\n").returncode, 0)
+        self.assertIn("transcript_proven", json.loads(self.state.read_text())["active"])
+
+        rows.append(entry(.5, COLLECT, dict(day="2026-11-23", transcript_replay=dict(proven=1))))
+        self.assertEqual(self.check("\n".join(rows) + "\n").returncode, 0)
+        self.assertIn("RECOVERED", self.notes())
+        self.assertNotIn("transcript_proven", json.loads(self.state.read_text())["active"])
+
     def test_lessons_proven_but_undelivered_for_24_hours_alert_until_a_run_reports_none(self):
         healthy = journal(25, imported=1, proven=1, scanned=4, github_failed=(0,), coldbox_missing=False)
         summary = lambda overdue: entry(.5, COLLECT, dict(check_delivery=dict(proven=26, delivered=23, overdue=overdue)))

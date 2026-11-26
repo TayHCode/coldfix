@@ -25,6 +25,10 @@ def settled_jobs(jobs):
     return bundle.getvalue()
 
 
+CHANGING = ('import sys; sys.stdout.buffer.write(open(sys.argv[1], "rb").read()); '
+            'sys.stderr.write("tar: cbx.tmp: file changed as we read it"); raise SystemExit(1)')
+
+
 class SourceTests(unittest.TestCase):
     def test_receipt_and_unavailable_sources(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -58,6 +62,52 @@ class SourceTests(unittest.TestCase):
             renamed = collect_sources.collect(store, config)
             self.assertEqual(renamed['runner']['imported'], 0)
             self.assertEqual(renamed['runner']['deduped'], 1)
+
+    def test_tar_that_exits_1_on_files_changed_while_read_still_imports(self):
+        with tempfile.TemporaryDirectory() as folder:
+            work = Path(folder)
+            store = work / 'store'
+            store.mkdir(mode=0o700)
+            bundle = work / 'evidence.tar'
+            self.write_receipts(bundle, {'cbx-1700000000-a1b2c3': b'unit failed: expected 2'})
+            config = work / 'sources.json'
+            config.write_text(json.dumps({'runner': {'format': 'coldbox-tar', 'command': [sys.executable, '-c', CHANGING, str(bundle)]},
+                                          'empty': {'format': 'coldbox-tar', 'command': [sys.executable, '-c', 'raise SystemExit(1)']},
+                                          'broken': {'format': 'coldbox-tar', 'command': [sys.executable, '-c', 'raise SystemExit(2)']}}))
+            result = collect_sources.collect(store, config)
+            self.assertEqual((result['runner']['imported'], result['runner']['unavailable']), (1, 0))
+            self.assertEqual(result['empty'], dict(imported=0, deduped=0, rejected=0, unavailable=1, reason='CalledProcessError exit 1'))
+            self.assertEqual(result['broken']['reason'], 'CalledProcessError exit 2')
+
+    def test_a_failure_receipt_whose_log_was_cut_from_a_partial_tar_waits_for_the_next_sync(self):
+        with tempfile.TemporaryDirectory() as folder:
+            work = Path(folder)
+            store = work / 'store'
+            store.mkdir(mode=0o700)
+            bundle = work / 'evidence.tar'
+            self.write_receipts(bundle, {'cbx-1700000000-a1b2c3': None})
+            config = work / 'sources.json'
+            config.write_text(json.dumps({'runner': {'format': 'coldbox-tar', 'command': [sys.executable, '-c', CHANGING, str(bundle)]}}))
+            partial = collect_sources.collect(store, config)['runner']
+            self.assertEqual((partial['imported'], partial['deferred'], partial['unavailable']), (0, 1, 0))
+            self.assertEqual(coldfix.load_store(store)[1]['failures'], {})
+            self.write_receipts(bundle, {'cbx-1700000000-a1b2c3': b'unit failed: expected 2'})
+            config.write_text(json.dumps({'runner': {'format': 'coldbox-tar', 'command': ['cat', str(bundle)]}}))
+            self.assertEqual(collect_sources.collect(store, config)['runner']['imported'], 1)
+            [failure] = coldfix.load_store(store)[1]['failures'].values()
+            self.assertIn('unit failed: expected 2', failure['error'])
+
+    def write_receipts(self, bundle, logs):
+        with tarfile.open(bundle, 'w') as archive:
+            for identifier, log in logs.items():
+                receipt = dict(schema='coldbox.receipt/v1', id=identifier, mode='runner', repo='example/app', sha='a' * 40,
+                               verdict='fail', started_at='2026-11-01T12:00:00Z',
+                               checks=[dict(check='unit', command='unittest', status='fail', exit=1)])
+                for name, content in ((identifier + '.json', json.dumps(receipt).encode()), (identifier + '.log', log)):
+                    if content is not None:
+                        info = tarfile.TarInfo(name)
+                        info.size, info.mtime = len(content), time.time() - 120
+                        archive.addfile(info, io.BytesIO(content))
 
     def test_standby_host_sources_import_failures_and_accept_canceled(self):
         with tempfile.TemporaryDirectory() as folder:

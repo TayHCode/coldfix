@@ -6,6 +6,7 @@ import re
 import sys
 
 import coldfix as c
+import failure_ingest
 import flakiness
 import coldpass_replay
 import regression_adapter
@@ -16,7 +17,6 @@ TRANSCRIPT_SCORE = 0.6
 EXCLUDED = {"flake", "env-infra"}
 ERROR = re.compile(r"\b(?:FAIL(?:ED)?|ERROR|Error|error|AssertionError)\b")
 NOISE = re.compile(r"Process completed with exit code|^Traceback|^FAILED \(")
-DIAGNOSTIC = re.compile(r"(?:FAIL|ERROR): test\w*")
 MARKUP = re.compile(r"!\[[^\]]*\]\([^)]*\)|<[^>]+>|\*\*")
 
 
@@ -51,7 +51,7 @@ def replayable(record, row, findings):
         return False
     if record.get("kind") == "review":
         return record.get("source_ref") in findings
-    return bool(revision(row) and (DIAGNOSTIC.search(record["error"]) or regression_adapter.PYTEST_ID.search(record["error"])))
+    return bool(revision(row) and (failure_ingest.unittest_diagnostics(record) or regression_adapter.PYTEST_ID.search(record["error"])))
 
 
 def fingerprint(record, row):

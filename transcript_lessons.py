@@ -15,6 +15,7 @@ import tempfile
 import time
 
 import coldfix as c
+import diff_proof
 import flakiness
 import learn_daily
 import transcript_delivery
@@ -22,7 +23,8 @@ import transcript_mistakes
 
 BATCH = 100
 PER_CALL = 5
-CASE_CHARS = 24000
+CASE_CHARS = transcript_mistakes.CASE_CHARS
+EXTRACTION_MODEL = "gpt-6.2-sol"
 CONTEXT_CHARS = 6000
 CONTROLS = 20
 CONTROL_FAILURES = 2
@@ -34,11 +36,8 @@ ATTEMPTS = 3
 BUDGET = 2 * 3600
 RETRY = ("no replay", "no valid extraction", "grouping call failed", "extraction call failed", "control messages unavailable", "duplicate check failed", "jev check failed", "jev review failed", "out of time")
 TURN = re.compile(rf"(?:^|\n\n)(assistant|{re.escape(transcript_mistakes.OWNER)}|user|mixed) \[([A-Za-z0-9-]+)\]: ")
-CORRECTION = re.compile(r"\b(?:no[,.!]|wrong|don'?t|didn'?t|not what|stop|why did you|you (?:were|are) supposed|i told you|again)\b", re.I)
-ADMITS = re.compile(r"\b(?:you'?re right|my mistake|i was wrong|i made a mistake|my fault|i apologi[sz]e|that was wrong|"
-                    r"i should have|i incorrectly|i mistakenly|good catch)\b", re.I)
 FIELDS = ("id", "verdict", "source", "kind", "finding_class", "title", "what_went_wrong", "rule", "how_to_check", "duplicate_of",
-          "wrong_message", "fixed_message")
+          "wrong_message", "fixed_message", "check_pattern", "bad_code", "good_code")
 NEEDS_APPROVAL = ("design", "security", "maintainability")
 FINDING_CLASSES = ("none", "bug", *NEEDS_APPROVAL)
 EVIDENCE_CHARS = 1200
@@ -76,8 +75,8 @@ def turns(record):
 
 def priority(record):
     rows = turns(record)
-    corrected = any(row["role"] != "assistant" and CORRECTION.search(row["text"][:600]) for row in rows)
-    admitted = any(row["role"] == "assistant" and ADMITS.search(row["text"]) for row in rows)
+    corrected = any(row["role"] != "assistant" and transcript_mistakes.OWNER_CORRECTION.search(row["text"][:600]) for row in rows)
+    admitted = any(row["role"] == "assistant" and transcript_mistakes.ADMITS.search(row["text"]) for row in rows)
     score = flakiness.metadata(record).get("score", 0)
     return (corrected and admitted, corrected or admitted, score if type(score) in (int, float) else 0, record["id"])
 
@@ -107,7 +106,15 @@ def existing(store, coldlocker, ledger):
 
 
 def proven(lead):
-    return lead is not None and lead["status"] == "proven" and "replay_applies" in lead["proof"]
+    return lead is not None and lead["status"] == "proven" and ("replay_applies" in lead["proof"] or diff_proven(lead["proof"]))
+
+
+def diff_proven(proof):
+    return proof.get("proof_tier") == "diff"
+
+
+def diff_checked(lesson):
+    return lesson["kind"] == "code" and lesson["finding_class"] == "bug" and bool(lesson["check_pattern"])
 
 
 def settled(lead, leads):
@@ -121,12 +128,19 @@ def settled(lead, leads):
 
 
 def case(record):
-    rows, used, out = turns(record), 0, []
-    for row in rows:
-        text = row["text"][:max(0, CASE_CHARS - used)]
-        used += len(text)
-        out.append(dict(role=row["role"], id=row["id"], text=text))
-    return dict(id=record["id"], turns=out, truncated=used < sum(len(row["text"]) for row in rows))
+    rows = turns(record)
+    window = flakiness.metadata(record).get("extraction_window")
+    if not isinstance(window, list) or not window or not all(
+            isinstance(row, dict) and all(isinstance(row.get(k), str) for k in ("role", "id", "text")) for row in window):
+        window = None
+    if window is None and sum(len(row["text"]) for row in rows) > CASE_CHARS:
+        window = transcript_mistakes.focused_window(rows, transcript_mistakes.pivot_index(rows))
+    if window is None:
+        return dict(id=record["id"], turns=rows)
+    allowed = {row["id"] for row in rows if row["role"] == "assistant"}
+    return dict(id=record["id"], turns=[dict(row, text=row["text"][:1200]) for row in window],
+                citable_assistant_ids=[row["id"] for row in window if row["id"] in allowed],
+                focused=True)
 
 
 def extract_prompt(cases, known):
@@ -141,9 +155,14 @@ def extract_prompt(cases, known):
             "one sentence. rule is at most two sentences an agent can follow. how_to_check says how to verify the rule. "
             "duplicate_of is the id of a known lesson that already states this rule, else empty. wrong_message is the "
             "id of the agent (assistant) message that shows the mistake; fixed_message is the id of a later assistant "
-            "message that does it right, else empty. The rule will be used to grade agent messages, so state it so "
-            "that a reader can tell from one message whether it was broken. Leave text fields empty when verdict is "
-            "not lesson. Never include secrets, hostnames, tokens or private paths in any field.\n"
+            "message that does it right, else empty. For a code bug that a regular expression can catch, check_pattern is a "
+            "Python regular expression that matches the mistaken code and not the corrected code, bad_code is the mistaken "
+            "code copied exactly from wrong_message, and good_code is the corrected code copied exactly from fixed_message; "
+            "otherwise leave all three empty. The rule will be used to grade agent messages, so state it so "
+            "that a reader can tell from one message whether it was broken. For focused cases use only citable_assistant_ids "
+            "for message citations. Always copy the case id exactly, including negative verdicts. Use allowed enum values "
+            "and leave only descriptive and citation fields empty for negative verdicts. Never include secrets, hostnames, "
+            "tokens or private paths in any field.\n"
             + json.dumps(dict(known_lessons=known, cases=cases), indent=1))
 
 
@@ -166,11 +185,11 @@ def controls(ledger_path, size=CONTROLS):
     for path in sorted(digests, key=lambda p: (p in fallback, hashlib.sha256(p.encode()).hexdigest())):
         try:
             raw = Path(path).read_bytes()
+            if hashlib.sha256(raw).hexdigest() != digests[path]:
+                continue
+            full = [row for row in transcript_mistakes.read_messages(Path(path), raw) if row["role"] != "system"]
         except OSError:
             continue
-        if hashlib.sha256(raw).hexdigest() != digests[path]:
-            continue
-        full = [row for row in transcript_mistakes.read_messages(Path(path), raw) if row["role"] != "system"]
         if path in older and set(transcript_mistakes.mistake_types(full)) - {"correction"}:
             continue
         rows = transcript_mistakes.excerpt(full)
@@ -213,11 +232,23 @@ def waits_for_owner(lesson):
 
 def prove(lesson, rows, replayed, control_texts, jev):
     texts = {row["id"]: row["text"] for row in rows if row["role"] == "assistant"}
+    order = [row["id"] for row in rows]
+    later = (lesson["wrong_message"] in texts and lesson["fixed_message"] in texts
+             and order.index(lesson["fixed_message"]) > order.index(lesson["wrong_message"]))
     if waits_for_owner(lesson):
         if lesson["wrong_message"] not in texts:
             return "unprovable", "no agent message shows the mistake", {}
         return ("needs_approval", lesson["finding_class"] + " finding needs owner approval",
                 dict(excerpt=texts[lesson["wrong_message"]][:EVIDENCE_CHARS]))
+    if diff_checked(lesson):
+        if lesson["bad_code"] not in texts.get(lesson["wrong_message"], ""):
+            return "rejected", "bad code is not in the mistaken message", {}
+        if lesson["good_code"] not in texts.get(lesson["fixed_message"], ""):
+            return "rejected", "good code is not in the corrected message", {}
+        if not later:
+            return "rejected", "corrected message is not a later agent message", {}
+        proof, reason = diff_proof.prove(lesson["check_pattern"], lesson["bad_code"], lesson["good_code"])
+        return "rejected" if reason else "proven", reason, proof
     if lesson["kind"] == "code":
         return "unprovable", "code mistake needs repository replay", {}
     if lesson["wrong_message"] not in texts:
@@ -226,8 +257,7 @@ def prove(lesson, rows, replayed, control_texts, jev):
         return "unprovable", "no earlier turns before the mistake", {}
     if not replayed:
         return "unprovable", "no replay", {}
-    order = [row["id"] for row in rows]
-    if lesson["fixed_message"] not in texts or order.index(lesson["fixed_message"]) <= order.index(lesson["wrong_message"]):
+    if not later:
         return "rejected", "corrected message is not a later agent message", {}
     fixed = texts[lesson["fixed_message"]]
     before = context(rows, lesson["wrong_message"])
@@ -275,16 +305,25 @@ def valid(row):
 
 
 def private(lesson):
-    return bool(c.privacy_counts("\n".join(lesson[f] for f in ("title", "what_went_wrong", "rule", "how_to_check"))))
+    return bool(c.privacy_counts("\n".join(lesson[f] for f in ("title", "what_went_wrong", "rule", "how_to_check", "check_pattern",
+                                                                 "bad_code", "good_code"))))
 
 
 def model_route(role):
     if os.environ.get("COLDFIX_MODEL_CMD"):
         return dict(provider="command", model="COLDFIX_MODEL_CMD extractor", role="extractor")
+    if role == "transcript-extraction":
+        return dict(provider="codex", model=EXTRACTION_MODEL)
     return learn_daily.route(role)
 
 
-def run(root, coldlocker, scan_ledger, size, jev, route=model_route, ask=learn_daily.ask, now=None, clock=time.monotonic,
+def ask_model(model, prompt, shape, work):
+    if model == dict(provider="codex", model=EXTRACTION_MODEL) and shape is LESSONS:
+        return learn_daily.codex_ask(model, prompt, shape, work, timeout=1800)
+    return learn_daily.ask(model, prompt, shape, work)
+
+
+def run(root, coldlocker, scan_ledger, size, jev, route=model_route, ask=ask_model, now=None, clock=time.monotonic,
         jev_model=JEV_MODEL):
     path = root / LEDGER
     ledger = json.loads(path.read_text()) if path.exists() else dict(leads={}, batches=[])
@@ -297,7 +336,7 @@ def run(root, coldlocker, scan_ledger, size, jev, route=model_route, ask=learn_d
             raise TimeoutError("out of time")
         return jev(*args)
     picked = pick(store, {k for k, lead in ledger["leads"].items() if settled(lead, ledger["leads"])}, size)
-    batch = dict(started=(now or datetime.now(timezone.utc)).isoformat(), picked=len(picked), calls=0)
+    batch = dict(started=(now or datetime.now(timezone.utc)).isoformat(), picked=len(picked), calls=0, focused=0)
     ledger.pop("resume_after", None)
     ledger["batches"].append(batch)
     save = lambda: c.atomic_create(path, c.encoded(ledger), replace=True)
@@ -305,7 +344,8 @@ def run(root, coldlocker, scan_ledger, size, jev, route=model_route, ask=learn_d
     if not picked:
         return batch
     model = route("bulk-codex")
-    batch["model"] = model["model"]
+    extractor = route("transcript-extraction")
+    batch["model"] = extractor["model"]
     known = existing(store, coldlocker, ledger)
     known_ids = {row["id"] for row in known}
     rows = {r["id"]: turns(r) for r in picked}
@@ -319,9 +359,10 @@ def run(root, coldlocker, scan_ledger, size, jev, route=model_route, ask=learn_d
             batch["calls"] += 1
             save()
             cases = [case(r) for r in chunk]
-            truncated = {item["id"] for item in cases if item["truncated"]}
+            focused = {item["id"]: item for item in cases if item.get("focused")}
+            batch["focused"] += len(focused)
             try:
-                reply = ask(model, extract_prompt(cases, known), LESSONS, work)["lessons"]
+                reply = ask(extractor, extract_prompt(cases, known), LESSONS, work)["lessons"]
             except Exception as error:
                 for r in chunk:
                     leads[r["id"]] = dict(status="error", reason="extraction call failed: " + type(error).__name__)
@@ -331,10 +372,13 @@ def run(root, coldlocker, scan_ledger, size, jev, route=model_route, ask=learn_d
                 row = got.get(r["id"])
                 if row is None:
                     leads[r["id"]] = dict(status="error", reason="no valid extraction")
-                elif row["verdict"] != "lesson" and r["id"] in truncated:
-                    leads[r["id"]] = dict(status="unprovable", reason="lead too long to read whole")
+                elif row["verdict"] != "lesson" and r["id"] in focused:
+                    leads[r["id"]] = dict(status="unprovable", reason=row["verdict"] + " in focused window")
                 elif row["verdict"] != "lesson":
                     leads[r["id"]] = dict(status="no_lesson", reason=row["verdict"])
+                elif r["id"] in focused and any(row[field] and row[field] not in focused[r["id"]]["citable_assistant_ids"]
+                                                 for field in ("wrong_message", "fixed_message")):
+                    leads[r["id"]] = dict(status="rejected", reason="message outside focused evidence")
                 elif private(row):
                     leads[r["id"]] = dict(status="rejected", reason="private text in lesson", lesson=row)
                 elif row["duplicate_of"] in known_ids:
@@ -361,17 +405,31 @@ def run(root, coldlocker, scan_ledger, size, jev, route=model_route, ask=learn_d
             if not complete:
                 for k in fresh:
                     leads[k].update(status="error", reason="grouping call failed")
-        delivered = transcript_delivery.known_lessons(Path(FOLDER))
-        for key in [k for k, lead in leads.items() if lead["status"] == "extracted"]:
+
+        def compare(*args):
             if late():
-                break
+                raise TimeoutError("out of time")
             batch["calls"] += 1
             save()
+            return ask(*args)
+
+        delivered = transcript_delivery.known_lessons(Path(FOLDER))
+        for key in [k for k, lead in leads.items() if lead["status"] == "extracted"]:
             try:
-                duplicate = transcript_delivery.summarize([(key, leads[key])], delivered, ledger, ask, route)[1][key]["duplicate_of"]
-                c.require(duplicate in [""] + [row["id"] for row in delivered], "invalid duplicate")
+                lesson = leads[key]["lesson"]
+                wrong = next((row for row in rows[key] if row["id"] == lesson["wrong_message"]), None)
+                source = context(rows[key], wrong["id"]) + [wrong] if wrong else rows[key][-2:]
+                _, summary = transcript_delivery.summarize(key, leads[key], delivered, compare, route,
+                    source_turns=[dict(role=row["role"], text=row["text"][:EVIDENCE_CHARS]) for row in source])
+                c.require(summary is not None, "missing duplicate check response")
+                duplicate = summary["duplicate_of"]
             except Exception as error:
+                if isinstance(error, TimeoutError) and late():
+                    break
                 leads[key].update(status="error", reason="duplicate check failed: " + type(error).__name__)
+                continue
+            if summary["scope"] == "content":
+                leads[key].update(status="rejected", reason=transcript_delivery.DOMAIN_REVIEW)
                 continue
             if not duplicate:
                 continue
@@ -399,7 +457,7 @@ def run(root, coldlocker, scan_ledger, size, jev, route=model_route, ask=learn_d
             if late():
                 lead.update(status="error", reason="out of time")
                 continue
-            if len(texts) < CONTROLS and not waits_for_owner(lead["lesson"]):
+            if len(texts) < CONTROLS and not waits_for_owner(lead["lesson"]) and not diff_checked(lead["lesson"]):
                 lead.update(status="unprovable", reason="control messages unavailable")
                 continue
             for _ in range(2):
@@ -416,7 +474,8 @@ def run(root, coldlocker, scan_ledger, size, jev, route=model_route, ask=learn_d
                 lead.update(status="rejected", reason="jev check failed: judge changed mid-proof")
                 continue
             if lead["status"] == "proven":
-                lead["proof"]["replayed"] = replays[key]
+                if not diff_proven(lead["proof"]):
+                    lead["proof"]["replayed"] = replays[key]
                 lead["proof"]["judge"] = {"model": judged_by, "threshold": JEV_MIN, "prompt_sha256": JUDGE_PROMPT_SHA256}
                 if lead["proof"]["general"] < JEV_MIN:
                     lead.update(status="rejected", reason="jev: not a general lesson")
@@ -491,8 +550,10 @@ def main(argv=None):
         except ValueError as error:
             parser.exit(2, f"transcript lessons: {error}; a new judge needs a new --scan-ledger\n")
         batch = run(root, args.coldlocker, args.scan_ledger, args.size, jev, jev_model=label)
-    print(json.dumps(dict(batch, judge=judge_model, proven=batch.get("proven", 0), scanned=scan.get("scanned", 0), flagged=scan.get("jev_flagged", 0),
-                          scan_errors=scan.get("errors", 0)), sort_keys=True))
+    print(json.dumps(dict(batch, judge=judge_model, proven=batch.get("proven", 0), scanned=scan.get("scanned", 0),
+                          archives_scanned=scan.get("archives_scanned", 0), flagged=scan.get("jev_flagged", 0),
+                          scan_errors=scan.get("errors", 0), scan_jev_calls=scan.get("jev_calls", 0),
+                          scan_imported=scan.get("imported", 0)), sort_keys=True))
     return 0 if not scan.get("errors") and (batch.get("errors", 0) < batch["picked"] or not batch["picked"]) else 2
 
 

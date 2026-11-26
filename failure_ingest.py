@@ -97,6 +97,17 @@ def log_lines(log):
     return [LOG_PREFIX.sub("", line).strip() for line in log.splitlines()]
 
 
+def unittest_diagnostics(failure):
+    metadata = flakiness.metadata(failure)
+    if metadata.get("type") == "verify-fix-pair" and isinstance(metadata.get("failing_check"), dict):
+        metadata = metadata["failing_check"]
+    log = metadata.get("log_tail", metadata.get("excerpt", failure["error"]))
+    if not isinstance(log, str):
+        return []
+    matches = (re.match(r"((?:FAIL|ERROR): test\w*)(?=\s|$)", line) for line in log_lines(log))
+    return list(dict.fromkeys(match[1] for match in matches if match))
+
+
 def failing_command(log):
     return FLEET_VERIFY if VERIFY_FAILED in log_lines(log) else None
 

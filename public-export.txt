@@ -8,6 +8,7 @@ SECURITY.md
 action.yml
 agents_block.py
 bench/coldrecall_speed.py
+builtin_checks.py
 check_delivery.py
 checks/codex_unclosed_fence.py
 checks/dogfood_store.py
@@ -30,6 +31,7 @@ coldrecall_epochs_report.py
 coldrecall_epochs_resume.py
 coldrecall_measure.py
 collect_sources.py
+diff_proof.py
 evidence_join.py
 failure_ingest.py
 flakiness.py
@@ -258,6 +260,7 @@ tests/fixtures/verify-trace.jsonl
 tests/repo_checkout.py
 tests/test_activations.py
 tests/test_agents_block.py
+tests/test_builtin_checks.py
 tests/test_cheap_models.py
 tests/test_check.py
 tests/test_ci_actions_replay.py
@@ -293,6 +296,7 @@ tests/test_coldrecall_packet.py
 tests/test_coldrecall_speed.py
 tests/test_coldrewind_ingest.py
 tests/test_collect_sources.py
+tests/test_diff_proof.py
 tests/test_draft.py
 tests/test_e2e_dogfood.py
 tests/test_environment_literals.py

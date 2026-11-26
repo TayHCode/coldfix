@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import sys
 import tempfile
+import unicodedata
 import uuid
 
 import ci_actions_replay as actions
@@ -24,6 +25,130 @@ import github_sources as gh
 SEEDS = Path(__file__).resolve().parent / 'docs' / 'measurements' / 'ci-replay-pass2b.json'
 LINK = re.compile(r'https://github\.com/([^/\s]+/[^/\s]+)/actions/runs/(\d+)/attempts/\d+#job-(\d+)\Z')
 SIDES = ('probe', 'before', 'after', 'reversed')
+
+
+SENSITIVE = re.compile(
+    r"\b(?:cve|cwe|ghsa)\b|\bsecurity\b|vulnerab|\bexploit|\badvisor(?:y|ies)\b|malicious|\battacker|"
+    r"\b(?:rce|xss|csrf|ssrf|xxe|sqli|idor)\b|sql.injection|command.injection|prompt.inject|remote.code.execution|"
+    r"cross.site|denial.of.service|privilege.escalation|(?:path|directory).traversal|-----BEGIN [A-Z ]*PRIVATE KEY-----",
+    re.I)
+CREDENTIAL = re.compile(c.SECRET_SHAPE.pattern + r"|\b(?:ASIA[A-Z0-9]{16}|AIza[A-Za-z0-9_-]{30,})")
+ORDINARY = re.compile(
+    r"\b(?:packaging|wheel|sdist|package data|type (?:annotation|hint|inference|checking)|"
+    r"typecheck|mypy|pyright|pyrefly|ruff|flake8|pylint|black|isort|eslint|prettier|biome|"
+    r"lint(?:ing)?|formatter|formatting|indentation|line endings?|"
+    r"whitespace|sorting|sort order|rounding|decimal places?|off.by.one|dataframe|array shape|wrong index|"
+    r"(?:missing|duplicate|empty) (?:rows?|columns?|values?|items?|input)|"
+    r"(?:return|output) (?:shape|type)|dtype|timezone|time zone|dependency resolution|lockfile|uv\.lock|"
+    r"SyntaxError|ImportError|ModuleNotFoundError|NameError|AttributeError|TypeError|ZeroDivisionError|"
+    r"incompatible type|arg-type|unused import|undefined name)\b", re.I)
+RISKY_PATH = re.compile(
+    r"(?:^|/)(?:\.github/(?:workflows|actions)|\.gitlab|\.ssh|\.env|certs?|keys?|iam|"
+    r"polic(?:y|ies)|permissions?|auth|login|identity|roles?|access|accounts?|vault|sessions?)(?:/|\.|$)|"
+    r"\.(?:c|cc|cpp|h|hpp|rs|s|so|pem|key|p12|pfx|wasm)$", re.I)
+PROSE_PATH = re.compile(r"\.(?:md|markdown|rst|txt|adoc)$", re.I)
+CLAUDE_SESSION_URL = re.compile(r"https://claude\.ai/code/session_[A-Za-z0-9]+")
+_GHA_UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+_GHA_ESC_UUID = r"[0-9a-f]{8}\\-[0-9a-f]{4}\\-[0-9a-f]{4}\\-[0-9a-f]{4}\\-[0-9a-f]{12}"
+GHA_BOILERPLATE = re.compile(
+    r"^(?:[^\t\n]*\t[^\t\n]*\t)?\ufeff?\d{4}-\d\d-\d\dT[0-9:.]+Z[ \t]+(?:"
+    r"shell:[ \t]+(?:/usr/bin/|/bin/)?(?:bash|sh|pwsh|powershell|cmd|python3?)(?:[ \t]+[-A-Za-z0-9_/=.'\"]+)*[ \t]+'?\{0\}'?|"
+    r"Removing SSH command configuration|"
+    r"\[command\]/usr/bin/git config --local --name-only --get-regexp core\\\.sshCommand|"
+    r"\[command\]/usr/bin/git submodule foreach --recursive sh -c \"git config --local --name-only --get-regexp 'core\\\.sshCommand' && git config --local --unset-all 'core\.sshCommand' \|\| :\"|"
+    r"Removing includeIf entries pointing to credentials config files|"
+    rf"(?:/[^\s/'\"]+)+/(?:_temp|runner_temp)/git-credentials-{_GHA_UUID}\.config|"
+    rf"\[command\]/usr/bin/git config --local --unset includeif\.gitdir:[^\n]*git\\-credentials\\-{_GHA_ESC_UUID}\\\.config|"
+    rf"Removing credentials config '[^'\n]*git-credentials-{_GHA_UUID}\.config'"
+    r")$")
+
+
+def unescape_levels(text):
+    count = 1
+    while count:
+        yield text
+        text, count = re.subn(r"\\([\\\"'])", r"\1", text)
+
+
+def sensitive(text):
+    cleaned = unicodedata.normalize("NFKC", CLAUDE_SESSION_URL.sub("", text))
+    return (CREDENTIAL.search(cleaned)
+            or any(match["strict"] for level in unescape_levels(cleaned) for match in c.credential_matches(level))
+            or SENSITIVE.search(cleaned.replace("_", " ")))
+
+
+def strip_gha_boilerplate(text):
+    try:
+        payload = json.loads(text)
+    except ValueError:
+        return text
+    if not isinstance(payload, dict) or payload.get("type") != "ci" or not isinstance(payload.get("log_tail"), str):
+        return text
+    lines = [line for line in payload["log_tail"].splitlines() if not GHA_BOILERPLATE.fullmatch(line)]
+    return json.dumps(dict(payload, log_tail="\n".join(lines)), sort_keys=True)
+
+
+def pull_reason(pull):
+    if not isinstance(pull, dict):
+        return "incomplete PR metadata"
+    labels = pull.get("labels")
+    if (not isinstance(pull.get("title"), str) or not pull["title"].strip() or "body" not in pull
+            or not isinstance(pull["body"], (str, type(None))) or not isinstance(labels, list)
+            or any(not isinstance(label, dict) or not isinstance(label.get("name"), str) for label in labels)):
+        return "incomplete PR metadata"
+    if any(sensitive(text) for text in [pull["title"], pull["body"] or "", *(label["name"] for label in labels)]):
+        return "security-related PR"
+    return None
+
+
+def files_reason(files):
+    if not isinstance(files, list) or not files or len(files) >= 100:
+        return "incomplete changed files"
+    for file in files:
+        if (not isinstance(file, dict) or not isinstance(file.get("filename"), str) or not isinstance(file.get("patch"), str)
+                or not file["filename"] or not file["patch"]):
+            return "incomplete changed files"
+        previous = file.get("previous_filename", file["filename"])
+        for path in (file["filename"], previous):
+            if not isinstance(path, str) or sensitive(path) or RISKY_PATH.search(path):
+                return "security-sensitive path"
+        patch = file["patch"]
+        lines = patch.split("\n")
+        if (sum(line.startswith("+") for line in lines) != file.get("additions")
+                or sum(line.startswith("-") for line in lines) != file.get("deletions")):
+            return "incomplete changed files"
+        prose = PROSE_PATH.search(file["filename"]) and PROSE_PATH.search(previous)
+        checked = "\n".join(line for line in lines if line.startswith(("+", "-"))) if prose else patch
+        if sensitive(checked):
+            return "security-related change"
+    return None
+
+
+def compare_reason(diff):
+    reason = files_reason(diff.get("files"))
+    if reason:
+        return reason
+    commits = diff.get("commits")
+    if not isinstance(commits, list) or not commits or len(commits) != diff.get("total_commits"):
+        return "incomplete revision history"
+    for row in commits:
+        message = (row.get("commit") or {}).get("message")
+        if not isinstance(message, str):
+            return "incomplete revision history"
+        if sensitive(message):
+            return "security-related revision"
+    return None
+
+
+def evidence_reason(text, tested=False):
+    if not isinstance(text, str) or not text.strip():
+        return "unclassified regression"
+    cleaned = strip_gha_boilerplate(text)
+    if sensitive(cleaned):
+        return "security-related evidence"
+    if not tested and not ORDINARY.search(unicodedata.normalize("NFKC", cleaned).replace("_", " ")):
+        return "unclassified regression"
+    return None
 
 
 def read_seeds(path):
@@ -71,11 +196,21 @@ def public_metadata(github, seed):
     return run, job
 
 
-def anonymous_clone(url, revisions, clone, timeout):
+def anonymous_clone(url, revisions, clone, timeout, blobless=False):
     env = dict(PATH=os.defpath, HOME=str(clone.parent), LANG='C.UTF-8', LC_ALL='C.UTF-8',
                GIT_TERMINAL_PROMPT='0', GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull,
                GIT_ASKPASS='/bin/false', SSH_ASKPASS='/bin/false')
     git = ['git', '-c', 'core.hooksPath=' + os.devnull, '-c', 'credential.helper=']
+    if blobless:
+        if revisions:
+            ci.run([*git, 'init', '--quiet', '--bare', str(clone)], timeout, env)
+            ci.run([*git, '-C', str(clone), 'remote', 'add', 'origin', url], timeout, env)
+            ci.run([*git, '-C', str(clone), 'fetch', '--quiet', '--filter=blob:none', '--depth=1',
+                    '--no-tags', 'origin', *revisions], timeout, env)
+        else:
+            ci.run([*git, 'clone', '--quiet', '--bare', '--filter=blob:none', '--no-tags', '--', url, str(clone)],
+                   timeout, env)
+        return env
     ci.run([*git, 'init', '--quiet', str(clone)], timeout, env)
     ci.run([*git, '-C', str(clone), 'fetch', '--quiet', '--depth=1', '--no-tags', '--', url, *revisions], timeout, env)
     return env

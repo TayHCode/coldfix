@@ -10,6 +10,9 @@ import re
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
+import time
+import unicodedata
 import uuid
 
 import coldfix
@@ -57,6 +60,54 @@ CLOSING = """query($owner:String!,$name:String!,$number:Int!,$cursor:String) {
     }
   }
 }"""
+OSS_PR_CHECKS = """query($owner:String!,$name:String!,$cursor:String,$first:Int!,$commits:Int!,$contexts:Int!) {
+  rateLimit { cost remaining resetAt }
+  repository(owner:$owner,name:$name) {
+    isPrivate
+    licenseInfo { spdxId }
+    pullRequests(first:$first,states:MERGED,orderBy:{field:UPDATED_AT,direction:DESC},after:$cursor) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        number title url mergedAt
+        commits(first:$commits) {
+          nodes {
+            commit {
+              oid message committedDate
+              statusCheckRollup {
+                state
+                contexts(first:$contexts) {
+                  nodes {
+                    __typename
+                    ... on CheckRun { name conclusion status title summary detailsUrl }
+                    ... on StatusContext { context state description targetUrl }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}"""
+OSS_PERMISSIVE_LICENSES = frozenset({
+    "MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "0BSD",
+    "PSF-2.0", "Unlicense", "CC0-1.0", "Zlib", "BSL-1.0",
+})
+OSS_FAILED_CONCLUSIONS = frozenset({"FAILURE", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "ERROR"})
+OSS_DOCS_CHORE_PATH = re.compile(
+    r"(?i)(?:^|/)(?:docs?/|readme(?:\.[^/]+)?$|changelog(?:\.[^/]+)?$|license(?:\.[^/]+)?$|"
+    r"authors(?:\.[^/]+)?$|codeowners$|\.gitignore$|\.gitattributes$|\.editorconfig$|"
+    r"\.prettierrc(?:\.[^/]+)?$|\.prettierignore$|\.eslintignore$)|"
+    r"\.(?:md|markdown|rst|txt|adoc)$")
+OSS_DOCS_CHORE_SUBJECT = re.compile(
+    r"(?i)^(?:(?:docs|chore|style|format|fmt|typo)(?:\([^)]*\))?!?:\s|"
+    r"(?:re)?format(?:ting)?\b|run\s+(?:prettier|black|rustfmt|gofmt|ruff\s+format)\b|fix\s+typos?\b)")
+OSS_EXTRA_SECRET = re.compile(
+    r"\b(?:hf_|npm_|pypi-|sk-ant-)[A-Za-z0-9_-]{12,}|\bBearer\s+[A-Za-z0-9._~+/=-]{6,}", re.I)
+OSS_MAX_DIFF_CHARS = 32768
+OSS_MIN_REMAINING = 1000
+OSS_SCHEMA_VERSION = 1
 REVERT = re.compile(r'(?im)^(?:revert(?:\([^\n]*\))?[:\s]|this reverts commit [0-9a-f]{7,40}\b)')
 FIX = re.compile(r'(?i)^fix(?:\([^\n)]*\))?!?:\s|^fix(?:es|ed)?\s+\S')
 FINDING = re.compile(r'(?i)\[P[0-3](?: Badge)?\]|badge/P[0-3]-|\b(?:changes requested|requesting changes)\b')
@@ -120,7 +171,7 @@ class GitHub:
         command = ["gh", "api", "--hostname", "github.com", "--method", "POST" if payload else "GET", endpoint]
         if payload:
             # Only fixed query documents are posted. Source text never becomes a query or shell command.
-            need(payload["query"] in (PULL, PULLS, HISTORY, PR_COMMITS, CLOSING))
+            need(payload["query"] in (PULL, PULLS, HISTORY, PR_COMMITS, CLOSING, OSS_PR_CHECKS))
             command += ["--input", "-"]
         self.requests += 1
         try:
@@ -369,20 +420,52 @@ class RateLimited(coldfix.ColdfixError):
 
 
 class PublicGitHub(GitHub):
-    """Read-only GET client for public repositories that stops before the rate limit is spent."""
+    """Read-only GET/GraphQL client for public repositories that stops before the rate limit is spent."""
 
-    def __init__(self, repo):
+    def __init__(self, repo, *, min_remaining=0, sleep_on_limit=False, budget=None):
         super().__init__(repo)
         self.remaining = None
         self.reset = None
+        self.min_remaining = min_remaining
+        self.sleep_on_limit = sleep_on_limit
+        self.budget = budget if budget is not None else dict(
+            calls=0, total_cost=0, min_remaining=None, last_remaining=None, last_reset_at=None, stopped_early=False)
 
     def refresh_budget(self):
         core = super().api(RATE_LIMIT_ENDPOINT)["resources"]["core"]
         need(type(core["remaining"]) is int and core["remaining"] >= 0 and type(core["reset"]) is int)
         self.remaining, self.reset = core["remaining"], core["reset"]
 
+    def _check_graphql_budget(self):
+        remaining = self.budget.get("last_remaining")
+        if remaining is None or remaining >= self.min_remaining:
+            return
+        reset_at = self.budget.get("last_reset_at")
+        if self.sleep_on_limit and reset_at:
+            delay = max(0.0, (timestamp(reset_at) - datetime.now(timezone.utc)).total_seconds()) + 2.0
+            time.sleep(delay)
+            self.budget["last_remaining"] = None
+            return
+        self.budget["stopped_early"] = True
+        raise RateLimited(f"graphql rate limit remaining {remaining} < {self.min_remaining} until {reset_at}")
+
     def api(self, endpoint, payload=None):
-        need(payload is None)
+        if payload is not None:
+            need(endpoint == "graphql" and payload.get("query") == OSS_PR_CHECKS)
+            self._check_graphql_budget()
+            value = super().api(endpoint, payload)
+            rl = (value.get("data") or {}).get("rateLimit")
+            need(isinstance(rl, dict) and type(rl.get("cost")) is int and rl["cost"] >= 0
+                 and type(rl.get("remaining")) is int and rl["remaining"] >= 0
+                 and isinstance(rl.get("resetAt"), str) and rl["resetAt"])
+            timestamp(rl["resetAt"])
+            self.budget["calls"] += 1
+            self.budget["total_cost"] += rl["cost"]
+            self.budget["last_remaining"] = rl["remaining"]
+            self.budget["last_reset_at"] = rl["resetAt"]
+            prev_min = self.budget.get("min_remaining")
+            self.budget["min_remaining"] = rl["remaining"] if prev_min is None else min(prev_min, rl["remaining"])
+            return value
         if self.remaining is None:
             self.refresh_budget()
         if self.remaining <= 0:
@@ -392,12 +475,30 @@ class PublicGitHub(GitHub):
 
 
 def oss_repos(path):
+    text = coldfix.read_text(coldfix.ordinary_path(path))
+    stripped = text.lstrip()
     names = []
-    for line in coldfix.read_text(coldfix.ordinary_path(path)).splitlines():
-        line = line.split("#", 1)[0].strip()
-        if line:
-            coldfix.require(REPO.fullmatch(line), "invalid repository in allowlist")
-            names.append(line)
+    if stripped.startswith(("{", "[")):
+        try:
+            parsed = json.loads(text, object_pairs_hook=coldfix.unique_object)
+        except (ValueError, RecursionError):
+            raise coldfix.ColdfixError("invalid JSON repository allowlist") from None
+        rows = parsed["repos"] if isinstance(parsed, dict) and isinstance(parsed.get("repos"), list) else parsed
+        coldfix.require(isinstance(rows, list), "invalid JSON repository allowlist")
+        for row in rows:
+            name = row["repo"] if isinstance(row, dict) else row
+            coldfix.require(isinstance(name, str) and REPO.fullmatch(name), "invalid repository in allowlist")
+            if isinstance(row, dict) and "license" in row:
+                lic = row["license"]
+                if not isinstance(lic, str) or lic not in OSS_PERMISSIVE_LICENSES:
+                    continue
+            names.append(name)
+    else:
+        for line in text.splitlines():
+            line = line.split("#", 1)[0].strip()
+            if line:
+                coldfix.require(REPO.fullmatch(line), "invalid repository in allowlist")
+                names.append(line)
     coldfix.require(names, "allowlist names no repositories")
     return list(dict.fromkeys(names))
 
@@ -406,11 +507,451 @@ def utc(value):
     return timestamp(value).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def oss_collect(github, since):
-    """Failed runs and fix or revert commits since `since` (UTC) as (events, complete).
+def _commit_checks(commit_node):
+    rollup = commit_node.get("statusCheckRollup")
+    if not isinstance(rollup, dict):
+        return None, [], [], False
+    state = rollup.get("state")
+    contexts = ((rollup.get("contexts") or {}).get("nodes")) or []
+    failed, passed = [], set()
+    for ctx in contexts:
+        if not isinstance(ctx, dict):
+            continue
+        kind = ctx.get("__typename")
+        if kind == "CheckRun" or ("name" in ctx and "conclusion" in ctx):
+            name = (ctx.get("name") or "").strip()
+            conclusion = (ctx.get("conclusion") or "").upper()
+            if not name:
+                continue
+            if conclusion in OSS_FAILED_CONCLUSIONS:
+                failed.append(dict(
+                    name=name[:200],
+                    conclusion=conclusion,
+                    title=(ctx.get("title") or "")[:300],
+                    summary=(ctx.get("summary") or "")[:2000],
+                    url=ctx.get("detailsUrl") or "",
+                ))
+            elif conclusion == "SUCCESS":
+                passed.add(name)
+        elif kind == "StatusContext" or "context" in ctx:
+            name = (ctx.get("context") or "").strip()
+            ctx_state = (ctx.get("state") or "").upper()
+            if not name:
+                continue
+            if ctx_state in OSS_FAILED_CONCLUSIONS:
+                failed.append(dict(
+                    name=name[:200],
+                    conclusion=ctx_state,
+                    title=(ctx.get("description") or "")[:300],
+                    summary="",
+                    url=ctx.get("targetUrl") or "",
+                ))
+            elif ctx_state == "SUCCESS":
+                passed.add(name)
+    same_commit_flaky = any(row["name"] in passed for row in failed)
+    return state, failed, sorted(passed), same_commit_flaky
 
-    Completed runs are listed and failure conclusions kept locally, since the API has no startup_failure status filter; GitHub exposes at most OSS_RUN_PAGES pages per listing, so a full last page means truncation.
-    Runs are listed from RERUN_WINDOW before `since` because a rerun can fail long after creation."""
+
+def _oss_collect_ci_pairs(github, since=None, *, max_prs=100, pr_page_size=25, max_commits=25, max_contexts=50,
+                          prior=None):
+    cutoff = timestamp(since) if since else None
+    cursor = prior.get("end_cursor") if isinstance(prior, dict) else None
+    cursors = {cursor} if cursor else set()
+    prs_scanned = int(prior.get("prs_scanned", 0)) if isinstance(prior, dict) else 0
+    candidates = list(prior.get("candidates") or []) if isinstance(prior, dict) else []
+    seen_keys = {
+        (c["pr_number"], c["before_sha"], c["after_sha"], c["stage1_kind"])
+        for c in candidates if isinstance(c, dict)
+    }
+    spdx = prior.get("license") if isinstance(prior, dict) else None
+    has_next_page = False
+    status = "ok"
+    page_size = pr_page_size
+    while max_prs is None or prs_scanned < max_prs:
+        if github.budget.get("last_remaining") is not None and github.budget["last_remaining"] < github.min_remaining and not github.sleep_on_limit:
+            github.budget["stopped_early"] = True
+            status = "rate_limited"
+            has_next_page = True
+            break
+        batch = page_size if max_prs is None else min(page_size, max_prs - prs_scanned)
+        value = None
+        while True:
+            variables = dict(owner=github.owner, name=github.name, cursor=cursor,
+                             first=batch, commits=max_commits, contexts=max_contexts)
+            try:
+                value = github.api("graphql", dict(query=OSS_PR_CHECKS, variables=variables))
+                break
+            except RateLimited:
+                raise
+            except coldfix.ColdfixError:
+                if batch <= 6:
+                    raise
+                batch = max(6, batch // 2)
+                page_size = batch
+        repo_data = (value.get("data") or {}).get("repository")
+        need(isinstance(repo_data, dict))
+        if repo_data.get("isPrivate") is not False:
+            return dict(repo=github.repo, license=None, status="skipped_private",
+                        prs_scanned=0, candidates=[], has_next_page=False, end_cursor=None,
+                        rate_limit=dict(github.budget))
+        lic_info = repo_data.get("licenseInfo")
+        spdx = (lic_info.get("spdxId") if isinstance(lic_info, dict) else None) or ""
+        if spdx not in OSS_PERMISSIVE_LICENSES:
+            return dict(repo=github.repo, license=spdx or None, status="skipped_no_license",
+                        prs_scanned=0, candidates=[], has_next_page=False, end_cursor=None,
+                        rate_limit=dict(github.budget))
+        pulls = repo_data.get("pullRequests")
+        need(isinstance(pulls, dict) and isinstance(pulls.get("nodes"), list))
+        nodes = pulls["nodes"]
+        if not nodes:
+            has_next_page = False
+            break
+        stop_window = False
+        for pull in nodes:
+            if not isinstance(pull, dict):
+                continue
+            prs_scanned += 1
+            merged_at = pull.get("mergedAt")
+            if not merged_at:
+                continue
+            if cutoff is not None and timestamp(merged_at) < cutoff:
+                stop_window = True
+                continue
+            number = pull.get("number")
+            title = pull.get("title") or ""
+            pr_url = pull.get("url") or ""
+            commit_nodes = [row["commit"] for row in ((pull.get("commits") or {}).get("nodes") or [])
+                            if isinstance(row, dict) and isinstance(row.get("commit"), dict)]
+            parsed = []
+            for commit_node in commit_nodes:
+                oid = commit_node.get("oid") or ""
+                if not SHA.fullmatch(oid):
+                    continue
+                state, failed, passed, same_flaky = _commit_checks(commit_node)
+                parsed.append(dict(
+                    oid=oid,
+                    message=commit_node.get("message") or "",
+                    committed_date=commit_node.get("committedDate") or "",
+                    rollup_state=state,
+                    failed=failed,
+                    passed=passed,
+                    same_flaky=same_flaky,
+                ))
+            for idx, cur in enumerate(parsed):
+                if cur["same_flaky"]:
+                    key = (number, cur["oid"], cur["oid"], "flaky_same_commit")
+                    if key not in seen_keys:
+                        seen_keys.add(key)
+                        flaky_failed = [row for row in cur["failed"] if row["name"] in cur["passed"]]
+                        candidates.append(dict(
+                            stage1_kind="flaky_same_commit",
+                            pr_number=number, pr_url=pr_url, pr_title=title, merged_at=merged_at,
+                            before_sha=cur["oid"], after_sha=cur["oid"],
+                            before_message=cur["message"], after_message=cur["message"],
+                            failed_checks=flaky_failed, after_rollup_state="SUCCESS", after_failed_checks=[],
+                        ))
+                if idx + 1 >= len(parsed) or not cur["failed"]:
+                    continue
+                nxt = parsed[idx + 1]
+                nxt_has_failure = bool(nxt["failed"]) or nxt["rollup_state"] in ("FAILURE", "ERROR")
+                nxt_green = (not nxt_has_failure) and (nxt["rollup_state"] == "SUCCESS" or bool(nxt["passed"]))
+                if nxt_green:
+                    key = (number, cur["oid"], nxt["oid"], "red_to_green")
+                    if key not in seen_keys:
+                        seen_keys.add(key)
+                        candidates.append(dict(
+                            stage1_kind="red_to_green",
+                            pr_number=number, pr_url=pr_url, pr_title=title, merged_at=merged_at,
+                            before_sha=cur["oid"], after_sha=nxt["oid"],
+                            before_message=cur["message"], after_message=nxt["message"],
+                            failed_checks=cur["failed"], after_rollup_state="SUCCESS", after_failed_checks=[],
+                        ))
+                elif nxt["failed"]:
+                    key = (number, cur["oid"], nxt["oid"], "still_red")
+                    if key not in seen_keys:
+                        seen_keys.add(key)
+                        candidates.append(dict(
+                            stage1_kind="still_red",
+                            pr_number=number, pr_url=pr_url, pr_title=title, merged_at=merged_at,
+                            before_sha=cur["oid"], after_sha=nxt["oid"],
+                            before_message=cur["message"], after_message=nxt["message"],
+                            failed_checks=cur["failed"],
+                            after_rollup_state=nxt["rollup_state"] or "FAILURE",
+                            after_failed_checks=nxt["failed"],
+                        ))
+        info = pulls.get("pageInfo") or {}
+        has_next_page = bool(info.get("hasNextPage")) and not stop_window
+        next_cursor = info.get("endCursor")
+        if not has_next_page or not isinstance(next_cursor, str) or not next_cursor or next_cursor in cursors:
+            has_next_page = False
+            break
+        cursors.add(next_cursor)
+        cursor = next_cursor
+    return dict(repo=github.repo, license=spdx, status=status, prs_scanned=prs_scanned,
+                candidates=candidates, has_next_page=has_next_page, end_cursor=cursor,
+                rate_limit=dict(github.budget))
+
+
+def _load_privacy_policy(path):
+    if path is None:
+        return ([], [])
+    try:
+        from training import dataset as training_dataset
+        return training_dataset.load_policy(Path(path))
+    except ImportError:
+        policy = json.loads(Path(path).read_bytes(), object_pairs_hook=coldfix.unique_object)
+        terms = [unicodedata.normalize("NFKC", term.strip())
+                 for field in ("owner_names", "private_repos", "private_hosts")
+                 for term in policy.get(field, []) if isinstance(term, str) and term.strip()]
+        patterns = [re.compile(pattern, re.I) for pattern in policy.get("patterns", [])
+                    if isinstance(pattern, str) and pattern]
+        return terms, patterns
+
+
+def _privacy_blocked(text, policy=None):
+    terms, patterns = policy or ([], [])
+    normalized = unicodedata.normalize("NFKC", text)
+    if (coldfix.privacy_counts(normalized, {"private": terms} if terms else None, filename_exempt=True)
+            or OSS_EXTRA_SECRET.search(normalized)
+            or re.search(r"(?i)\b[\w.-]+-private\b|<\|[^>]+\|>", normalized)
+            or any(pattern.search(normalized) for pattern in patterns)):
+        return True
+    try:
+        from training import dataset as training_dataset
+        import regression_adapter
+        return bool(training_dataset.screened(regression_adapter.screenable(normalized), (terms, patterns)))
+    except ImportError:
+        return False
+
+
+def _is_docs_format_chore(changed_files, diff_w_empty, after_message):
+    if diff_w_empty:
+        return True
+    if changed_files and all(OSS_DOCS_CHORE_PATH.search(path) for path in changed_files):
+        return True
+    subject = (after_message or "").strip().splitlines()[0] if (after_message or "").strip() else ""
+    return bool(OSS_DOCS_CHORE_SUBJECT.search(subject))
+
+
+def _git_anonymous(clone, args, env, timeout=60):
+    command = ["git", "-C", str(clone), "-c", "core.hooksPath=" + os.devnull, "-c", "credential.helper=", *args]
+    return subprocess.run(command, capture_output=True, text=True, errors="replace", env=env, timeout=timeout, check=False)
+
+
+def _fetch_shas_blobless(url, shas, clone, timeout=180):
+    import oss_replay
+    import ci_fix_learning as ci
+    unique = list(dict.fromkeys(shas))
+    if not unique:
+        return None, set()
+    env = None
+    fetched = set()
+    chunk_size = 50
+    for start in range(0, len(unique), chunk_size):
+        chunk = unique[start:start + chunk_size]
+        if env is None:
+            try:
+                env = oss_replay.anonymous_clone(url, chunk, clone, timeout, blobless=True)
+                fetched.update(chunk)
+                continue
+            except ci.Skipped:
+                env = dict(PATH=os.defpath, HOME=str(clone.parent), LANG="C.UTF-8", LC_ALL="C.UTF-8",
+                           GIT_TERMINAL_PROMPT="0", GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
+                           GIT_ASKPASS="/bin/false", SSH_ASKPASS="/bin/false")
+                if not clone.exists():
+                    subprocess.run(["git", "-c", "core.hooksPath=" + os.devnull, "-c", "credential.helper=",
+                                    "init", "--quiet", "--bare", str(clone)],
+                                   capture_output=True, env=env, timeout=timeout, check=False)
+                    _git_anonymous(clone, ["remote", "add", "origin", url], env, timeout)
+                for sha in chunk:
+                    res = _git_anonymous(clone, ["fetch", "--quiet", "--filter=blob:none", "--depth=1",
+                                                 "--no-tags", "origin", sha], env, timeout)
+                    if res.returncode == 0:
+                        fetched.add(sha)
+        else:
+            res = _git_anonymous(clone, ["fetch", "--quiet", "--filter=blob:none", "--depth=1",
+                                         "--no-tags", "origin", *chunk], env, timeout)
+            if res.returncode == 0:
+                fetched.update(chunk)
+            else:
+                for sha in chunk:
+                    one = _git_anonymous(clone, ["fetch", "--quiet", "--filter=blob:none", "--depth=1",
+                                                 "--no-tags", "origin", sha], env, timeout)
+                    if one.returncode == 0:
+                        fetched.add(sha)
+    return env, fetched
+
+
+def _materialize_repo_pairs(stage1, clone_work, *, repo_url=None, privacy_policy=None, timeout=180):
+    repo = stage1["repo"]
+    spdx = stage1.get("license")
+    candidates = stage1.get("candidates") or []
+    if not spdx or spdx not in OSS_PERMISSIVE_LICENSES or not candidates:
+        return [], dict(privacy_dropped=0, clone_errors=0)
+    url = repo_url or f"https://github.com/{repo}.git"
+    needed_shas = []
+    for cand in candidates:
+        if cand["stage1_kind"] != "flaky_same_commit":
+            needed_shas.extend((cand["before_sha"], cand["after_sha"]))
+    pairs = []
+    privacy_dropped = 0
+    clone_errors = 0
+    clone_root = Path(clone_work) if clone_work else Path(tempfile.gettempdir())
+    clone_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="coldfix-oss-s2-", dir=str(clone_root)) as tmp:
+        clone = Path(tmp) / "repo.git"
+        env, fetched = _fetch_shas_blobless(url, needed_shas, clone, timeout=timeout)
+        for cand in candidates:
+            kind = cand["stage1_kind"]
+            before_sha, after_sha = cand["before_sha"], cand["after_sha"]
+            before_msg, after_msg = cand.get("before_message") or "", cand.get("after_message") or ""
+            if kind == "flaky_same_commit":
+                label, negative_kind = "negative", "flaky"
+                changed_files, diff_text, diff_truncated = [], "", False
+            else:
+                if env is None or before_sha not in fetched or after_sha not in fetched:
+                    clone_errors += 1
+                    continue
+                if not before_msg:
+                    res_msg = _git_anonymous(clone, ["log", "-n", "1", "--format=%B", before_sha], env, timeout=30)
+                    if res_msg.returncode == 0:
+                        before_msg = res_msg.stdout.strip()
+                if not after_msg:
+                    res_msg = _git_anonymous(clone, ["log", "-n", "1", "--format=%B", after_sha], env, timeout=30)
+                    if res_msg.returncode == 0:
+                        after_msg = res_msg.stdout.strip()
+                names_res = _git_anonymous(clone, ["diff", "--name-only", before_sha, after_sha], env, timeout=60)
+                if names_res.returncode != 0:
+                    clone_errors += 1
+                    continue
+                changed_files = [line.strip() for line in names_res.stdout.splitlines() if line.strip()]
+                if not changed_files:
+                    if kind == "red_to_green":
+                        label, negative_kind = "negative", "flaky"
+                        diff_text, diff_truncated = "", False
+                    else:
+                        continue
+                else:
+                    diff_res = _git_anonymous(clone, ["diff", "--no-color", "--no-ext-diff", before_sha, after_sha], env, timeout=90)
+                    if diff_res.returncode != 0:
+                        clone_errors += 1
+                        continue
+                    raw_diff = diff_res.stdout
+                    diff_truncated = len(raw_diff) > OSS_MAX_DIFF_CHARS
+                    diff_text = raw_diff[:OSS_MAX_DIFF_CHARS]
+                    if kind == "still_red":
+                        label, negative_kind = "negative", "still_red"
+                    else:
+                        w_res = _git_anonymous(clone, ["diff", "-w", "--no-color", "--no-ext-diff", before_sha, after_sha], env, timeout=90)
+                        diff_w_empty = (w_res.returncode == 0 and not w_res.stdout.strip())
+                        if _is_docs_format_chore(changed_files, diff_w_empty, after_msg):
+                            label, negative_kind = "negative", "docs_format_chore"
+                        else:
+                            label, negative_kind = "positive", None
+            check_key = cand["failed_checks"][0]["name"] if cand.get("failed_checks") else ""
+            pair_id = coldfix.digest(f"{repo}|{cand['pr_number']}|{before_sha}|{after_sha}|{label}|{negative_kind or ''}|{check_key}")[:32]
+            row = dict(
+                schema_version=OSS_SCHEMA_VERSION,
+                pair_id=pair_id,
+                repo=repo,
+                license=spdx,
+                pr_number=cand["pr_number"],
+                pr_url=cand["pr_url"],
+                pr_title=cand["pr_title"],
+                merged_at=cand["merged_at"],
+                label=label,
+                negative_kind=negative_kind,
+                before_sha=before_sha,
+                after_sha=after_sha,
+                before_message=before_msg[:2000],
+                after_message=after_msg[:2000],
+                failed_checks=cand["failed_checks"],
+                after_rollup_state=cand["after_rollup_state"],
+                after_failed_checks=cand["after_failed_checks"],
+                changed_files=changed_files[:200],
+                diff=diff_text,
+                diff_truncated=diff_truncated,
+                rule=None,
+            )
+            screen_blob = "\n".join([
+                row["repo"], row["pr_url"], row["pr_title"], row["before_message"], row["after_message"],
+                "\n".join(row["changed_files"]),
+                "\n".join(f"{c['name']}\n{c['title']}\n{c['summary']}" for c in row["failed_checks"]),
+                "\n".join(f"{c['name']}\n{c['title']}\n{c['summary']}" for c in row["after_failed_checks"]),
+                row["diff"],
+            ])
+            if _privacy_blocked(screen_blob, privacy_policy):
+                privacy_dropped += 1
+                continue
+            pairs.append(row)
+    return pairs, dict(privacy_dropped=privacy_dropped, clone_errors=clone_errors)
+
+
+def _repo_slug_file(repo):
+    return repo.replace("/", "__")
+
+
+def _write_oss_outputs(out_dir, batch_files, stats_by_repo, receipt, *, write_merged=True):
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    all_rows = []
+    seen_ids = set()
+    pairs_per_repo = {}
+    licenses = {}
+    positive = 0
+    neg_breakdown = Counter()
+    for path in sorted(batch_files):
+        if not path.is_file():
+            continue
+        for line in path.read_text(encoding="utf-8").split("\n"):
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if row["pair_id"] in seen_ids:
+                continue
+            seen_ids.add(row["pair_id"])
+            if write_merged:
+                all_rows.append(row)
+            pairs_per_repo[row["repo"]] = pairs_per_repo.get(row["repo"], 0) + 1
+            licenses[row["repo"]] = row["license"]
+            if row["label"] == "positive":
+                positive += 1
+            else:
+                neg_breakdown[row.get("negative_kind") or "other"] += 1
+    if write_merged:
+        coldfix.atomic_create(
+            out_dir / "pairs.jsonl",
+            "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in all_rows),
+            replace=True, mode=0o644)
+    total = len(seen_ids)
+    summary = dict(
+        schema_version=OSS_SCHEMA_VERSION,
+        updated_at=now_iso,
+        total_pairs=total,
+        positive=positive,
+        negative=total - positive,
+        negative_breakdown=dict(sorted(neg_breakdown.items())),
+        repos_with_pairs=len(pairs_per_repo),
+        pairs_per_repo=dict(sorted(pairs_per_repo.items(), key=lambda kv: (-kv[1], kv[0]))),
+        licenses=dict(sorted(licenses.items())),
+        repo_status=stats_by_repo,
+        privacy_dropped=sum(v.get("privacy_dropped", 0) for v in stats_by_repo.values()),
+        clone_errors=sum(v.get("clone_errors", 0) for v in stats_by_repo.values()),
+    )
+    coldfix.atomic_create(out_dir / "summary.json", coldfix.encoded(summary), replace=True, mode=0o644)
+    receipt_out = dict(receipt, updated_at=now_iso)
+    coldfix.atomic_create(out_dir / "rate_limit_receipt.json", coldfix.encoded(receipt_out), replace=True, mode=0o644)
+    return summary, receipt_out
+
+
+def oss_collect(github, since=None, *, mode="events", max_prs=100, pr_page_size=25, max_commits=25, max_contexts=50,
+                prior=None):
+    """Collect OSS events (default) or Stage-1 GraphQL CI-pair candidates (`mode='ci_pairs'`).
+
+    In default `'events'` mode, returns failed runs and fix or revert commits since `since` (UTC) as `(events, complete)`.
+    In `'ci_pairs'` mode, runs batched GraphQL queries over merged PR commits and statusCheckRollup/CheckRun."""
+    if mode == "ci_pairs":
+        return _oss_collect_ci_pairs(github, since, max_prs=max_prs, pr_page_size=pr_page_size,
+                                     max_commits=max_commits, max_contexts=max_contexts, prior=prior)
     events = []
 
     def emit(kind, command, error, url, when, agent):
@@ -458,8 +999,111 @@ def oss_collect(github, since):
         page += 1
 
 
-def oss_gather(repos, since):
+def oss_gather(repos, since=None, *, mode="events", output_dir=None, stage="both", max_prs=100,
+               pr_page_size=25, max_commits=25, max_contexts=50, min_remaining=OSS_MIN_REMAINING,
+               sleep_on_limit=False, clone_dir=None, privacy_policy=None, target_pairs=0,
+               repo_url_fn=None, timeout=180):
     """Gather each repository independently; one failing repository never hides the others."""
+    if mode == "ci_pairs":
+        coldfix.require(output_dir is not None, "output_dir is required for ci_pairs mode")
+        coldfix.require(stage in ("stage1", "stage2", "both"), "invalid stage")
+        out = Path(output_dir)
+        ckpt_dir = out / "checkpoints"
+        batch_dir = out / "batches"
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        batch_dir.mkdir(parents=True, exist_ok=True)
+        receipt_path = out / "rate_limit_receipt.json"
+        if receipt_path.is_file():
+            prior = json.loads(receipt_path.read_text(encoding="utf-8"))
+            budget = dict(
+                calls=prior.get("calls", 0),
+                total_cost=prior.get("total_cost", 0),
+                min_remaining=prior.get("min_remaining"),
+                last_remaining=prior.get("last_remaining"),
+                last_reset_at=prior.get("last_reset_at"),
+                stopped_early=False,
+            )
+            if budget["last_reset_at"] and timestamp(budget["last_reset_at"]) <= datetime.now(timezone.utc):
+                budget["last_remaining"] = None
+        else:
+            budget = dict(calls=0, total_cost=0, min_remaining=None, last_remaining=None,
+                          last_reset_at=None, stopped_early=False)
+        stats_path = out / "summary.json"
+        stats_by_repo = (json.loads(stats_path.read_text(encoding="utf-8")).get("repo_status") or {}) if stats_path.is_file() else {}
+        policy = _load_privacy_policy(privacy_policy) if isinstance(privacy_policy, (str, Path)) else privacy_policy
+        running_pairs = sum(v.get("pairs", 0) for v in stats_by_repo.values())
+        for idx, repo in enumerate(repos, 1):
+            if target_pairs and running_pairs >= target_pairs:
+                break
+            slug = _repo_slug_file(repo)
+            ckpt_file = ckpt_dir / f"{slug}.stage1.json"
+            batch_file = batch_dir / f"{slug}.pairs.jsonl"
+            stage1 = json.loads(ckpt_file.read_text(encoding="utf-8")) if ckpt_file.is_file() else None
+            needs_deeper = (
+                stage1 is not None
+                and stage1.get("status") == "ok"
+                and stage1.get("has_next_page")
+                and stage1.get("end_cursor")
+                and max_prs is not None
+                and int(stage1.get("prs_scanned", 0)) < max_prs
+            )
+            stage1_updated = False
+            if stage in ("stage1", "both") and (
+                stage1 is None
+                or stage1.get("status") not in ("ok", "skipped_no_license", "skipped_private")
+                or needs_deeper
+            ):
+                if budget.get("stopped_early"):
+                    stats_by_repo[repo] = dict(status="skipped_rate_limited", pairs=0)
+                    continue
+                github = PublicGitHub(repo, min_remaining=min_remaining, sleep_on_limit=sleep_on_limit, budget=budget)
+                try:
+                    stage1 = oss_collect(github, since, mode="ci_pairs", max_prs=max_prs,
+                                         pr_page_size=pr_page_size, max_commits=max_commits, max_contexts=max_contexts,
+                                         prior=stage1 if needs_deeper else None)
+                except RateLimited:
+                    budget["stopped_early"] = True
+                    stats_by_repo[repo] = dict(status="rate_limited", pairs=0)
+                    _write_oss_outputs(out, list(batch_dir.glob("*.pairs.jsonl")), stats_by_repo, budget, write_merged=False)
+                    continue
+                except (coldfix.ColdfixError, KeyError, TypeError, ValueError):
+                    stats_by_repo[repo] = dict(status="failed", pairs=0)
+                    continue
+                coldfix.atomic_create(ckpt_file, coldfix.encoded(stage1), replace=True, mode=0o644)
+                stage1_updated = True
+                stats_by_repo[repo] = dict(
+                    status=stage1["status"], license=stage1.get("license"),
+                    prs_scanned=stage1.get("prs_scanned", 0), candidates=len(stage1.get("candidates") or []),
+                    pairs=stats_by_repo.get(repo, {}).get("pairs", 0),
+                )
+            if stage in ("stage2", "both") and stage1 is not None and (not batch_file.is_file() or stage1_updated):
+                if stage1.get("status") in ("skipped_no_license", "skipped_private"):
+                    stats_by_repo[repo] = dict(status=stage1["status"], license=stage1.get("license"), pairs=0)
+                else:
+                    url = repo_url_fn(repo) if repo_url_fn else None
+                    pairs, meta = _materialize_repo_pairs(stage1, clone_dir, repo_url=url,
+                                                          privacy_policy=policy, timeout=timeout)
+                    coldfix.atomic_create(
+                        batch_file,
+                        "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in pairs),
+                        replace=True, mode=0o644)
+                    stats_by_repo[repo] = dict(
+                        status=stage1["status"], license=stage1.get("license"),
+                        prs_scanned=stage1.get("prs_scanned", 0),
+                        candidates=len(stage1.get("candidates") or []),
+                        pairs=len(pairs),
+                        positive=sum(row["label"] == "positive" for row in pairs),
+                        negative=sum(row["label"] == "negative" for row in pairs),
+                        **meta,
+                    )
+                    running_pairs = sum(v.get("pairs", 0) for v in stats_by_repo.values())
+            _write_oss_outputs(out, list(batch_dir.glob("*.pairs.jsonl")), stats_by_repo, budget,
+                               write_merged=(idx % 5 == 0))
+            st = stats_by_repo.get(repo, {})
+            print(f"oss-ci-pairs: [{idx}/{len(repos)}] {repo} status={st.get('status')} "
+                  f"pairs={st.get('pairs', 0)} total={running_pairs} "
+                  f"remaining={budget.get('last_remaining')}", file=sys.stderr, flush=True)
+        return _write_oss_outputs(out, list(batch_dir.glob("*.pairs.jsonl")), stats_by_repo, budget, write_merged=True)
     results, events = [], []
     for repo in repos:
         github = PublicGitHub(repo)
@@ -568,8 +1212,23 @@ def migrate_codex_labels(root, github):
 def main(argv=None):
     parser = coldfix.Parser(description=__doc__)
     parser.add_argument("--repo", help="GitHub OWNER/REPO")
-    parser.add_argument("--oss-allowlist", help="file of public OWNER/REPO names, one per line; gathers failed CI "
-                        "runs and fix commits read-only (default window: last %d days)" % OSS_DEFAULT_DAYS)
+    parser.add_argument("--oss-allowlist", help="file of public OWNER/REPO names (one per line or JSON catalog); "
+                        "gathers failed CI runs/commits or OSS CI pairs read-only (default window: last %d days)" % OSS_DEFAULT_DAYS)
+    parser.add_argument("--oss-ci-pairs", action="store_true",
+                        help="with --oss-allowlist: mine two-stage OSS CI pairs (Stage 1 GraphQL, Stage 2 blobless local git)")
+    parser.add_argument("--output-dir", help="with --oss-ci-pairs: directory for checkpoints, batches, summary and rate-limit receipt")
+    parser.add_argument("--stage", choices=("stage1", "stage2", "both"), default="both",
+                        help="with --oss-ci-pairs: run stage1 (GraphQL only), stage2 (local git only) or both")
+    parser.add_argument("--max-prs", type=int, default=100,
+                        help="with --oss-ci-pairs: max merged PRs scanned per repo (default 100)")
+    parser.add_argument("--min-remaining", type=int, default=OSS_MIN_REMAINING,
+                        help="with --oss-ci-pairs: stop or sleep when GraphQL remaining drops below this threshold (default %d)" % OSS_MIN_REMAINING)
+    parser.add_argument("--sleep-on-limit", action="store_true",
+                        help="with --oss-ci-pairs: sleep until rateLimit.resetAt instead of stopping")
+    parser.add_argument("--privacy-policy", help="with --oss-ci-pairs: JSON privacy policy for dataset screening")
+    parser.add_argument("--clone-dir", help="with --oss-ci-pairs: scratch directory for Stage 2 blobless git clones")
+    parser.add_argument("--target-pairs", type=int, default=0,
+                        help="with --oss-ci-pairs: stop once at least this many total pairs are materialized (0 = all repos)")
     parser.add_argument("--dry-run", action="store_true",
                         help="with --oss-allowlist: print per-repository record counts and write nothing")
     parser.add_argument("--store", default=".coldfix", help="private .coldfix directory")
@@ -584,9 +1243,21 @@ def main(argv=None):
     try:
         coldfix.require(not (args.import_existing and args.migrate_codex_labels), "choose one import or migration mode")
         coldfix.require(args.oss_allowlist or not args.dry_run, "--dry-run needs --oss-allowlist")
+        coldfix.require(args.oss_allowlist or not args.oss_ci_pairs, "--oss-ci-pairs needs --oss-allowlist")
         if args.oss_allowlist:
             coldfix.require(not (args.repo or args.pr or args.import_existing or args.migrate_codex_labels),
                             "--oss-allowlist does not combine with --repo, --pr, --import-existing or --migrate-codex-labels")
+            if args.oss_ci_pairs:
+                coldfix.require(args.output_dir and args.max_prs > 0 and args.min_remaining >= 0 and args.target_pairs >= 0,
+                                "--oss-ci-pairs requires --output-dir and valid numeric limits")
+                since = utc(args.since) if args.since else None
+                summary, receipt = oss_gather(
+                    oss_repos(args.oss_allowlist), since, mode="ci_pairs", output_dir=args.output_dir,
+                    stage=args.stage, max_prs=args.max_prs, min_remaining=args.min_remaining,
+                    sleep_on_limit=args.sleep_on_limit, clone_dir=args.clone_dir,
+                    privacy_policy=args.privacy_policy, target_pairs=args.target_pairs)
+                print(json.dumps(dict(summary=summary, rate_limit_receipt=receipt), sort_keys=True))
+                return 0 if not receipt.get("stopped_early") else 3
             since = utc(args.since) if args.since else (
                 datetime.now(timezone.utc) - timedelta(days=OSS_DEFAULT_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
             results, events = oss_gather(oss_repos(args.oss_allowlist), since)

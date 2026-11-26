@@ -57,6 +57,7 @@ REASONS = (
     "corrected message does not apply the rule", "corrected message is not a later agent message",
     "incident cannot be exported", "incident not admitted", "invalid source repository", "jev", "jev check failed",
     "jev review failed", "lead too long to read whole", "missing_upstream_fix",
+    "message outside focused evidence", "no_mistake in focused window", "not_general in focused window",
     "no agent message shows the mistake", "no change between the replay revisions for the requested paths",
     "no changed unittest matches the recorded failure", "no descendant contains a unittest matching the recorded failure",
     "no earlier turns before the mistake", "no exact pair", "no fix exists",

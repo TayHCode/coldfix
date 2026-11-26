@@ -243,6 +243,19 @@ class PairingTests(unittest.TestCase):
             rows = gh.pages("actions/runs", "workflow_runs")
         self.assertEqual([row["id"] for row in rows], list(range(1, 200)))
 
+    def test_pull_files_keep_distinct_paths_with_identical_contents(self):
+        gh = ci.GitHub("example/project")
+        files = [dict(filename=name, sha="a" * 40) for name in ("first.py", "second.py")]
+        with patch.object(gh, "api", return_value=files):
+            self.assertEqual(gh.pages("pulls/1/files"), files)
+
+    def test_pull_files_reject_conflicting_rows_for_the_same_path(self):
+        gh = ci.GitHub("example/project")
+        files = [dict(filename="value.py", sha=char * 40) for char in "ab"]
+        with patch.object(gh, "api", return_value=files):
+            with self.assertRaises(c.ColdfixError):
+                gh.pages("pulls/1/files")
+
     def test_limit_counts_unique_rows_after_shifted_duplicate(self):
         gh = ci.GitHub("example/project")
         pages = {1: list(range(1, 101)), 2: list(range(100, 200)), 3: list(range(200, 300))}

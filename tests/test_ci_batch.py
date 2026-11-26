@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import fcntl
 import io
+from collections import Counter
 from contextlib import redirect_stdout
 from pathlib import Path
 import tempfile
@@ -593,7 +594,7 @@ TEST_PATCH = "@@ -1,2 +1,4 @@\n class T(unittest.TestCase):\n+    def test_rejec
 
 
 def pull(number, head, author="writer", merged=True):
-    return dict(number=number, merged_at="2026-01-02T00:00:00Z" if merged else None,
+    return dict(number=number, title="Preserve empty input", body="", labels=[], merged_at="2026-01-02T00:00:00Z" if merged else None,
                 head=dict(sha=head * 40), user=dict(login=author))
 
 
@@ -630,6 +631,8 @@ class OpenSourceGitHub:
         if parts[3] == "pulls" and len(parts) == 4:
             page = int(parse_qs(url.query)["page"][0])
             return self.pulls.get(repo, [])[(page - 1) * 50:page * 50]
+        if parts[3] == "pulls" and parts[-1] == "files":
+            return [CODE, TEST]
         if parts[3] == "pulls":
             page = int(parse_qs(url.query).get("page", ["1"])[0])
             return self.comments.get(int(parts[4]), [])[(page - 1) * 100:page * 100]
@@ -637,18 +640,146 @@ class OpenSourceGitHub:
 
 
 def fixed(files, commits=(("f", "2026-01-01T12:00:00Z"),)):
-    return dict(status="ahead", files=files,
-                commits=[dict(sha=sha * 40, commit=dict(committer=dict(date=date))) for sha, date in commits])
+    return dict(status="ahead", files=files, total_commits=len(commits),
+                commits=[dict(sha=sha * 40, commit=dict(message="Preserve empty input", committer=dict(date=date))) for sha, date in commits])
 
 
-CODE = dict(filename="pkg/core.py", patch="@@ -1 +1 @@\n-x\n+y\n")
-TEST = dict(filename="tests/test_core.py", patch=TEST_PATCH)
+CODE = dict(filename="pkg/core.py", additions=1, deletions=1, patch="@@ -1 +1 @@\n-x\n+y\n")
+TEST = dict(filename="tests/test_core.py", additions=2, deletions=0, patch=TEST_PATCH)
+
+
+class CatalogTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.queue = self.root / "queue.json"
+        self.optout = self.root / "optout.json"
+        self.optout.write_text(json.dumps({"schema_version": 1, "repos": [{"repo": "O/skip", "date": "2026-11-01"}]}))
+        self.now = datetime(2026, 11, 23, tzinfo=timezone.utc)
+        self.calls = []
+
+    def inspect(self, names, size=30):
+        self.queue.write_text(json.dumps({name: {"target": {"private": name == "o/local-private"}} for name in names}))
+        return ci_batch.inspect_sample(self.queue, self.optout, self.root, size, self.api, self.now)
+
+    def api(self, endpoint, missing):
+        self.calls.append(endpoint)
+        self.assertEqual(missing, "HTTP 404")
+        _, owner, name, *path = endpoint.split("/")
+        if not path:
+            if name == "missing":
+                return None
+            return dict(full_name=(f"{owner}/skip" if name == "renamed" else f"{owner}/{name}"),
+                        archived=name == "archive", visibility="public", private=name == "private",
+                        license={"spdx_id": {"gpl": "GPL-3.0", "bsd": "BSD-2-Clause",
+                                             "apache": "Apache-2.0"}.get(name, "MIT")})
+        if path[0] == "actions":
+            return {"workflows": [] if name == "no-actions" else [{"id": 1}]}
+        self.assertTrue(path[0].startswith("pulls?state=closed"))
+        date = self.now - timedelta(days=91 if name == "stale" else 90)
+        return [{"merged_at": None if name == "unmerged" else date.isoformat()}]
+
+    def test_only_eligible_public_repositories_are_reported(self):
+        names = "mit bsd apache skip local-private renamed gpl archive private missing no-actions stale unmerged".split()
+        result = self.inspect(["o/" + name for name in names])
+        self.assertEqual(result["eligible"], ["o/apache", "o/bsd", "o/mit"])
+        self.assertEqual(result["screened"], len(names) - 2)
+        self.assertNotIn("repos/o/skip", self.calls)
+        self.assertNotIn("repos/o/local-private", self.calls)
+
+    def test_persisted_rotation_includes_ineligible_names_and_prior_batches(self):
+        names = ["o/archive", "o/b", "o/c"]
+        (self.root / ci_batch.LEDGER).write_text(json.dumps({"pages": {"O/B": {}}}))
+        self.assertEqual(self.inspect(names, 1)["eligible"], [])
+        self.assertEqual(self.inspect(names, 1)["eligible"], ["o/c"])
+        self.assertEqual(self.inspect(names, 1), dict(catalog=3, screened=1, first_seen=0, eligible=["o/b"]))
+        self.assertEqual(self.inspect(names + ["o/new"], 1)["eligible"], ["o/new"])
+
+    def test_optout_failure_preserves_history_and_reads_no_github_metadata(self):
+        self.inspect(["o/a"])
+        state = self.root / "oss-catalog-seen.json"
+        before = state.read_bytes()
+        self.calls.clear()
+        self.optout.write_text("{}")
+        with self.assertRaises(ci_batch.c.ColdfixError):
+            self.inspect(["o/b"])
+        self.assertEqual(self.calls, [])
+        self.assertEqual(state.read_bytes(), before)
 
 
 class OpenSourceTests(unittest.TestCase):
     def feature(self, name):
         self.assertTrue(hasattr(ci_batch, name), "ci_batch cannot learn from open-source repositories")
         return getattr(ci_batch, name)
+
+    def test_security_label_and_cve_finding_never_reach_drafting(self):
+        github = OpenSourceGitHub(
+            {"o/a": [dict(pull(1, "f"), labels=[{"name": "security"}]), pull(2, "f")]},
+            {1: [comment(10, "a")], 2: [dict(comment(11, "b"), body="CVE reference",
+                                                    html_url="https://github.com/o/a/pull/2#discussion_r11")]},
+            {before * 40 + "..." + "f" * 40: fixed([CODE, TEST]) for before in ("a", "b")})
+        outcome = dict(learned=True, drafted=0, draft_pass=0, proven=0, rejected=0, reject_reasons={})
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(ci_batch, "learn", side_effect=lambda root, entry, *args: entry.update(outcome)) as learn:
+            root = Path(directory)
+            with redirect_stdout(io.StringIO()) as output:
+                ci_batch.run(root, None, 10, api=github, public=["o/a"])
+            learn.assert_not_called()
+            self.assertIn('"security-related PR": 1', output.getvalue())
+            self.assertIn('"security-related or incomplete review": 1', output.getvalue())
+            self.assertNotIn("CVE", output.getvalue())
+            self.assertFalse(ci_batch.c.load_store(root)[1]["failures"])
+
+    def test_resuming_with_a_new_security_label_keeps_the_finding_out_of_drafting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            entry = dict(ids=["old"], oss_pairs=[dict(repo="o/a", oss_pr=1, oss_failure="old")])
+            github = mock.Mock(return_value=dict(pull(1, "f"), labels=[{"name": "security"}]))
+            with mock.patch.object(ci_batch.c, "load_store", return_value=(root, {"failures": {"old": {"error": "empty input"}}})):
+                ci_batch.resume_oss(root, entry, ["o/a"], github)
+            self.assertEqual(entry["oss_pairs"], [])
+            self.assertEqual(entry["excluded"], {"security-related PR": 1})
+            github.assert_called_once()
+
+    def test_resuming_a_tested_ci_pair_keeps_it_without_an_ordinary_keyword(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            entry = dict(ids=["old"], oss_pairs=[dict(repo="o/a", oss_pr=1, oss_failure="old", tested=True),
+                                                 dict(repo="o/a", oss_pr=1, oss_failure="old")])
+            github = mock.Mock(side_effect=lambda endpoint, **_: pull(1, "f") if endpoint.endswith("/pulls/1")
+                               else [CODE, TEST] if "/files" in endpoint else [])
+            with mock.patch.object(ci_batch.c, "load_store", return_value=(root, {"failures": {"old": {"error": "worker hangs"}}})):
+                ci_batch.resume_oss(root, entry, ["o/a"], github)
+            self.assertEqual(entry["oss_pairs"], [dict(repo="o/a", oss_pr=1, oss_failure="old", tested=True)])
+            self.assertEqual(entry["excluded"], {"unclassified regression": 1})
+
+    def test_edited_finding_cannot_substitute_its_historical_text_into_a_draft(self):
+        old = dict(comment(10, "a"), body="security finding")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ci_batch.learn_collect.import_reviews(root, [ci_batch.c.event_record(
+                dict(kind="review", command="PR review finding", error=old["body"], repo="o/a", agent="oss-review",
+                     source_ref=old["html_url"], occurred=old["created_at"]), "github")])
+            github = OpenSourceGitHub({"o/a": [pull(1, "f")]}, {1: [comment(10, "a")]},
+                                      {"a" * 40 + "..." + "f" * 40: fixed([CODE, TEST])})
+            with mock.patch.object(ci_batch, "learn") as learn:
+                ci_batch.run(root, None, 10, api=github, public=["o/a"])
+            learn.assert_not_called()
+            ledger = json.loads((root / ci_batch.LEDGER).read_text())
+            self.assertEqual(ledger["last_oss_intake"]["excluded"], {"changed historical finding": 1})
+
+    def test_unclear_and_sensitive_changes_are_excluded(self):
+        screen = ci_batch.oss_replay
+        self.assertTrue(screen.pull_reason({"title": "formatting"}))
+        self.assertTrue(screen.files_reason([dict(CODE, previous_filename="src/auth/check.py")]))
+        self.assertTrue(screen.files_reason([CODE] * 100))
+        self.assertFalse(screen.sensitive("Co-authored-by: a contributor"))
+        self.assertFalse(screen.sensitive("authorization"))
+        self.assertTrue(screen.compare_reason(dict(fixed([CODE]), commits=[{"commit": {"message": "security advisory"}}])))
+        self.assertTrue(screen.compare_reason(dict(fixed([CODE]), total_commits=2)))
+        self.assertTrue(screen.evidence_reason("Please adjust this"))
+        self.assertIsNone(screen.evidence_reason("Wrong sort order on empty rows"))
 
     def test_only_repositories_github_reports_public_are_learned_from(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -694,7 +825,7 @@ class OpenSourceTests(unittest.TestCase):
                      "c" * 40 + "..." + "f" * 40: fixed([CODE, dict(TEST, patch="@@ -1 +1 @@\n-a\n+b\n")])})
         ledger = dict(seen={}, pages={}, batches=[])
         pairs, events, examined = self.feature("review_findings")(ledger, ["o/a"], 10, github)
-        self.assertEqual(pairs, [dict(repo="o/a", before="a" * 40, after="f" * 40,
+        self.assertEqual(pairs, [dict(repo="o/a", before="a" * 40, after="f" * 40, oss_pr=1,
                                       finding_url="https://github.com/o/a/pull/1#discussion_r10")])
         self.assertEqual([(row["kind"], row["source_ref"]) for row in events],
                          [("review", "https://github.com/o/a/pull/1#discussion_r10")])
@@ -727,7 +858,7 @@ class OpenSourceTests(unittest.TestCase):
                           ("12", "a" * 40, None, None, None),
                           ("13", "a" * 40, "pkg/core.py", 11, 11)])
 
-    def test_a_stored_review_pair_without_flagged_lines_is_refetched_once_and_replays_again(self):
+    def test_unscreened_historical_review_pairs_do_not_trigger_replay(self):
         url = "https://github.com/datarobot-oss/datarobot-genai/pull/772#discussion_r4605753840"
         before, after = "171b645c33bb65d62450e21508a74a62bcfc55ac", "29596a24732a312d2f97c7405bd5e58d4595cda9"
         stored = dict(repo="datarobot-oss/datarobot-genai", before=before, after=after, finding_url=url)
@@ -749,32 +880,10 @@ class OpenSourceTests(unittest.TestCase):
                 for _ in range(2):
                     ci_batch.run(root, None, 10, api=api, public=["datarobot-oss/datarobot-genai"])
             pairs = json.loads((root / ci_batch.PAIRS).read_text())["results"]
-        self.assertEqual(learn.call_count, 1)
-        self.assertEqual(pairs, [dict(stored, path=recorded["path"], start_line=96, end_line=96)])
-        self.assertEqual(github.calls.count(endpoint), 1)
-        self.assertNotEqual(inputs(pairs), settled)
-
-    def test_a_stored_pair_moved_off_its_reviewed_commit_is_paired_on_that_commit_once(self):
-        def stored(number, before):
-            return dict(repo="o/a", before=before * 40, after="f" * 40, path=None,
-                        finding_url=f"https://github.com/o/a/pull/1#discussion_r{number}")
-        recorded = {number: dict(comment(number, reviewed), side="RIGHT", original_line=7)
-                    for number, reviewed in ((10, "a"), (11, "b"), (12, "c"))}
-        github = OpenSourceGitHub({}, {}, {"a" * 40 + "..." + "f" * 40: fixed([CODE, TEST]),
-                                           "b" * 40 + "..." + "f" * 40: dict(fixed([CODE, TEST]), status="diverged")})
-
-        def api(endpoint, missing=None):
-            number = int(endpoint.rsplit("/", 1)[1]) if "/pulls/comments/" in endpoint else None
-            return (github.calls.append(endpoint) or recorded[number]) if number else github(endpoint, missing)
-        pairs = [stored(10, "e"), stored(11, "e"), stored(12, "c"), dict(stored(13, "e"), path="pkg/core.py"),
-                 dict(stored(14, "e"), repo="o/out", finding_url="https://github.com/o/out/pull/1#discussion_r14")]
-        for _ in range(2):
-            ci_batch.refetch_flagged_lines(pairs, api, ["O/A"])
-        self.assertEqual([(row["before"][0], row["path"], row.get("start_line"), row.get("reviewed_commit", "")[:1])
-                          for row in pairs],
-                         [("a", "pkg/core.py", 7, ""), ("e", None, None, "b"),
-                          ("c", "pkg/core.py", 7, ""), ("e", "pkg/core.py", None, ""), ("e", None, None, "")])
-        self.assertEqual(sum("/pulls/comments/" in call for call in github.calls), 3)
+        learn.assert_not_called()
+        self.assertEqual(pairs, [stored])
+        self.assertNotIn(endpoint, github.calls)
+        self.assertEqual(inputs(pairs), settled)
 
     def test_each_batch_examines_a_bounded_share_of_merged_prs_per_repository(self):
         pulls = {repo: [pull(number, "f") for number in range(1, 120)] for repo in ("o/a", "o/b")}
@@ -814,12 +923,13 @@ class OpenSourceTests(unittest.TestCase):
             root = Path(directory) / ".coldfix"
             root.mkdir(mode=0o700)
             outcome = dict(learned=True, drafted=0, draft_pass=0, proven=0, rejected=0, reject_reasons={})
-            with mock.patch.object(ci_batch, "learn", side_effect=lambda root, entry, *rest: entry.update(outcome)), \
+            with mock.patch.object(ci_batch, "learn", side_effect=lambda root, entry, *rest: entry.update(outcome)) as learner, \
                     mock.patch.object(ci_batch.failure_ingest, "gh", side_effect=AssertionError("owner discovery")):
                 ci_batch.run(root, None, 10, api=github, public=["o/a"])
+            screened_entry = learner.call_args.args[1]
             seen = []
 
-            def drafting(root, day, ask, reserved_rules=None):
+            def drafting(root, day, ask, reserved_rules=None, screened_pairs=None):
                 pairs = json.loads((root / ci_batch.PAIRS).read_text())["results"]
                 store = ci_batch.c.load_store(root)[1]
                 seen.append([row["repos"] for row in ci_batch.learn_candidates.candidates(store, pairs=pairs)])
@@ -829,7 +939,7 @@ class OpenSourceTests(unittest.TestCase):
                     mock.patch.object(ci_batch, "measure", return_value={}), \
                     mock.patch.object(ci_batch, "merge_evidence"):
                 for public in (["O/A"], []):
-                    ci_batch.learn(root, dict(batch=1, ids=[]), None, None, 1, None, public)
+                    ci_batch.learn(root, screened_entry, None, None, 1, None, public)
             self.assertEqual(seen, [[["o/a"]], []])
             self.assertEqual(len(ci_batch.c.load_store(root)[1]["failures"]), 1)
 
@@ -887,12 +997,15 @@ class OpenSourceTests(unittest.TestCase):
 
     def test_review_findings_are_still_learned_when_every_ci_log_fetch_fails(self):
         review = OpenSourceGitHub({"o/a": [pull(1, "f")]}, {1: [comment(10, "a")]},
-                                  {"a" * 40 + "..." + "f" * 40: fixed([CODE, TEST])})
+                                  {"a" * 40 + "..." + head * 40: fixed([CODE, TEST]) for head in ("f", "c")})
         ci = FakeGitHub(failed={"o/a": [run(1, "a", "2026-01-01T00:00:00Z")]},
                         green={"o/a": [run(9, "c", "2026-01-01T05:00:00Z")]})
-        github = lambda endpoint, missing=None: ci(endpoint) if "/actions/" in endpoint else review(endpoint, missing)
-        def fetch(repo, number, attempt):
-            raise ci_batch.c.ColdfixError("incomplete source")
+        merged = dict(pull(1, "c"), id=1, base={"repo": {"full_name": "o/a"}})
+        def github(endpoint, missing=None):
+            if "/commits/" in endpoint:
+                return [merged]
+            return ci(endpoint) if "/actions/" in endpoint else review(endpoint, missing)
+        fetch = mock.Mock(side_effect=ci_batch.c.ColdfixError("incomplete source"))
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / ".coldfix"
             root.mkdir(mode=0o700)
@@ -900,6 +1013,7 @@ class OpenSourceTests(unittest.TestCase):
             with mock.patch.object(ci_batch, "learn", side_effect=lambda root, entry, *rest: entry.update(outcome)) as learn:
                 ci_batch.run(root, None, 10, api=github, fetch=fetch, public=["o/a"])
             entry = learn.call_args[0][1]
+            fetch.assert_called_once()
             self.assertEqual((entry["fix_pairs"], entry["review_pairs"], len(entry["ids"])), (1, 1, 1))
 
 
@@ -936,6 +1050,214 @@ class OpenSourceTests(unittest.TestCase):
             return review(endpoint, missing)
         with self.assertRaises(ci_batch.c.ColdfixError):
             self.feature("review_findings")(dict(seen={}, pages={}, batches=[]), ["o/a"], 10, github)
+
+    def test_ci_pull_links_earlier_commits_within_the_same_merged_pr(self):
+        # Fixture from real excluded pair a2aproject/a2a-python#1502 (red_run 44465705308).
+        before = "2e71cb0c48b067524dea394b48c7cc1636eb158b"
+        after = "b94b2b230546c8b4d5292ee6de3f29d1724d4615"
+        head = "1f83530bf19d4320b465a5029e68b5a67d3cbc30"
+        merged = dict(
+            id=1502, number=1502, title="fix(compat): accept an empty body when deleting a v0.3 REST push config",
+            body="", labels=[], merged_at="2026-11-23T09:48:32Z",
+            merge_commit_sha="f077eb0286655cb3ea6a4c0ba55bccadd91d9cb9",
+            head=dict(sha=head), base=dict(repo=dict(full_name="a2aproject/a2a-python")),
+        )
+        commits = [dict(sha=before), dict(sha=after), dict(sha=head)]
+        def github(endpoint, missing=None):
+            if endpoint.startswith("repos/a2aproject/a2a-python/commits/") and endpoint.endswith("/pulls?per_page=100"):
+                sha = endpoint.split("/commits/", 1)[1].split("/", 1)[0]
+                return [merged] if sha in (before, after, "a" * 40) else []
+            if endpoint == "repos/a2aproject/a2a-python/pulls/1502/commits?per_page=100&page=1":
+                return commits
+            return []
+        row = dict(repo="a2aproject/a2a-python", id=44465705308,
+                   pair=dict(repo="a2aproject/a2a-python", before=before, after=after, red_run=44465705308, green_run=45014935667))
+        linked = ci_batch.ci_pull("a2aproject/a2a-python", row, github)
+        self.assertIsNotNone(linked)
+        self.assertEqual(linked["number"], 1502)
+        # Abandoned/force-pushed commit not present in the merged PR's commits must stay unlinked.
+        abandoned = dict(row, pair=dict(row["pair"], after="a" * 40))
+        self.assertIsNone(ci_batch.ci_pull("a2aproject/a2a-python", abandoned, github))
+        # Direct push with no PR must stay unlinked.
+        direct = dict(row, pair=dict(row["pair"], before="d" * 40, after="e" * 40))
+        self.assertIsNone(ci_batch.ci_pull("a2aproject/a2a-python", direct, github))
+
+    def test_security_related_pr_false_positives_from_real_excluded_prs_pass(self):
+        screen = ci_batch.oss_replay
+        cases = [
+            # aghulas/ha-danfoss-ally#140: "Authoritative" matched auth(?!or...)
+            dict(title="feat: complete contract", body="| `z2m_contract.py` | Authoritative MQTT contract |", labels=[]),
+            # aarong18/langgraph-harness#9: "case-insensitively" matched sensitive
+            dict(title="feat: add Harness.diff", body="Compare (section, text), case-insensitively.", labels=[]),
+            # archolith/menhir#751: "supersession" matched session
+            dict(title="fix: L4 supersession refuses historical endpoints",
+                 body="Reverse supersession and re-supersession are refused.", labels=[]),
+            # anarkiwi/deity-informant#538: Claude Code PR footer URL matched session
+            dict(title="Orbit check, pdefs register values",
+                 body="Generated in https://claude.ai/code/session_015LyXN4Hv59n2BS39J.", labels=[]),
+            # 15r10nk/inline-snapshot-numpy#11: "lockfile" and "trusted publisher" matched lockfile/trust
+            dict(title="chore: update Copier template to v0.6.1",
+                 body="- `uv lock` left the lockfile unchanged.\nRequires a TestPyPI trusted publisher.", labels=[]),
+        ]
+        for case in cases:
+            with self.subTest(title=case["title"]):
+                self.assertIsNone(screen.pull_reason(case))
+
+    def test_security_related_change_false_positives_from_real_excluded_prs_pass(self):
+        screen = ci_batch.oss_replay
+        # Real diff from abel-ai-lab/andrey#1145: unchanged Markdown context lines say "trust" and "shell",
+        # and prose says "first fit of a session" / "before you trust it on your own data".
+        andrey_files = [
+            dict(filename="docs/docs/guides/index.md", additions=1, deletions=1,
+                 patch="@@ -14,5 +14,5 @@\n - [Getting started](getting-started.md): learn a graph and check how far to trust it.\n-- [Missing values](missing-values.md): guide.\n+- [Handling missing values](missing-values.md): guide."),
+            dict(filename="docs/docs/index.md", additions=1, deletions=1,
+                 patch="@@ -71,4 +71,4 @@\n - [CLI reference](api.md): run methods from the shell.\n-- [Missing values](guides/missing-values.md)\n+- [Handling missing values](guides/missing-values.md)"),
+            dict(filename="docs/docs/guides/missing-values.md", additions=2, deletions=0,
+                 patch="@@ -0,0 +1,2 @@\n+The first fit of a session that runs test-wise deletion logs a notice.\n+Check before you trust it on your own data."),
+        ]
+        self.assertIsNone(screen.files_reason(andrey_files))
+        # Real diff from 34j/vr180-convert#101: Markdown fenced code block ```shell
+        shell_fence = [dict(filename="CONTRIBUTING.md", additions=3, deletions=0,
+                            patch="@@ -1,0 +1,3 @@\n+```shell\n+$ uv run pytest\n+```")]
+        self.assertIsNone(screen.files_reason(shell_fence))
+        # Real diff from abel-ai-lab/andrey#1181: Sphinx :nosignatures: directive
+        nosig = [dict(filename="docs/docs/api.md", additions=1, deletions=0,
+                      patch="@@ -1,2 +1,3 @@\n .. autosummary::\n     :nosignatures:\n+    skewd")]
+        self.assertIsNone(screen.files_reason(nosig))
+        # A genuine security edit in Markdown (+ line) or context in a Python code file must still be blocked.
+        self.assertEqual(screen.files_reason([
+            dict(filename="docs/guide.md", additions=1, deletions=0,
+                 patch="@@ -1,1 +1,2 @@\n intro\n+Fixes CVE-2026-12345 authentication bypass.")
+        ]), "security-related change")
+        self.assertIsNone(screen.files_reason([
+            dict(filename="pkg/app.py", additions=1, deletions=1,
+                 patch="@@ -10,3 +10,3 @@ def verify_password(raw):\n     # check password\n-    return raw == expected\n+    return raw.strip() == expected")
+        ]))
+
+    def test_security_related_evidence_strips_github_actions_boilerplate_and_keeps_real_signals(self):
+        screen = ci_batch.oss_replay
+        # Real CI failure payload shape from abel-ai-lab/andrey#1145 (run 44788741888):
+        # html.unescape( + GitHub Actions Post job cleanup SSH/credentials lines.
+        andrey_log = "\n".join([
+            "build\tUNKNOWN STEP\t2026-11-20T18:06:31.1000000Z           title = html.unescape(re.search(r'<title>(.*?)</title>', text)[1])",
+            "build\tUNKNOWN STEP\t2026-11-20T18:06:31.8548583Z FAILED docs/test_built_site.py::test_no_two_indexable_pages_share_a_title - AssertionError: assert not {'Missing values': ['a.html', 'b.html']}",
+            "build\tUNKNOWN STEP\t2026-11-20T18:06:32.1472008Z Post job cleanup.",
+            "build\tUNKNOWN STEP\t2026-11-20T18:06:32.2305898Z Removing SSH command configuration",
+            "build\tUNKNOWN STEP\t2026-11-20T18:06:32.2310602Z [command]/usr/bin/git config --local --name-only --get-regexp core\\.sshCommand",
+            "build\tUNKNOWN STEP\t2026-11-20T18:06:32.2786325Z Removing includeIf entries pointing to credentials config files",
+            "build\tUNKNOWN STEP\t2026-11-20T18:06:32.2846001Z /runner/work/_temp/git-credentials-e1c90998-2082-4332-bc90-bed3fbd19c72.config",
+            "build\tUNKNOWN STEP\t2026-11-20T18:06:32.2846002Z /github/runner_temp/git-credentials-e1c90998-2082-4332-bc90-bed3fbd19c72.config",
+            "build\tUNKNOWN STEP\t2026-11-20T18:06:32.2854876Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git.path \\/github\\/runner_temp\\/git\\-credentials\\-e1c90998\\-2082\\-4332\\-bc90\\-bed3fbd19c72\\.config",
+            "build\tUNKNOWN STEP\t2026-11-20T18:06:32.5775925Z Removing credentials config '/runner/work/_temp/git-credentials-e1c90998-2082-4332-bc90-bed3fbd19c72.config'",
+        ])
+        andrey_payload = json.dumps(dict(type="ci", workflow="docs", job="build", log_tail=andrey_log))
+        self.assertIsNone(screen.evidence_reason(andrey_payload))
+        self.assertIsNone(screen.pull_reason(dict(title="fix rendering of unescaped user input", body="", labels=[])))
+        self.assertEqual(screen.evidence_reason("fix rendering of unescaped user input"), "unclassified regression")
+        self.assertIsNone(screen.evidence_reason("fix rendering of unescaped user input", tested=True))
+        self.assertEqual(screen.evidence_reason("fix XSS from unescaped user input", tested=True), "security-related evidence")
+        self.assertIsNone(screen.evidence_reason(andrey_payload.replace("html.unescape(", "unescape(")))
+
+        # Real CI failure payload from alrayyes/forge-dashboard-sdk-python#595 (run 45252818706):
+        # GitHub Actions step shell header + uv.lock lockfile message + Post job cleanup.
+        uv_log = "\n".join([
+            "build\tUNKNOWN STEP\t2026-11-23T19:49:27.7897052Z shell: /usr/bin/bash -e {0}",
+            "build\tUNKNOWN STEP\t2026-11-23T19:49:28.3670401Z error: The lockfile at `uv.lock` needs to be updated, but `--locked` was provided.",
+            "build\tUNKNOWN STEP\t2026-11-23T19:49:28.4638116Z Removing SSH command configuration",
+            "build\tUNKNOWN STEP\t2026-11-23T19:49:28.5189668Z Removing includeIf entries pointing to credentials config files",
+        ])
+        uv_payload = json.dumps(dict(type="ci", workflow="ci", job="build", failed_step_command="uv sync --locked --all-groups", log_tail=uv_log))
+        self.assertIsNone(screen.evidence_reason(uv_payload))
+
+        # Security output printed after Post job cleanup must NEVER be hidden by boilerplate stripping.
+        smuggled = json.dumps(dict(type="ci", workflow="ci", job="build", log_tail="\n".join([
+            "build\tUNKNOWN STEP\t2026-11-23T19:49:28.1000000Z Post job cleanup.",
+            "build\tUNKNOWN STEP\t2026-11-23T19:49:28.2000000Z FAILED test_auth - CVE-2026-9999 credential leak",
+        ])))
+        self.assertEqual(screen.evidence_reason(smuggled), "security-related evidence")
+
+    def test_true_unsafe_oss_pairs_stay_excluded(self):
+        screen = ci_batch.oss_replay
+        # 0xstoic-bit/synapse_shield#1: real security hardening PR
+        self.assertEqual(screen.pull_reason(dict(
+            title="fix: security hardening, bot detection", body="### Security: tokens, signatures, nonces\n- SECRET_KEY", labels=[])),
+            "security-related PR")
+        # aaronjmars/web3-research-mcp#76: real SSRF / prompt-injection fix
+        self.assertEqual(screen.pull_reason(dict(
+            title="fix: block SSRF in fetch-content (private hosts, schemes, redirects)",
+            body="So a prompt-injected call could not reach local hosts.", labels=[])),
+            "security-related PR")
+        # 34j/aoiro#176: real GHSA security advisory bump
+        self.assertEqual(screen.pull_reason(dict(
+            title="chore(deps): update pypa/gh-action-pypi-publish",
+            body="Includes fixes for GHSA-5xjx-3w67-w9x9.", labels=[])),
+            "security-related PR")
+        # acedatacloud/langflowacedatacloud#14: workflow file path
+        self.assertEqual(screen.files_reason([dict(
+            filename=".github/workflows/ci.yml", additions=1, deletions=0, patch="@@ -1,1 +1,2 @@\n name: ci\n+on: push")]),
+            "security-sensitive path")
+        # Session path remains risky even after narrowing prose session matching
+        self.assertEqual(screen.files_reason([dict(
+            filename="src/app/sessions/store.py", additions=1, deletions=0, patch="@@ -1,0 +1,1 @@\n+x = 1")]),
+            "security-sensitive path")
+        self.assertEqual(screen.files_reason([dict(
+            filename="certs/server.pem", additions=1, deletions=0, patch="@@ -0,0 +1,1 @@\n+MIIB")]),
+            "security-sensitive path")
+        key = "-----BEGIN RSA " + "PRIVATE KEY-----"
+        self.assertEqual(screen.files_reason([dict(
+            filename="pkg/fixtures.py", additions=1, deletions=0, patch=f"@@ -0,0 +1,1 @@\n+KEY = '{key}'")]),
+            "security-related change")
+        for token in ("ghp_" + "a1B2" * 9, "github_pat_" + "A1b2" * 6, "AKIA" + "ABCD1234" * 2,
+                      "xoxb-" + "1234-5678-abcdefgh", "sk-proj-" + "Ab1" * 8, "glpat-" + "Ab1" * 7):
+            with self.subTest(token=token[:4]):
+                self.assertEqual(screen.evidence_reason(f"tests failed: client = Client('{token}')", tested=True),
+                                 "security-related evidence")
+        for assignment in ("db_password = '" + "hunter" + "2x'", "SECRET_KEY: " + "s3cr3t" + "value", "--password " + "pa55" + "word"):
+            with self.subTest(assignment=assignment[:6]):
+                self.assertEqual(screen.evidence_reason(f"AssertionError with {assignment}", tested=True),
+                                 "security-related evidence")
+        for key in ("password", "secret", "credential"):
+            with self.subTest(serialized=key):
+                log_tail = json.dumps({key: "hunter" + "2x"})
+                self.assertEqual(screen.evidence_reason(json.dumps(dict(type="vm02-job", log_tail=log_tail)), tested=True),
+                                 "security-related evidence")
+        for log_tail in ('password = "\\" ' + 'hunter2x"', json.dumps({"password": '" ' + "hunter2x"})):
+            for text in (log_tail, json.dumps(dict(type="vm02-job", log_tail=log_tail))):
+                with self.subTest(escaped=text):
+                    self.assertEqual(screen.evidence_reason(text, tested=True), "security-related evidence")
+        for benign in ("token = None in the cache test", "api_key: missing from the fixture", "the password field is empty"):
+            with self.subTest(benign=benign[:6]):
+                self.assertIsNone(screen.evidence_reason(benign, tested=True))
+        for advisory in ("Fixes CVE-2026-1234", "See GHSA-5xjx-3w67-w9x9", "Security advisory for the parser"):
+            with self.subTest(advisory=advisory):
+                self.assertEqual(screen.pull_reason(dict(title=advisory, body="", labels=[])), "security-related PR")
+
+    def test_everyday_engineering_words_no_longer_exclude_ordinary_prs(self):
+        screen = ci_batch.oss_replay
+        titles = ["Refresh the token cache when the tokenizer changes", "Fix shell completion for zsh",
+                  "exec the child process with the right env", "Retry network errors in the downloader",
+                  "Fix race in the worker pool shutdown", "Sort dict keys before hashing", "Add auth header to the client",
+                  "Close the HTTP session on exit", "Returns expired web sessions to sign-in.",
+                  "A symlink inside the old tree is never written through.", "Escape markdown in table cells",
+                  "Plug a memory leak in the cache", "Validate the password field length"]
+        for title in titles:
+            with self.subTest(title=title):
+                self.assertIsNone(screen.pull_reason(dict(title=title, body="", labels=[])))
+                self.assertIsNone(screen.evidence_reason(title, tested=True))
+        self.assertIsNone(screen.files_reason([dict(
+            filename="custom_components/danfoss_ally_cloud/config_flow.py", additions=2, deletions=0,
+            patch="@@ -1,0 +1,2 @@\n+async def async_step_reauth(self):\n+    return self.ask_password()")]))
+        self.assertEqual(screen.evidence_reason("Handle a token refresh"), "unclassified regression")
+
+    def test_a_merged_fix_with_a_new_test_imports_its_review_finding_without_an_ordinary_keyword(self):
+        finding = dict(comment(10, "a"), body="This retries forever when the network call never returns")
+        github = OpenSourceGitHub({"o/a": [pull(1, "f")]}, {1: [finding]}, {"a" * 40 + "..." + "f" * 40: fixed([CODE, TEST])})
+        pairs = self.feature("review_findings")(dict(seen={}, pages={}, batches=[]), ["o/a"], 10, github)[0]
+        self.assertEqual([pair["finding_url"] for pair in pairs], [finding["html_url"]])
+        untested = OpenSourceGitHub({"o/a": [pull(1, "f")]}, {1: [finding]}, {"a" * 40 + "..." + "f" * 40: fixed([CODE])})
+        skipped = Counter()
+        self.assertEqual(self.feature("review_findings")(dict(seen={}, pages={}, batches=[]), ["o/a"], 10, untested, skipped)[0], [])
+        self.assertEqual(skipped, Counter({"unclassified regression": 1}))
 
 
 if __name__ == "__main__":

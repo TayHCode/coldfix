@@ -44,11 +44,15 @@ class TranscriptMistakesTest(unittest.TestCase):
 
     def scan_native(self, path, text):
         path.parent.mkdir(parents=True)
-        path.write_text('\n'.join(json.dumps(line) for line in text) + '\n{"truncated":\n')
+        data = ('\n'.join(json.dumps(line) for line in text) + '\n{"truncated":\n').encode()
+        if path.suffix == '.zst':
+            data = subprocess.run(['zstd', '-q', '-c'], input=data, stdout=subprocess.PIPE, check=True).stdout
+        path.write_bytes(data)
         self.assertEqual(tm.transcripts([self.root]), [path])
         with patch.object(tm, 'score', return_value=.9):
             result = tm.scan(tm.transcripts([self.root]), self.ledger, self.store, 'http://example.invalid', 'jev', None, 10, 10, .6)
         self.assertEqual((result['scanned'], result['jev_flagged'], result['imported'], result['errors']), (1, 1, 1, 0))
+        self.assertEqual(result['archives_scanned'], int(path.suffix == '.zst'))
         [record] = [json.loads(p.read_text()) for p in (self.store / 'failures').glob('*.json')]
         return record
 
@@ -95,6 +99,34 @@ class TranscriptMistakesTest(unittest.TestCase):
         self.assertIn('user [L5]: The build failed.', evidence)
         for hidden in ('developer error rules', 'call error', 'duplicate error', 'Bad timestamp error'):
             self.assertNotIn(hidden, evidence)
+
+    def test_compressed_codex_rollout_is_ingested(self):
+        self.path.unlink()
+        archive = self.root / 'example-host/codex-sessions/2026/01/01/rollout-example.jsonl.zst'
+        record = self.scan_native(archive, [
+            {'timestamp': '2026-01-01T00:00:00Z', 'type': 'response_item', 'payload': {
+                'type': 'message', 'role': 'user', 'content': [{'type': 'input_text', 'text': 'The build failed.'}]}},
+            {'timestamp': '2026-01-01T00:00:01Z', 'type': 'response_item', 'payload': {
+                'type': 'message', 'role': 'assistant', 'content': [{'type': 'output_text', 'text': 'Fixed the build.'}]}},
+        ])
+        self.assertEqual(record['agent'], 'codex')
+        self.assertTrue(record['source_ref'].endswith('rollout-example.jsonl.zst#messages=L1,L2'))
+        self.assertIn('assistant [L2]: Fixed the build.', record['error'])
+        plain = archive.with_suffix('')
+        plain.touch()
+        self.assertEqual(tm.transcripts([self.root]), [plain])
+
+    def test_corrupt_codex_archives_do_not_consume_the_scan_limit(self):
+        directory = self.root / '2000'
+        directory.mkdir()
+        for name in ('first', 'second'):
+            (directory / f'rollout-{name}.jsonl.zst').write_bytes(b'invalid archive')
+        with patch.object(tm, 'score', return_value=.1):
+            counts = tm.scan(tm.transcripts([self.root]), self.ledger, self.store,
+                             'http://example.invalid', 'jev', None, 1, 1, .6)
+        self.assertEqual((counts['scanned'], counts['errors'], counts['jev_calls']), (1, 2, 1))
+        with closing(sqlite3.connect(self.ledger)) as db:
+            self.assertEqual(db.execute('SELECT path, status FROM scans').fetchall(), [(str(self.path), 'scored')])
 
     def test_chatgpt_conversations_are_backlog_and_index_pages_are_not(self):
         chat = self.root / '2024-01-01_chatgpt-example.md'
@@ -259,6 +291,31 @@ class TranscriptMistakesTest(unittest.TestCase):
         self.assertNotIn(value, state)
         self.assertIn('[redacted]', state)
 
+    def test_excerpt_shows_the_judge_a_mistake_word_past_the_first_1200_characters(self):
+        for word in ('That was wrong', 'I guessed the path', 'You did this again'):
+            with self.subTest(word=word):
+                text = 'Plain progress note. ' * 100 + word + '. ' + 'More plain notes. ' * 100
+                shown = tm.excerpt(tm.messages(conversation(text)))[-1]['text']
+                self.assertIn(word, shown)
+                self.assertEqual(len(shown), 1200)
+
+    def test_message_window_stays_inside_the_text_and_keeps_the_start_without_a_hit(self):
+        filler = 'Plain progress note. ' * 200
+        self.assertTrue(tm.around_first_hit('That was wrong. ' + filler).startswith('That was wrong.'))
+        self.assertTrue(tm.around_first_hit(filler + 'That was wrong.').endswith('That was wrong.'))
+        self.assertEqual(tm.around_first_hit(filler), filler[:1200])
+        self.assertEqual(tm.around_first_hit('Short. That was wrong.'), 'Short. That was wrong.')
+
+    def test_focused_extraction_window_keeps_a_mistake_word_past_the_first_1200_characters(self):
+        text = 'Plain progress note. ' * 100 + 'That was wrong. ' + 'More plain notes. ' * 100
+        self.path.write_text(''.join(f'## assistant · 2026-01-01 00:00:{i:02d}Z · m{i}\n{text}\n' for i in range(30)))
+        raw = self.path.read_bytes()
+        rows = tm.excerpt(tm.read_messages(self.path, raw))
+        self.assertGreater(sum(len(row['text']) for row in rows), tm.CASE_CHARS)
+        window = tm.extraction_window(self.path, raw, rows)
+        self.assertTrue(window)
+        self.assertTrue(all('That was wrong' in row['text'] for row in window))
+
     def test_excerpt_withholds_a_whole_private_key_block(self):
         body = 'b3BlbnNzaC1rZXktdjEAAAAABG5vbmU' + 'Q' * 40
         label = 'OPENSSH ' + 'PRIVATE KEY-----'
@@ -292,6 +349,25 @@ class TranscriptMistakesTest(unittest.TestCase):
                 state = json.dumps(tm.excerpt(rows))
                 self.assertIn('[redacted]', state)
                 self.assertNotIn(body, state)
+
+    def test_focused_claude_tool_context_keeps_paths_and_redacts_command_credentials(self):
+        secret = "ghp_" + "x" * 36
+        key_path = self.root / ".ssh" / "id_rsa"
+        lines = [dict(type="assistant", uuid=f"a-{i}", timestamp="2026-01-01T00:00:00Z",
+                      message=dict(role="assistant", content=[
+                          dict(type="text", text=("Fix the build. " * 80)),
+                          dict(type="tool_use", name="Read", input=dict(file_path="src/parser.py")),
+                          dict(type="tool_use", name="Bash", input=dict(command=f"mysql -p{secret} -pOpaqueExample {key_path}")),
+                          dict(type="tool_result", content=secret + " output")])) for i in range(40)]
+        raw = "\n".join(map(json.dumps, lines)).encode()
+        path = self.root / "session.jsonl"
+        window = tm.extraction_window(path, raw, tm.excerpt(tm.read_messages(path, raw)))
+        self.assertIn("Read parser.py", window[-1]["agent_tool_calls"])
+        self.assertIn("Bash mysql", window[-1]["agent_tool_calls"])
+        self.assertNotIn("OpaqueExample", json.dumps(window))
+        self.assertNotIn(str(key_path.parent), json.dumps(window))
+        self.assertNotIn(secret, json.dumps(window))
+        self.assertNotIn("output", json.dumps(window))
 
     def test_repeated_identical_link_is_retained_as_evidence(self):
         url = 'https://github.com/a/one/pull/1'

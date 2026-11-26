@@ -1457,6 +1457,27 @@ class ReleaseQuickstartTests(unittest.TestCase):
                 self.assertNotEqual(path in exported, excluded(path),
                                     path + " must be in exactly one of public-export.txt and release-check.json exclude")
 
+    def test_each_export_path_review_matches_the_file_it_reviewed(self):
+        root = CLI.parent
+        reviews = [item for item in json.loads((root / "release-check.json").read_text())["approvals"]
+                   if item.get("kind") == "export-path-review"]
+        self.assertIn("public-export.txt", {item["path"] for item in reviews})
+        for item in reviews:
+            with self.subTest(path=item["path"]):
+                self.assertEqual(hashlib.sha256((root / item["path"]).read_bytes()).hexdigest(), item["source_sha256"],
+                                 "Coldrelease leaves a reviewed path out of the export when its file changes; "
+                                 "review the change and set source_sha256 to the file's current SHA-256")
+
+    def test_each_digest_bound_approval_matches_the_file_it_reviewed(self):
+        root = CLI.parent
+        approvals = [item for item in json.loads((root / "release-check.json").read_text())["approvals"]
+                     if "source_sha256" in item]
+        for item in approvals:
+            with self.subTest(scope=item["scope"], kind=item["kind"], path=item["path"], line=item.get("line")):
+                self.assertEqual(hashlib.sha256((root / item["path"]).read_bytes()).hexdigest(), item["source_sha256"],
+                                 "the release export screen stops honouring an approval once its file changes; "
+                                 "review the finding again and set source_sha256 to the file's current SHA-256")
+
     def test_the_package_installs_every_exported_top_level_module(self):
         root = CLI.parent
         exported = {Path(path).stem for path in (root / "public-export.txt").read_text().split()

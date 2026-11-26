@@ -70,9 +70,65 @@ def git(*args):
     return done(run(["git", *map(str, args)]), "git")
 
 
+DEPTH_PROOFS = "delivery-depth-proofs"
+DEPTH_ROWS = "check-depth-deliveries.json"
+REJECTED_TEST = "repository checks failed on the lesson test"
+
+
+def read_rows(path):
+    return json.loads(c.read_text(path), object_pairs_hook=c.unique_object) if path.exists() else {}
+
+
+def effective_rows(original, corrections):
+    return {**original, **{key: row for key, row in corrections.items()
+                           if key in original and row.get("reproof_of") == original[key].get("rejected_revision")
+                           and row.get("reproof_of")}}
+
+
 def records(root):
-    path = root / RECORDS
-    return json.loads(c.read_text(path)) if path.exists() else {}
+    return effective_rows(read_rows(root / RECORDS), read_rows(root / DEPTH_ROWS))
+
+
+def depth_patch(lesson):
+    payload = lesson["payload"]
+    path = payload["path"]
+    c.require(re.fullmatch(r"test_coldfix_proof_[0-9a-f]{12}\.py", path), "not a historic root proof")
+    source = generated_source(payload)
+    c.require(source is not None, "invalid generated proof")
+    expressions = {ast.get_source_segment(source, node) for node in ast.walk(ast.parse(source))
+                   if isinstance(node, ast.Attribute) and node.attr == "parent"}
+    matches = expressions.intersection(("Path(__file__).resolve().parent", "pathlib.Path(__file__).resolve().parent"))
+    c.require(len(matches) == 1, "no unambiguous root lookup")
+    expression = matches.pop()
+    c.require(source.count(expression) == 1, "ambiguous root lookup")
+    path = learn_replay.GENERATED_TEST_DIR + "/" + path
+    return path, learn_replay.new_file_patch(path, source.replace(expression, expression.removesuffix(".parent") + ".parents[1]"))
+
+
+def corrected_lesson(root, lesson, rejected):
+    proof_dir = root / DEPTH_PROOFS / lesson["id"]
+    if not (proof_dir / "accepted.json").is_file():
+        return lesson
+    c.require(rejected.get("reason") == REJECTED_TEST and rejected.get("rejected_revision") == lesson["id"],
+              "historic rejection no longer matches the proof")
+    accepted = read_rows(proof_dir / "accepted.json")
+    store = c.load_store(proof_dir)[1]
+    check = store["lessons"][accepted["id"]]
+    receipt = store["receipts"][check["receipt"]]
+    payload = regression_adapter.payload(check["check_script"])
+    path, patch = depth_patch(lesson)
+    c.require(check["verification"] == "proven" and check["status"] == "active"
+              and accepted["full_suite"]["status"] == "PASS" and accepted["receipt_id"] == receipt["id"]
+              and accepted["original_receipt"] == lesson["receipt_id"]
+              and accepted["original"] == lesson["lesson_id"] and accepted["repo"].casefold() == lesson["repo"].casefold()
+              and all(receipt[name]["status"] == status for name, status in
+                      (("before", "FAIL"), ("after", "PASS"), ("reversed", "FAIL")))
+              and all(receipt[name]["commit"] == lesson[name] for name in ("before", "after"))
+              and payload["path"] == path and payload["patch"] == patch
+              and payload["diagnostic"] == lesson["payload"]["diagnostic"], "incorrect delivery depth proof")
+    return dict(lesson, id=check["id"], payload=payload, reproof_of=lesson["id"])
+
+
 
 
 DELIVERED_FIELDS = ("title", "rule", "failure", "fix", "check_script", "check_command")
@@ -106,9 +162,11 @@ def transcript_candidates(root, store, moved):
 
 
 def proven(root, store, ledger):
+    import transcript_delivery
     moved = replay_repos.load(root)
     latest = c.latest_lessons(store)
     invalidations = c.read_invalidations(root)
+    vetoed = transcript_delivery.proven_vetoes(transcript_delivery.load(root / transcript_delivery.DELIVERIES, {}))
     found, failed = {}, set()
     candidates = []
     for entry in ledger["drafts"].values():
@@ -119,7 +177,7 @@ def proven(root, store, ledger):
     for lesson, entry, transcript_repo in candidates:
         state = entry.get("replay", {})
         current = latest[lesson["lesson_id"]]
-        if (current["status"] in c.ENDED or current["verification"] != "proven"
+        if (current["lesson_id"] in vetoed or current["status"] in c.ENDED or current["verification"] != "proven"
                 or invalidations.get(current["lesson_id"]) == current["id"]
                 or any(current[key] != lesson[key] for key in DELIVERED_FIELDS)):
             continue
@@ -140,7 +198,7 @@ def proven(root, store, ledger):
         except ValueError:
             payload = {}
         found[lesson["lesson_id"]] = dict(
-            lesson_id=lesson["lesson_id"], id=lesson["id"], created=lesson["created"], title=lesson["title"],
+            lesson_id=lesson["lesson_id"], id=lesson["id"], receipt_id=lesson["receipt"], created=lesson["created"], title=lesson["title"],
             rule=lesson["rule"], failure=lesson["failure"], fix=lesson["fix"], payload=payload,
             cause=entry.get("draft", {}).get("cause", ""), prevention=entry.get("draft", {}).get("prevention", ""),
             full_suite=suite, drafter=entry.get("drafter", ""),
@@ -236,7 +294,8 @@ def moved(root, slug, branch, proving, clones):
 
 def generated_source(payload):
     path, patch = payload["path"], payload.get("patch", "")
-    if "/" in path or not path.startswith("test_coldfix_proof_"):
+    name = path.removeprefix(learn_replay.GENERATED_TEST_DIR + "/")
+    if "/" in name or not name.startswith("test_coldfix_proof_"):
         return None
     added = [line[1:] for line in patch.partition("\n@@")[2].split("\n")[1:] if line.startswith("+")]
     source = "\n".join(added) + "\n"
@@ -251,7 +310,7 @@ def verdict(rollup):
 
 
 def lesson_path(key):
-    return "tests/test_coldfix_lesson_" + key[:12] + ".py"
+    return learn_replay.GENERATED_TEST_DIR + "/test_coldfix_lesson_" + key[:12] + ".py"
 
 
 def pull_request_body(lessons):
@@ -321,7 +380,9 @@ def push_tests(clone, slug, head, paths, title, expected):
 
 def lesson_branch(lesson):
     key = lesson["lesson_id"]
-    if lesson.get("retry_closed"):
+    if lesson.get("reproof_of"):
+        key = lesson["id"]
+    elif lesson.get("retry_closed"):
         key = hashlib.sha256(("batch:" + key).encode()).hexdigest()
     return "coldfix/lesson-" + key[:12]
 
@@ -449,6 +510,13 @@ def settle(root, members, lessons, write, now, pr=None, failed=None):
         for key, row in members.items():
             if key in lessons:
                 proving = PROVING_TEST.fullmatch(lessons[key]["payload"]["diagnostic"])
+                if lessons[key].get("reproof_of"):
+                    required = required_rollup(slug, info, pr["statusCheckRollup"])
+                    source = generated_source(lessons[key]["payload"])
+                    if (row["revision"] != lessons[key]["id"] or pr["headRefOid"] != row["head"]
+                            or not required or verdict(required) != "green"
+                            or file_at(slug, row["path"], pr["mergeCommit"]["oid"]) != source):
+                        continue
                 if on_default_branch(slug, info["defaultBranchRef"]["name"], row["path"], proving):
                     members[key] = dict(row, state="delivered", commit=pr["mergeCommit"]["oid"])
             else:
@@ -522,12 +590,13 @@ def attempt(root, lesson, write, repositories, clones, previous):
     branch = (info["defaultBranchRef"] or {}).get("name")
     if not branch:
         return waiting("repository has no default branch")
-    commit = on_default_branch(slug, branch, payload["path"], test)
-    if commit:
-        return dict(state="delivered", route="existing-test", commit=commit, path=payload["path"])
-    commit, path = moved(root, slug, branch, test, clones)
-    if commit:
-        return dict(state="delivered", route="existing-test", commit=commit, path=path)
+    if not lesson.get("reproof_of"):
+        commit = on_default_branch(slug, branch, payload["path"], test)
+        if commit:
+            return dict(state="delivered", route="existing-test", commit=commit, path=payload["path"])
+        commit, path = moved(root, slug, branch, test, clones)
+        if commit:
+            return dict(state="delivered", route="existing-test", commit=commit, path=path)
     source = generated_source(payload)
     if info["isArchived"]:
         return dict(state="retired", reason="repository is archived")
@@ -578,6 +647,9 @@ def untracked(row):
 def track(lesson, row, now, issues, repositories):
     if tracked(row):
         number, repo = str(row["issue"]), row["issue_repo"]
+        if repo.casefold() == "tayhcode/coldfix-private" and issues.casefold() == "coldstack-dev/coldfix-private":
+            repo = issues
+            row = dict(row, issue_repo=repo)
         if lesson is None or row["state"] in SETTLED:
             done(gh("issue", "close", number, "--repo", repo, "--comment", "The lesson is " +
                     (row["state"] if lesson else "no longer proven") + ", so Coldfix is closing this."), "gh issue close")
@@ -611,10 +683,48 @@ def origins(lessons, rows, since=None):
 def deliver(root, lessons, now, write=False, only=None, issues=None):
     lessons = [lesson for lesson in lessons if not lesson.get("from_transcript")]
     path = root / RECORDS
-    rows = records(root)
+    original = read_rows(path)
+    corrections = read_rows(root / DEPTH_ROWS)
+    rows = effective_rows(original, corrections)
+    corrected = set(corrections)
+    held_repos = set()
     today = now.date().isoformat()
     repositories, clones, errors = {}, {}, 0
-    by_id = {lesson["lesson_id"]: lesson for lesson in lessons}
+    recoverable = (Unavailable, c.ColdfixError, OSError, ValueError, KeyError, TypeError)
+
+    def report(key, error):
+        nonlocal errors
+        errors += 1
+        print("check_delivery " + key + ": " + str(error), file=sys.stderr)
+
+    by_id = {}
+    for lesson in lessons:
+        key = lesson["lesson_id"]
+        if key in original:
+            rows[key] = original[key]
+        try:
+            lesson = corrected_lesson(root, lesson, original.get(key, {}))
+            if lesson.get("reproof_of"):
+                corrected.add(key)
+            if key in corrections:
+                prior = corrections[key]
+                c.require(key in original and prior.get("reproof_of") == original[key].get("rejected_revision")
+                          and prior.get("reproof_of"), "depth delivery has no matching original rejection")
+                if prior["revision"] == lesson["id"] or prior["state"] == "open":
+                    c.require(lesson.get("reproof_of") or prior["state"] == "open", "depth proof unavailable")
+                    rows[key] = prior
+        except recoverable as error:
+            report(key, error)
+            held_repos.add(lesson["repo"].casefold())
+        by_id[key] = lesson
+
+    def persist(keys):
+        for destination, stored, depth in ((path, original, False), (root / DEPTH_ROWS, corrections, True)):
+            changes = {key: rows[key] for key in keys if (key in corrected) == depth and stored.get(key) != rows[key]}
+            if changes:
+                stored.update(changes)
+                c.atomic_create(destination, c.encoded(stored), replace=True)
+
     candidates = defaultdict(dict)
     sources_by_repo = defaultdict(dict)
 
@@ -629,27 +739,24 @@ def deliver(root, lessons, now, write=False, only=None, issues=None):
             revision, repo = (lesson["id"], lesson["repo"]) if lesson else (old["revision"], old["repo"])
             new = dict(row, revision=revision, repo=repo,
                        **{name: old[name] for name in ("issue", "issue_repo", "issue_closed") if name in old})
+            if key in corrected:
+                new["reproof_of"] = original[key]["rejected_revision"]
             if new["state"] == "delivered":
                 new["at"] = now.isoformat()
             if new["state"] == "waiting":
                 new["day"] = today
             rows[key] = new
-        c.atomic_create(path, c.encoded(rows), replace=True)
+        persist(changes)
 
-    def report(key, error):
-        nonlocal errors
-        errors += 1
-        print("check_delivery " + key + ": " + str(error), file=sys.stderr)
-
-    recoverable = (Unavailable, c.ColdfixError, OSError, ValueError, KeyError, TypeError)
     for key, lesson in by_id.items():
         old = rows.get(key, {})
         state = old.get("state")
-        if state == "open" or only not in (None, key) or state in SETTLED:
+        if lesson["repo"].casefold() in held_repos or state == "open" or only not in (None, key) or state in SETTLED:
             continue
         if state == "waiting":
             resumed = old["reason"] == "bot pull requests are not enabled"
-            replaced = old["reason"] == "lesson replay proof changed"
+            replaced = (old["reason"] == "lesson replay proof changed" or
+                        lesson.get("reproof_of") is not None and old.get("revision") == lesson["reproof_of"])
             if old["day"] == today and not only and not (write and (resumed or replaced)):
                 continue
         try:
@@ -710,7 +817,7 @@ def deliver(root, lessons, now, write=False, only=None, issues=None):
             report(slug, error)
 
     for ref, members in opened.items():
-        if ref in updated or (only is not None and only not in members and ref not in checked):
+        if ref[0] in held_repos or ref in updated or (only is not None and only not in members and ref not in checked):
             continue
         try:
             save(settle(root, members, by_id, write, now, *checked.get(ref, ())))
@@ -720,13 +827,13 @@ def deliver(root, lessons, now, write=False, only=None, issues=None):
     if issues:
         for key, lesson in by_id.items():
             row = rows.get(key)
-            if not row or only not in (None, key):
+            if not row or lesson["repo"].casefold() in held_repos or only not in (None, key):
                 continue
             try:
                 tracked_row = track(lesson, row, now, issues, repositories)
                 if tracked_row != row:
                     rows[key] = tracked_row
-                    c.atomic_create(path, c.encoded(rows), replace=True)
+                    persist([key])
             except recoverable as error:
                 report(key, error)
     live = {lesson["lesson_id"] for lesson in lessons}
@@ -738,7 +845,7 @@ def deliver(root, lessons, now, write=False, only=None, issues=None):
                 errors += 1
                 print("check_delivery " + key + ": " + str(error), file=sys.stderr)
                 continue
-            c.atomic_create(path, c.encoded(rows), replace=True)
+            persist([key])
     current = [rows.get(lesson["lesson_id"], {}) for lesson in lessons]
     states = Counter(row.get("state", "waiting") for row in current)
     return dict(proven=len(lessons), delivered=states["delivered"], open=states["open"], waiting=states["waiting"],

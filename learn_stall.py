@@ -177,7 +177,8 @@ def stalls(journal, now):
             ("proven", ("daily",), 24, lambda kind, row: row.get("replay", {}).get("proven", 0),
              "0 lessons proven in 24 h"),
             ("transcripts", ("transcripts",), 6, lambda kind, row: row["scanned"], "0 transcripts scanned in 6 h"),
-            ("transcript_proven", ("transcripts",), 24, lambda kind, row: row.get("proven", 0),
+            ("transcript_proven", ("daily", "transcripts"), 24,
+             lambda kind, row: (row.get("transcript_replay", {}) if kind == "daily" else row).get("proven", 0),
              "0 transcript lessons proven in 24 h")):
         if pulls_skipped and key in ("transcripts", "transcript_proven"):
             continue

@@ -17,6 +17,7 @@ coldfix = "coldfix:main"
 [tool.setuptools]
 py-modules = [
     "agents_block",
+    "builtin_checks",
     "check_delivery",
     "ci_actions_replay",
     "ci_batch",
@@ -38,6 +39,7 @@ py-modules = [
     "coldrecall_epochs_resume",
     "coldrecall_measure",
     "collect_sources",
+    "diff_proof",
     "evidence_join",
     "failure_ingest",
     "flakiness",

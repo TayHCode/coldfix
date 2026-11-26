@@ -2,6 +2,7 @@
 """Capture local failures and export human-authored Coldlocker rules. Stdlib only."""
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from datetime import date, datetime, timezone
 import functools
@@ -870,13 +871,13 @@ def remaining_timeout(timeout, deadline=None):
     return min(timeout, remaining) if timeout is not None else remaining
 
 
-def privacy_git(repo, *args, timeout=None):
+def privacy_git(repo, *args, timeout=None, input=None):
     environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     environment.update(GIT_NO_LAZY_FETCH="1", GIT_TERMINAL_PROMPT="0", GIT_CONFIG_NOSYSTEM="1",
                        GIT_CONFIG_GLOBAL=os.devnull, GIT_OPTIONAL_LOCKS="0")
     try:
         result = subprocess.run(["git", "-C", str(repo), "-c", "core.hooksPath=" + os.devnull,
-                                 *args], capture_output=True, env=environment, timeout=timeout)
+                                 *args], capture_output=True, env=environment, timeout=timeout, input=input)
         require(result.returncode == 0, "local privacy Git operation failed")
         return result.stdout
     except OSError:
@@ -1865,7 +1866,14 @@ def lesson(args, root, store):
         import coldpass_replay
         coldpass_replay.validate_companion(root, store["failures"][record["evidence"][0]], record)
     save(root, "lessons", record)
-    return {key: record[key] for key in ("id", "lesson_id", "status", "verification", "level")}
+    result = {key: record[key] for key in ("id", "lesson_id", "status", "verification", "level")}
+    if record["status"] == "retired":
+        from agents_block import withdraw_copies
+        with lesson_lock(root, name=".transcript-delivery.lock"):
+            pending = withdraw_copies(root, record["lesson_id"])
+        if pending:
+            result["pending_refresh"] = pending
+    return result
 
 
 CHECK_CONTRACT = ('A check prints exactly one JSON object on stdout: {"status":"PASS"} with exit 0, '
@@ -1901,7 +1909,8 @@ def incomplete_cause(stderr, store):
     if not causes or not causes[-1]:
         return ""
     terms = {"captured_credential": captured_credentials(store)}
-    return "cause withheld by the privacy screen" if privacy_counts(causes[-1], terms, filename_exempt=True) else causes[-1][:300]
+    counts = privacy_counts(causes[-1], terms, filename_exempt=True)
+    return f"cause withheld by the privacy screen ({', '.join(counts)})" if counts else causes[-1][:300]
 
 
 def incomplete_reason(rows, expected_failure):
@@ -2037,10 +2046,14 @@ def replay(args, root, store):
                    previous["check_command"].replace("{check}", shlex.quote(str(check))))
         patch, patch_file = b"", scratch / "product.patch"
         if incident:
-            patch = repo_patch(repo, args.before, args.after, [".", *(":(exclude,literal)" + path for path in previous["admission"]["test_paths"])], args.timeout)
             if previous["version"] == 6:
                 import coldpass_replay
                 patch = coldpass_replay.causal_patch(root, previous, repo)
+            else:
+                test_paths = {"tests" if path.startswith("tests/") else path
+                              for path in previous["admission"]["test_paths"]}
+                patch = repo_patch(repo, args.before, args.after,
+                                   [".", *(":(exclude,literal)" + path for path in sorted(test_paths))], args.timeout)
             patch_file.write_bytes(patch)
         runs = [("before", args.before, None), ("after", args.after, None)]
         if incident:
@@ -2064,6 +2077,18 @@ def replay(args, root, store):
                 row["stderr"] = "INCOMPLETE: " + cause + "\n"
             rows[name] = row
         before, after, reverted = rows["before"], rows["after"], rows.get("reversed")
+        if (not payload.get("mode") and re.fullmatch(r"(?:tests/)?test_coldfix_proof_[0-9a-f]{12}\.py", payload.get("path", ""))
+                and replay_state(before, after, reverted)[1] == "proven"):
+            controls = incident_admission.generated_controls(repo, before["commit"], after["commit"], payload["path"], scratch,
+                                                            args.timeout, getattr(args, "deadline", None))
+            for label, revision, control, expected in controls:
+                patch_file.write_bytes(control)
+                require(check_unchanged(check, previous["check_script"]), "authored check changed")
+                result = executor(repo, revision, scratch / ("control-" + expected), command, previous["expected_failure"],
+                                  args.timeout, patch_file, **bound)
+                require(check_unchanged(check, previous["check_script"]), "authored check changed")
+                require(result["status"] == expected,
+                        f"incident not admitted; {label} control {result['status']}; expected {expected}")
     if coldpass_pair is not None:
         coldpass_replay.validate_receipt_revisions(coldpass_pair, rows)
     status, verification = replay_state(before, after, reverted)
@@ -2265,8 +2290,10 @@ def library_candidates(args, stores):
     def proven(root, store, terms):
         flaky = detect(store)[1]
         invalidations = read_invalidations(root)
+        vetoed = transcript_delivery.proven_vetoes(transcript_delivery.load(root / transcript_delivery.DELIVERIES, {}))
         for row in sorted(latest_lessons(store).values(), key=lambda item: item["lesson_id"]):
-            if (row["status"] not in LIVE or row["verification"] != "proven" or flaky.intersection(row["evidence"])
+            if (row["lesson_id"] in vetoed or row["status"] not in LIVE or row["verification"] != "proven"
+                    or flaky.intersection(row["evidence"])
                     or invalidations.get(row["lesson_id"]) == row["id"]):
                 continue
             yield "store", row["title"], row["rule"], row["rule"], terms
@@ -2305,6 +2332,7 @@ def library_proof(text):
 
 CHECK_ORDER = ("FAIL", "INCOMPLETE", "PASS", "NO_PORTABLE_CHECK")
 LIBRARY = Path(__file__).resolve().parent / "library"
+DEFAULT_LIBRARY = LIBRARY
 
 
 def rule_fix(rule):
@@ -2320,32 +2348,138 @@ def library_runner():
     return runner
 
 
-def check_library(tree="."):
+def check_lesson(rerun, lesson, tree):
+    rule = read_text(lesson / "rule.md")
+    title = re.search(r"^title: (.+)$", rule, re.M)
+    result = {"lesson": lesson.name, "title": title[1] if title else lesson.name, "status": "NO_PORTABLE_CHECK", "hits": []}
+    if (lesson / "scan.py").is_file():
+        try:
+            report, reason = rerun.run_check(str(lesson / "scan.py"), str(tree)), None
+        except rerun.Incomplete as error:
+            report, reason = None, error.args[0] if error.args else None
+        hits = report.get("hits") if report else None
+        hits_match = isinstance(hits, list) and all(isinstance(hit, str) for hit in hits) and bool(hits) == (report["status"] == "FAIL")
+        if hits_match:
+            result.update(status=report["status"], hits=hits)
+            if hits:
+                result["fix"] = report["fix"] if isinstance(report.get("fix"), str) and report["fix"] else rule_fix(rule)
+        else:
+            result.update(status="INCOMPLETE", reason=str(reason or "the scan did not report a valid PASS or FAIL"))
+    return result
+
+
+def changed_files(tree, base):
+    require(not base.startswith("-"), "check --diff needs a revision, not an option")
+    git = ["git", "-c", "core.fsmonitor=false"]
+    listed = [subprocess.run(git + command, cwd=tree, capture_output=True, text=True)
+              for command in (["diff", "--name-only", "--relative", "-z", "--no-ext-diff", "--diff-filter=d", base, "--"],
+                              ["ls-files", "-z", "--others", "--exclude-standard"])]
+    require(all(run.returncode == 0 for run in listed), f"check --diff cannot list the files changed since {base}")
+    return {path for run in listed for path in run.stdout.split("\0") if path}
+
+
+def staged_files(tree):
+    git = ["git", "-c", "core.fsmonitor=false"]
+    listed = subprocess.run(git + ["diff", "--cached", "--name-only", "--relative", "-z", "--no-ext-diff", "--diff-filter=d", "--"],
+                            cwd=tree, capture_output=True, text=True)
+    require(listed.returncode == 0, "check --staged cannot list staged files")
+    return {path for path in listed.stdout.split("\0") if path}
+
+
+def copy_staged_files(tree, destination, paths=None):
+    git = ["git", "-c", "core.fsmonitor=false"]
+    prefix_run = subprocess.run(git + ["rev-parse", "--show-prefix"], cwd=tree, capture_output=True, text=True)
+    prefix = prefix_run.stdout.strip() if prefix_run.returncode == 0 else ""
+    index_run = subprocess.run(git + ["ls-files", "-s", "-z"], cwd=tree, capture_output=True, text=True)
+    if index_run.returncode != 0:
+        return
+    regular = set()
+    for entry in index_run.stdout.split("\0"):
+        if not entry or "\t" not in entry:
+            continue
+        meta, rel = entry.split("\t", 1)
+        if meta.split(" ", 1)[0] in ("100644", "100755"):
+            regular.add(rel)
+    selected = regular if paths is None else (regular & set(paths))
+    for rel in sorted(selected):
+        blob = subprocess.run(git + ["show", f":{prefix}{rel}"], cwd=tree, capture_output=True)
+        if blob.returncode == 0:
+            target = destination / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(blob.stdout)
+
+
+def in_changed(hits, changed):
+    return [hit for hit in hits if re.sub(r":\d+(?::.*)?$", "", hit) in changed]
+
+
+CHECK_CONTEXT = re.compile(r"\..+|conftest\.py|.+\.(?:toml|cfg|ini|json|ya?ml)")
+
+
+def check_changed(rerun, lessons, tree, base, pool, *, staged=False, changed=None):
+    changed = staged_files(tree) if staged else (changed if changed is not None else changed_files(tree, base))
+    with tempfile.TemporaryDirectory() as scratch:
+        copied = Path(scratch)
+        subprocess.run(["git", "init", "-q", scratch], check=True, capture_output=True)
+        context_names = {item.name for item in tree.iterdir() if item.name != ".git" and CHECK_CONTEXT.fullmatch(item.name)}
+        if staged:
+            copy_staged_files(tree, copied, changed | context_names)
+        else:
+            for path in changed | context_names:
+                source = tree / path
+                if source.is_file() and not source.is_symlink():
+                    (copied / path).parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(source, copied / path)
+        results = list(pool.map(lambda lesson: check_lesson(rerun, lesson, copied), lessons))
+    confirm = [lesson for lesson, result in zip(lessons, results) if in_changed(result["hits"], changed)]
+    if confirm and staged:
+        with tempfile.TemporaryDirectory() as staged_root:
+            staged_tree = Path(staged_root)
+            subprocess.run(["git", "init", "-q", staged_root], check=True, capture_output=True)
+            copy_staged_files(tree, staged_tree)
+            confirmed = dict(zip(confirm, pool.map(lambda lesson: check_lesson(rerun, lesson, staged_tree), confirm)))
+    else:
+        confirmed = dict(zip(confirm, pool.map(lambda lesson: check_lesson(rerun, lesson, tree), confirm)))
+    for index, (lesson, result) in enumerate(zip(lessons, results)):
+        if lesson in confirmed:
+            result = confirmed[lesson]
+        hits = in_changed(result["hits"], changed)
+        if result["status"] in ("PASS", "FAIL"):
+            result.update(status="FAIL" if hits else "PASS", hits=hits)
+            if not hits:
+                result.pop("fix", None)
+        results[index] = result
+    return results
+
+
+def check_library(tree=".", base=None, *, staged=False, only=None):
     rerun = library_runner()
     try:
         tree = Path(tree).resolve(strict=True)
     except (OSError, RuntimeError):
         tree = None
     require(tree and tree.is_dir(), "check needs a directory to scan")
-    results = []
-    for lesson in sorted(path for path in LIBRARY.iterdir() if (path / "rule.md").is_file()):
-        rule = read_text(lesson / "rule.md")
-        title = re.search(r"^title: (.+)$", rule, re.M)
-        result = {"lesson": lesson.name, "title": title[1] if title else lesson.name, "status": "NO_PORTABLE_CHECK", "hits": []}
-        if (lesson / "scan.py").is_file():
-            try:
-                report, reason = rerun.run_check(str(lesson / "scan.py"), str(tree)), None
-            except rerun.Incomplete as error:
-                report, reason = None, error.args[0] if error.args else None
-            hits = report.get("hits") if report else None
-            hits_match = isinstance(hits, list) and all(isinstance(hit, str) for hit in hits) and bool(hits) == (report["status"] == "FAIL")
-            if hits_match:
-                result.update(status=report["status"], hits=hits)
-                if hits:
-                    result["fix"] = report["fix"] if isinstance(report.get("fix"), str) and report["fix"] else rule_fix(rule)
-            else:
-                result.update(status="INCOMPLETE", reason=str(reason or "the scan did not report a valid PASS or FAIL"))
-        results.append(result)
+    require(not (staged and base is not None), "check accepts --diff or --staged, not both")
+    lessons = sorted(path for path in LIBRARY.iterdir() if (path / "rule.md").is_file())
+    include_builtins = LIBRARY == DEFAULT_LIBRARY
+    only_set = set(only) if only else None
+    builtin_mod = None
+    if include_builtins:
+        import builtin_checks as builtin_mod
+    if only_set is not None:
+        known = {lesson.name for lesson in lessons} | (set(builtin_mod.CHECK_IDS) if builtin_mod else set())
+        unknown = sorted(only_set - known)
+        require(not unknown, "unknown check: " + ", ".join(unknown))
+        lessons = [lesson for lesson in lessons if lesson.name in only_set]
+    diff_mode = staged or base is not None
+    changed = staged_files(tree) if staged else (changed_files(tree, base) if base is not None else None)
+    with ThreadPoolExecutor(len(lessons) or 1) as pool:
+        if not diff_mode:
+            results = list(pool.map(lambda lesson: check_lesson(rerun, lesson, tree), lessons))
+        else:
+            results = check_changed(rerun, lessons, tree, base, pool, staged=staged, changed=changed)
+    if builtin_mod is not None:
+        results.extend(builtin_mod.run_checks(tree, base=base, staged=staged, changed=changed, only=only_set))
     results.sort(key=lambda result: CHECK_ORDER.index(result["status"]))
     statuses = {result["status"] for result in results}
     return {"lessons": results, "_exit": 2 if "INCOMPLETE" in statuses else 1 if "FAIL" in statuses else 0}
@@ -2595,9 +2729,17 @@ def parser():
     result = Parser(description=__doc__, epilog=EXIT_CONTRACT)
     result.add_argument("--store", default=".coldfix", help="private local store (default: .coldfix in the current directory)")
     commands = result.add_subparsers(dest="action", required=True)
-    command = commands.add_parser("check", epilog=EXIT_CONTRACT, help="run the library's static portable checks on a directory and list each hit as file:line with its fix")
+    command = commands.add_parser("check", epilog=EXIT_CONTRACT, help="run the library's static portable checks and built-in checks on a directory and list each hit as file:line with its fix")
     command.add_argument("path", nargs="?", default=".", help="tree to scan (default: the current directory)")
     command.add_argument("--json", action="store_true", help="emit the results as JSON")
+    diff_group = command.add_mutually_exclusive_group()
+    diff_group.add_argument("--diff", nargs="?", const="HEAD", metavar="BASE",
+                            help="report only hits in files changed since BASE (default: HEAD) and untracked files, plus diff checks")
+    diff_group.add_argument("--staged", action="store_true",
+                            help="report only hits in staged files and run diff checks against the staged diff")
+    command.add_argument("--only", action="append", metavar="CHECK",
+                         help="run only the named check(s); repeatable")
+    commands.add_parser("hook", add_help=False, help="agent hook: read the event on stdin and add matching proven facts (see coldfix hook --help)")
     command = commands.add_parser("doctor", epilog=EXIT_CONTRACT, help="check that the replay sandbox (bubblewrap) can run here and print the fix if not")
     command.add_argument("--json", action="store_true", help="emit the diagnostic results as JSON")
     command = commands.add_parser("setup", help="check the automatic loop's prerequisites and run its first pass")
@@ -2752,6 +2894,9 @@ def parser():
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["hook"]:
+        import coldrecall
+        return coldrecall.main(argv)
     try:
         args = parser().parse_args(argv)
     except SystemExit as stop:
@@ -2777,7 +2922,7 @@ def main(argv=None):
             uninstall(repo if args.repo or (repo / ".git").exists() else None, args.store)
             return 0
         elif args.action == "check":
-            value = check_library(args.path)
+            value = check_library(args.path, args.diff, staged=args.staged, only=args.only)
             if args.json and value["_exit"] == 2:
                 print("coldfix: check incomplete; see each INCOMPLETE lesson's reason", file=sys.stderr)
             if not args.json:
