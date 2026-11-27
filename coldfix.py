@@ -26,6 +26,7 @@ import uuid
 from urllib.parse import unquote, urlsplit
 
 
+VERSION = "0.1.0"
 KINDS = ("lint", "test", "hook")
 LEVELS = ("architecture", "types", "lint", "test", "doc")
 STATUSES = ("proposed", "active", "conditional", "enforced", "retired", "superseded", "contradicted")
@@ -2368,10 +2369,20 @@ def check_lesson(rerun, lesson, tree):
     return result
 
 
+def check_git_env():
+    return {
+        **os.environ,
+        "GIT_NO_LAZY_FETCH": "1",
+        "GIT_ALLOW_PROTOCOL": "none",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+
+
 def changed_files(tree, base):
     require(not base.startswith("-"), "check --diff needs a revision, not an option")
     git = ["git", "-c", "core.fsmonitor=false"]
-    listed = [subprocess.run(git + command, cwd=tree, capture_output=True, text=True)
+    env = check_git_env()
+    listed = [subprocess.run(git + command, cwd=tree, capture_output=True, text=True, env=env)
               for command in (["diff", "--name-only", "--relative", "-z", "--no-ext-diff", "--diff-filter=d", base, "--"],
                               ["ls-files", "-z", "--others", "--exclude-standard"])]
     require(all(run.returncode == 0 for run in listed), f"check --diff cannot list the files changed since {base}")
@@ -2381,18 +2392,18 @@ def changed_files(tree, base):
 def staged_files(tree):
     git = ["git", "-c", "core.fsmonitor=false"]
     listed = subprocess.run(git + ["diff", "--cached", "--name-only", "--relative", "-z", "--no-ext-diff", "--diff-filter=d", "--"],
-                            cwd=tree, capture_output=True, text=True)
+                            cwd=tree, capture_output=True, text=True, env=check_git_env())
     require(listed.returncode == 0, "check --staged cannot list staged files")
     return {path for path in listed.stdout.split("\0") if path}
 
 
 def copy_staged_files(tree, destination, paths=None):
     git = ["git", "-c", "core.fsmonitor=false"]
-    prefix_run = subprocess.run(git + ["rev-parse", "--show-prefix"], cwd=tree, capture_output=True, text=True)
+    env = check_git_env()
+    prefix_run = subprocess.run(git + ["rev-parse", "--show-prefix"], cwd=tree, capture_output=True, text=True, env=env)
     prefix = prefix_run.stdout.strip() if prefix_run.returncode == 0 else ""
-    index_run = subprocess.run(git + ["ls-files", "-s", "-z"], cwd=tree, capture_output=True, text=True)
-    if index_run.returncode != 0:
-        return
+    index_run = subprocess.run(git + ["ls-files", "-s", "-z"], cwd=tree, capture_output=True, text=True, env=env)
+    require(index_run.returncode == 0, "check --staged cannot list staged files")
     regular = set()
     for entry in index_run.stdout.split("\0"):
         if not entry or "\t" not in entry:
@@ -2402,11 +2413,11 @@ def copy_staged_files(tree, destination, paths=None):
             regular.add(rel)
     selected = regular if paths is None else (regular & set(paths))
     for rel in sorted(selected):
-        blob = subprocess.run(git + ["show", f":{prefix}{rel}"], cwd=tree, capture_output=True)
-        if blob.returncode == 0:
-            target = destination / rel
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(blob.stdout)
+        blob = subprocess.run(git + ["show", f":{prefix}{rel}"], cwd=tree, capture_output=True, env=env)
+        require(blob.returncode == 0, f"check --staged cannot read staged file {rel}")
+        target = destination / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(blob.stdout)
 
 
 def in_changed(hits, changed):
@@ -2473,11 +2484,14 @@ def check_library(tree=".", base=None, *, staged=False, only=None):
         lessons = [lesson for lesson in lessons if lesson.name in only_set]
     diff_mode = staged or base is not None
     changed = staged_files(tree) if staged else (changed_files(tree, base) if base is not None else None)
-    with ThreadPoolExecutor(len(lessons) or 1) as pool:
-        if not diff_mode:
-            results = list(pool.map(lambda lesson: check_lesson(rerun, lesson, tree), lessons))
-        else:
-            results = check_changed(rerun, lessons, tree, base, pool, staged=staged, changed=changed)
+    if not lessons:
+        results = []
+    else:
+        with ThreadPoolExecutor(len(lessons)) as pool:
+            if not diff_mode:
+                results = list(pool.map(lambda lesson: check_lesson(rerun, lesson, tree), lessons))
+            else:
+                results = check_changed(rerun, lessons, tree, base, pool, staged=staged, changed=changed)
     if builtin_mod is not None:
         results.extend(builtin_mod.run_checks(tree, base=base, staged=staged, changed=changed, only=only_set))
     results.sort(key=lambda result: CHECK_ORDER.index(result["status"]))
@@ -2727,11 +2741,13 @@ class Parser(argparse.ArgumentParser):
 
 def parser():
     result = Parser(description=__doc__, epilog=EXIT_CONTRACT)
+    result.add_argument("-V", "--version", action="version", version=f"coldfix {VERSION}")
     result.add_argument("--store", default=".coldfix", help="private local store (default: .coldfix in the current directory)")
     commands = result.add_subparsers(dest="action", required=True)
     command = commands.add_parser("check", epilog=EXIT_CONTRACT, help="run the library's static portable checks and built-in checks on a directory and list each hit as file:line with its fix")
     command.add_argument("path", nargs="?", default=".", help="tree to scan (default: the current directory)")
     command.add_argument("--json", action="store_true", help="emit the results as JSON")
+    command.add_argument("-v", "--verbose", action="store_true", help="also print PASS and NO_PORTABLE_CHECK lines")
     diff_group = command.add_mutually_exclusive_group()
     diff_group.add_argument("--diff", nargs="?", const="HEAD", metavar="BASE",
                             help="report only hits in files changed since BASE (default: HEAD) and untracked files, plus diff checks")
@@ -2927,6 +2943,8 @@ def main(argv=None):
                 print("coldfix: check incomplete; see each INCOMPLETE lesson's reason", file=sys.stderr)
             if not args.json:
                 for result in value["lessons"]:
+                    if not args.verbose and result["status"] not in ("FAIL", "INCOMPLETE"):
+                        continue
                     print(f"{result['status']}: {result['lesson']} ({result['title']})")
                     for hit in result["hits"] + ([result["reason"]] if "reason" in result else []):
                         print("  " + hit)

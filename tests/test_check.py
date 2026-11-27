@@ -514,10 +514,33 @@ class CheckTests(ScanSafety, ScanCase):
         result = self.check()
         self.assertEqual(result.returncode, 1)
         lines = result.stdout.splitlines()
+        self.assertEqual(len(lines), 4, lines)
         self.assertEqual(lines[:2], ["FAIL: tests-must-test (A test must exercise the failure it names)", "  test_demo.py:8"])
         self.assertTrue(lines[2].startswith("  fix: ") and len(lines[2]) > len("  fix: "), lines[2])
-        self.assertIn("NO_PORTABLE_CHECK: races (Guard read-then-write on shared state)", lines)
+        self.assertFalse(any(line.startswith(("PASS:", "NO_PORTABLE_CHECK:")) for line in lines), lines)
         self.assertRegex(lines[-1], rf"^1 with hits, 0 incomplete, {len(SCANS) - 1} passed, \d+ with no portable check$")
+        for flag in ("-v", "--verbose"):
+            with self.subTest(flag=flag):
+                verbose = self.check(flag)
+                self.assertEqual(verbose.returncode, 1)
+                vlines = verbose.stdout.splitlines()
+                self.assertIn("NO_PORTABLE_CHECK: races (Guard read-then-write on shared state)", vlines)
+                self.assertTrue(any(line.startswith("PASS: ") for line in vlines), vlines)
+                self.assertEqual(vlines[-1], lines[-1])
+
+    def test_clean_check_prints_only_summary_by_default_and_pass_lines_with_verbose(self):
+        self.write({"app.py": "def add(a, b):\n    return a + b\n"})
+        quiet = self.check()
+        self.assertEqual(quiet.returncode, 0, quiet.stderr)
+        lines = quiet.stdout.splitlines()
+        self.assertEqual(len(lines), 1, lines)
+        self.assertRegex(lines[0], rf"^0 with hits, 0 incomplete, {len(SCANS)} passed, \d+ with no portable check$")
+        verbose = self.check("-v")
+        self.assertEqual(verbose.returncode, 0, verbose.stderr)
+        vlines = verbose.stdout.splitlines()
+        self.assertGreater(len(vlines), len(SCANS))
+        self.assertTrue(any(line.startswith("PASS: tests-must-test ") for line in vlines), vlines)
+        self.assertEqual(vlines[-1], lines[0])
 
     def test_check_scans_the_named_path_and_prints_the_scan_fix(self):
         self.write({"other/tests/check_flags.py": "import unittest\n\n\nclass T(unittest.TestCase):\n"

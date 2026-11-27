@@ -647,7 +647,8 @@ def untracked(row):
 def track(lesson, row, now, issues, repositories):
     if tracked(row):
         number, repo = str(row["issue"]), row["issue_repo"]
-        if repo.casefold() == "tayhcode/coldfix-private" and issues.casefold() == "coldstack-dev/coldfix-private":
+        transferred_from = os.environ.get("COLDFIX_ISSUES_FROM", "").strip()
+        if transferred_from and issues and repo.casefold() == transferred_from.casefold():
             repo = issues
             row = dict(row, issue_repo=repo)
         if lesson is None or row["state"] in SETTLED:

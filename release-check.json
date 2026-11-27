@@ -20,7 +20,6 @@
   "speed/run-specs.sh",
   "speed/weekly.py",
   "systemd",
-  "AGENTS.md",
   "STATE.md",
   "coldbox.toml",
   "stats_page.py",
@@ -48,7 +47,7 @@
  "quickstart": [
   {
    "file": "README.md",
-   "line": 57,
+   "line": 39,
    "argv": [
     "python3",
     "-m",
@@ -59,7 +58,7 @@
   },
   {
    "file": "README.md",
-   "line": 58,
+   "line": 40,
    "argv": [
     "coldfix",
     "--help"
@@ -2684,7 +2683,7 @@
    "kind": "export-path-review",
    "path": "public-export.txt",
    "reason": "Public file list of this export; the layout, environment-literal and packaging tests read it at the export root.",
-   "source_sha256": "8be5037fd96a52862d53ff241a584b49de282c4cea19a431627e3af8ad55f42a"
+   "source_sha256": "178a0fdad9365f5b15a1d5300162ffc22ac3b064baa4ec619d856ecda3cd52d7"
   },
   {
    "scope": "tree",

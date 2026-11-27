@@ -43,6 +43,15 @@ TREE_CHECK_IDS = tuple(name for name, meta in CHECKS.items() if not meta["diff_o
 # Shared safe filesystem and git helpers (never follow symlinks, never exec)
 # ---------------------------------------------------------------------------
 
+def _git_env() -> dict[str, str]:
+    return {
+        **os.environ,
+        "GIT_NO_LAZY_FETCH": "1",
+        "GIT_ALLOW_PROTOCOL": "none",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+
+
 def _git(tree: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", "-c", "core.fsmonitor=false", *args],
@@ -50,6 +59,7 @@ def _git(tree: Path, *args: str) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
         errors="replace",
+        env=_git_env(),
     )
 
 
@@ -108,6 +118,7 @@ def _git_bytes(tree: Path, *args: str) -> subprocess.CompletedProcess[bytes]:
         ["git", "-c", "core.fsmonitor=false", *args],
         cwd=tree,
         capture_output=True,
+        env=_git_env(),
     )
 
 
@@ -118,17 +129,21 @@ def _git_prefix(tree: Path) -> str:
     return res.stdout.strip()
 
 
+class StagedReadError(RuntimeError):
+    pass
+
+
 def _list_staged_regular_files(tree: Path) -> set[str]:
     res = _git(tree, "ls-files", "-s", "-z")
     if res.returncode != 0:
-        return set()
+        detail = res.stderr.strip() or f"git ls-files exited {res.returncode}"
+        raise StagedReadError(f"cannot list staged files: {detail}")
     found: set[str] = set()
     for entry in res.stdout.split("\0"):
         if not entry or "\t" not in entry:
             continue
         meta, rel = entry.split("\t", 1)
         mode = meta.split(" ", 1)[0]
-        # Regular files only: skip symlinks (120000) and submodules (160000).
         if mode in ("100644", "100755") and rel and not rel.startswith("/"):
             found.add(rel)
     return found
@@ -141,7 +156,8 @@ def _read_staged_text_safe(tree: Path, rel_path: str, *, prefix: str, staged_reg
     spec = f":{prefix}{norm}"
     res = _git_bytes(tree, "show", spec)
     if res.returncode != 0:
-        return None
+        detail = res.stderr.decode("utf-8", "replace").strip() or f"git show exited {res.returncode}"
+        raise StagedReadError(f"cannot read staged file {norm}: {detail}")
     raw = res.stdout
     if b"\x00" in raw:
         return None
@@ -1195,6 +1211,8 @@ def check_agents_md_drift(
                         seen_on_line.add((line_no, msg))
                         hits.append(f"{instr_path}:{line_no}: {msg}")
         return _format_result("agents-md-drift", hits)
+    except StagedReadError as error:
+        return _format_result("agents-md-drift", [], reason=str(error))
     except Exception as error:
         return _format_result("agents-md-drift", [], reason=repr(error))
 
@@ -1568,6 +1586,8 @@ def check_agent_config_secrets(
             for path, line_no, reason in raw_hits
         ]
         return _format_result("agent-config-secrets", hits)
+    except StagedReadError as error:
+        return _format_result("agent-config-secrets", [], reason=str(error))
     except Exception as error:
         return _format_result("agent-config-secrets", [], reason=repr(error))
 

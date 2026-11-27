@@ -687,6 +687,125 @@ class CheckCliOptionsTests(BuiltinCheckCase):
         self.assertEqual(rows["anti-test-weakening"]["status"], "FAIL")
         self.assertIn("removed 1 assertion(s) without replacement", rows["anti-test-weakening"]["hits"][0])
 
+    def test_git_invocations_disable_lazy_fetch_in_partial_clones(self):
+        import coldfix as c
+
+        calls = []
+
+        def fake_run(cmd, *args, **kwargs):
+            calls.append((cmd, kwargs.get("env")))
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        expected = {
+            "GIT_NO_LAZY_FETCH": "1",
+            "GIT_ALLOW_PROTOCOL": "none",
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+
+        with mock.patch.object(builtin_checks.subprocess, "run", side_effect=fake_run):
+            result = builtin_checks.check_anti_test_weakening(self.tree, base="HEAD")
+        self.assertEqual(result["status"], "PASS")
+        self.assertTrue(calls)
+        for cmd, env in calls:
+            self.assertEqual(cmd[0], "git")
+            self.assertIsNotNone(env)
+            for key, value in expected.items():
+                self.assertEqual(env.get(key), value)
+
+        calls.clear()
+        with mock.patch.object(builtin_checks.subprocess, "run", side_effect=fake_run):
+            builtin_checks._git_bytes(self.tree, "show", ":README.md")
+        self.assertEqual(len(calls), 1)
+        for key, value in expected.items():
+            self.assertEqual(calls[0][1].get(key), value)
+
+        calls.clear()
+        with mock.patch.object(c.subprocess, "run", side_effect=fake_run):
+            c.changed_files(self.tree, "HEAD")
+            c.staged_files(self.tree)
+        self.assertEqual(len(calls), 3)
+        for _, env in calls:
+            self.assertIsNotNone(env)
+            for key, value in expected.items():
+                self.assertEqual(env.get(key), value)
+
+        origin = self.tree.parent / "origin.git"
+        subprocess.run(GIT + ["init", "-q", "--bare", str(origin)], check=True)
+        subprocess.run(GIT + ["config", "uploadpack.allowfilter", "true"], cwd=origin, check=True)
+        seed = self.tree.parent / "seed"
+        seed.mkdir()
+        subprocess.run(GIT + ["init", "-q"], cwd=seed, check=True)
+        (seed / "tests").mkdir()
+        (seed / "tests/test_sample.py").write_text("def test_a():\n    assert 1 == 1\n", encoding="utf-8")
+        subprocess.run(GIT + ["add", "-A"], cwd=seed, check=True)
+        subprocess.run(GIT + ["commit", "-qm", "first"], cwd=seed, check=True)
+        first = subprocess.check_output(GIT + ["rev-parse", "HEAD"], cwd=seed, text=True).strip()
+        (seed / "tests/test_sample.py").write_text("def test_a():\n    assert 2 == 2\n", encoding="utf-8")
+        subprocess.run(GIT + ["commit", "-qam", "second"], cwd=seed, check=True)
+        subprocess.run(GIT + ["remote", "add", "origin", str(origin)], cwd=seed, check=True)
+        subprocess.run(GIT + ["push", "-q", "origin", "HEAD"], cwd=seed, check=True)
+        partial = self.tree.parent / "partial"
+        subprocess.run(
+            GIT + ["clone", "-q", "--filter=blob:none", origin.as_uri(), str(partial)],
+            check=True,
+        )
+        blocked = builtin_checks._git(partial, "diff", first, "--")
+        self.assertNotEqual(blocked.returncode, 0)
+        self.assertTrue(
+            "not allowed" in blocked.stderr or "lazy fetching disabled" in blocked.stderr,
+            blocked.stderr,
+        )
+        fetch_blocked = builtin_checks._git(partial, "fetch", "origin")
+        self.assertNotEqual(fetch_blocked.returncode, 0)
+        self.assertIn("not allowed", fetch_blocked.stderr)
+        check_result = builtin_checks.check_anti_test_weakening(partial, base=first)
+        self.assertEqual(check_result["status"], "INCOMPLETE")
+
+    def test_staged_secret_scan_fails_closed_when_partial_clone_blob_is_uncached(self):
+        origin = self.tree.parent / "secrets-origin.git"
+        subprocess.run(GIT + ["init", "-q", "--bare", str(origin)], check=True)
+        subprocess.run(GIT + ["config", "uploadpack.allowfilter", "true"], cwd=origin, check=True)
+        seed = self.tree.parent / "secrets-seed"
+        seed.mkdir()
+        subprocess.run(GIT + ["init", "-q"], cwd=seed, check=True)
+        (seed / ".codex").mkdir()
+        token = "sk-" + "proj-" + "A1b2" * 6
+        (seed / ".codex/settings.json").write_text(json.dumps({"api_key": token}) + "\n", encoding="utf-8")
+        subprocess.run(GIT + ["add", "-A"], cwd=seed, check=True)
+        subprocess.run(GIT + ["commit", "-qm", "add codex config"], cwd=seed, check=True)
+        old_blob = subprocess.check_output(
+            GIT + ["rev-parse", "HEAD:.codex/settings.json"], cwd=seed, text=True
+        ).strip()
+        (seed / ".codex/settings.json").unlink()
+        (seed / "README.md").write_text("clean\n", encoding="utf-8")
+        subprocess.run(GIT + ["add", "-A"], cwd=seed, check=True)
+        subprocess.run(GIT + ["commit", "-qm", "remove codex config"], cwd=seed, check=True)
+        subprocess.run(GIT + ["remote", "add", "origin", str(origin)], cwd=seed, check=True)
+        subprocess.run(GIT + ["push", "-q", "origin", "HEAD"], cwd=seed, check=True)
+
+        partial = self.tree.parent / "secrets-partial"
+        subprocess.run(
+            GIT + ["clone", "-q", "--filter=blob:none", origin.as_uri(), str(partial)],
+            check=True,
+        )
+        subprocess.run(
+            GIT + ["update-index", "--add", "--cacheinfo", f"100644,{old_blob},.codex/settings.json"],
+            cwd=partial,
+            check=True,
+        )
+        done = subprocess.run(
+            [sys.executable, str(CLI), "check", "--staged", "--only", "agent-config-secrets", "--json"],
+            cwd=partial,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
+        payload = json.loads(done.stdout)
+        rows = {row["lesson"]: row for row in payload["lessons"]}
+        self.assertEqual(rows["agent-config-secrets"]["status"], "INCOMPLETE")
+        self.assertIn(".codex/settings.json", rows["agent-config-secrets"]["reason"])
+
 
 if __name__ == "__main__":
     unittest.main()

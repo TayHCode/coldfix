@@ -1,53 +1,35 @@
 # Coldfix
 
-Coldfix turns the mistakes coding agents repeat into rules backed by a check you can rerun.
+Coldfix is for developers and teams using coding agents (Claude Code, Codex, Cursor) who want to
+catch recurring agent mistakes automatically and turn proven fixes into checks you can rerun.
 
-It records failures (a failing command and its error), groups exact repeats, and helps you author a
-rule plus a check command for a recurring group. A lesson is only *proven* when its check fails on
-the commit with the mistake and passes on the commit with the fix. Proven lessons can be exported as
-Markdown rule fragments, and optionally delivered to a [Coldlocker](https://github.com/TayHCode/coldlocker)
-rules repository.
+```text
+$ coldfix check
+FAIL: tests-must-test (A test must exercise the failure it names)
+  test_demo.py:8
+  fix: Make the test feed the exact failure it names, assert specific values, avoid racing deadlines, keep its imports, and put it where the runner collects it.
+1 with hits, 0 incomplete, 26 passed, 5 with no portable check
+```
 
-Coldfix never runs a captured command. It runs an authored check only when you explicitly ask it to replay
-that check against two Git revisions.
+No telemetry. Nothing leaves your machine by default. Optional `COLDFIX_JUDGE=jev` with `JEV_API_KEY` sends transcript text to `api.typesafe.ai`.
 
-## Requirements
-
-- Python 3.10 or later. Coldfix uses only the standard library and has no Python dependencies.
-- Git and a POSIX shell (Linux or macOS) for replay and for the lesson commands, which use POSIX file locking.
-- Linux with bubblewrap (`bwrap`) for sandboxed replay (`admit`, `learn` and the CI, review and witness replays)
-  and for the test suite. See [Replay sandbox](#replay-sandbox).
-- Python's `venv` module (Debian and Ubuntu package `python3-venv`) for CI replays whose workflow runs
-  `pip install`, and for the test suite.
-- Optional: `COLDFIX_FLEET_CLI`, the name of a fleet command (letters, digits, `-`, `_`) that resolves model roles
-  and labels imported review and verify records. Unset, model-role resolution, review-receipt import and verify-pair import are off.
-- Optional: a drafting model, only for `draft`, `learn` and `learn_daily.py`. They send a group's stored failure
-  evidence and a Git diff to that model. Set `COLDFIX_MODEL_CMD` to any command (split like a shell line) that
-  takes a role (`drafter` or `reviewer`) and a JSON Schema as its two arguments, reads the prompt on stdin, and
-  prints one JSON object matching the schema. Use a different model for `reviewer` than for `drafter`.
-  Calls may run in a temporary working directory, so give the command absolute paths.
-  `learn_daily.py` makes model calls through it in at most one run per UTC day. Without the setting, drafting
-  uses the `claude` CLI on `PATH` with the model role resolved through `COLDFIX_FLEET_CLI`.
-  The transcript pipeline uses the same command when it is set: `transcript_mistakes.py`, `transcript_lessons.py`
-  and the judged-lesson recheck call it with role `judge` (schema `{"score": number from 0 to 1}`, the probability
-  that the question asked is true) in place of Jev, and lesson extraction calls it with role `extractor` in place
-  of the models.yaml `bulk-codex` route. `JEV_API_KEY` and `COLDFIX_FLEET_CLI` are then not needed.
-- Optional: PyYAML (`python3 -m pip install -r requirements-replay.txt`), only for replaying GitHub Actions
-  workflows. Tests that need it are skipped without it.
-- Optional: a Coldlocker checkout and the installed `coldrelease` command, only for automatic delivery (`init` plus `learn`).
+Coldfix records failures, groups exact repeats, and helps you author a rule plus a check command for
+a recurring group. A lesson is only *proven* when its check fails on the commit with the mistake and
+passes on the commit with the fix. Coldfix never runs a captured command; it runs an authored check
+only when you explicitly ask it to replay that check against two Git revisions.
 
 ## Install
 
 Install the `coldfix` command with [pipx](https://pipx.pypa.io/):
 
 ```sh
-git clone https://github.com/TayHCode/coldfix.git
+git clone https://github.com/coldstack-dev/coldfix.git
 cd coldfix
 pipx install .
 pipx ensurepath
 ```
 
-Open a new terminal so `coldfix` is on your `PATH`, then run `coldfix --help`.
+Open a new terminal so `coldfix` is on your `PATH`, then run `coldfix --version` or `coldfix --help`.
 
 Or install it into a virtual environment:
 
@@ -72,7 +54,7 @@ found a problem.
 
 ## Check your repository
 
-`coldfix check` runs the library's static portable checks plus built-in checks (`agents-md-drift` for stale `AGENTS.md`/`CLAUDE.md`/`.cursorrules` paths and commands, `agent-config-secrets` for literal credentials in committed `.claude/settings*.json`, `.codex/*`, and `.cursor/*` files) on the current directory. They only read files: they never run your code, your tests or your README's commands, and never use the network. Each hit names the lesson, the `file:line` and the fix, and the command exits 1 when anything is hit. `coldfix check <path>` scans another tree. `coldfix check --diff [BASE]` reports only hits in files changed since `BASE` (default `HEAD`) and untracked files, plus `anti-test-weakening` on the diff; it scans a copy of those files and rechecks any hit against the whole tree, so a clean change returns in about a second. `coldfix check --staged` scans staged changes, and `--only CHECK` limits a run to named check(s). `coldfix hook` is the agent hook: it reads a hook event on stdin, adds the matching proven facts and always exits 0. The block below makes a repository with a test that unittest never collects; in your own repository, just run `coldfix check`.
+`coldfix check` runs the library's static portable checks plus built-in checks (`agents-md-drift` for stale `AGENTS.md`/`CLAUDE.md`/`.cursorrules` paths and commands, `agent-config-secrets` for literal credentials in committed `.claude/settings*.json`, `.codex/*`, and `.cursor/*` files) on the current directory. They only read files: they never run your code, your tests or your README's commands, and never use the network. By default, `coldfix check` prints only hits (and any incomplete checks) plus a one-line summary; pass `-v`/`--verbose` to list all `PASS` and `NO_PORTABLE_CHECK` lines, or `--json` for machine-readable output. Each hit names the lesson, the `file:line` and the fix, and the command exits 1 when anything is hit. `coldfix check <path>` scans another tree. `coldfix check --diff [BASE]` reports only hits in files changed since `BASE` (default `HEAD`) and untracked files, plus `anti-test-weakening` on the diff; it scans a copy of those files and rechecks any hit against the whole tree, so a clean change returns in about a second. `coldfix check --staged` scans staged changes, and `--only CHECK` limits a run to named check(s). `coldfix hook` is the agent hook: it reads a hook event on stdin, adds the matching proven facts and always exits 0. The block below makes a repository with a test that unittest never collects; in your own repository, just run `coldfix check`.
 
 ```sh
 mkdir demo && cd demo && git init -q
@@ -80,7 +62,7 @@ printf 'import unittest\n\n\nclass DemoTests(unittest.TestCase):\n    pass\n\n\n
 coldfix check || echo "coldfix check exited $?"
 ```
 
-To run it on every pull request, add this workflow. It runs only on Coldbox; the action exits 2 on a GitHub-hosted or other non-Coldbox runner.
+To run `coldfix check` on every pull request in GitHub Actions:
 
 ```yaml
 name: coldfix-check
@@ -89,13 +71,32 @@ permissions:
   contents: read
 jobs:
   check:
-    runs-on: [self-hosted, coldbox]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: TayHCode/coldfix@main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python3 -m pip install git+https://github.com/coldstack-dev/coldfix.git
+      - run: coldfix check
 ```
+
+## Requirements & privacy
+
+No telemetry. Nothing leaves your machine by default. Optional COLDFIX_JUDGE=jev with JEV_API_KEY sends transcript text to api.typesafe.ai.
+
+- Python 3.10 or later. Coldfix uses only the standard library and has no Python dependencies.
+- Git and a POSIX shell (Linux or macOS) for replay and for the lesson commands, which use POSIX file locking.
+- Linux with bubblewrap (`bwrap`) for sandboxed replay (`admit`, `learn` and the CI, review and witness replays)
+  and for the test suite. See [Replay sandbox](#replay-sandbox).
+- Python's `venv` module (Debian and Ubuntu package `python3-venv`) for CI replays whose workflow runs
+  `pip install`, and for the test suite.
+- Optional: PyYAML (`python3 -m pip install -r requirements-replay.txt`), only for replaying GitHub Actions
+  workflows. Tests that need it are skipped without it.
+
+For optional drafting models, fleet CLI routing, transcript judging, and delivery integrations, see [Advanced](#advanced).
 
 ## First run
 
@@ -185,81 +186,6 @@ Plain text, extra output, another failure identifier or a mismatched exit code m
 `reversed` for incidents), the exit code and what was wrong with stdout. A lesson is proven only when
 the check fails with the expected failure before and passes after.
 
-## Set up recurring learning
-
-To opt into recurring learning, run this in the repository you want Coldfix to learn from:
-
-```sh
-coldfix init --yes
-```
-
-`init` runs `doctor` (stopping with its fix if the sandbox cannot run) and saves `.coldfix/config.json` with
-this Git checkout as `repo`. With `--yes` it never prompts: it keeps an existing config and needs a Git checkout
-or `--repo`. Without `--yes`, it asks before replacing an existing config and asks for the repository when you
-run it outside one.
-
-`--yes` then starts the automatic loop. It needs `gh` signed in (`gh auth login`), the
-`claude` or `codex` CLI signed in and on `PATH`, and transcripts in `~/.claude/projects` or `~/.codex/sessions`.
-If one is missing, it names it and installs no wrapper or schedule. Otherwise it writes `.coldfix/model-cmd` (the
-`COLDFIX_MODEL_CMD` wrapper around that CLI), installs a `coldfix-loop` systemd user timer, or a cron entry when
-user systemd is unavailable, that runs `setup` hourly, and runs `setup` once now. Only the owning store can update that schedule. `coldfix status` shows the transcripts analyzed, the CI failures collected and
-the next scheduled run.
-
-To stop recurring learning, run `coldfix --store PATH uninstall` before removing the package.
-Run it in the repository where you ran `install`, or pass `--repo REPO` to remove its managed
-hook and workflows. Existing store evidence, edited hooks and files installed before Coldfix
-recorded hook ownership stay in place. After uninstall, another store can claim the schedule.
-
-Cron keeps up to 64 KiB each in `loop.log`, its rotated copy `loop.log.1`, and
-`loop.log.failure`, which holds the tail of the most recent failed invocation.
-
-## Run the automatic loop
-
-On a fresh Ubuntu machine, after [Install](#install):
-
-1. Install the GitHub CLI and bubblewrap: `sudo apt install gh bubblewrap`. Run `coldfix doctor` and apply
-   the fix it prints, if any (see [Replay sandbox](#replay-sandbox)). This is the `local` backend: replays run
-   in a bubblewrap sandbox on this machine. Inside a container, the container must also allow nested
-   namespaces (for Incus, `security.nesting=true`), or `doctor` reports `Can't mount proc`. To replay somewhere
-   else, such as a VM or any host over SSH, set `COLDFIX_REPLAY_RUNNER` instead
-   ([Configured runner](docs/replay-backends.md#configured-runner)).
-2. Give Coldfix read access to your repositories' Actions runs: `export GH_TOKEN=<token>` (or `gh auth login`),
-   and `export GITHUB_OWNER=<your GitHub user or organization>`.
-3. Set `COLDFIX_MODEL_CMD` to your model command (see [Requirements](#requirements)).
-4. Point the loop at your transcript folder (Claude Code keeps its transcripts in `~/.claude/projects`, Codex in
-   `~/.codex/sessions`) and run its first pass:
-
-```sh
-coldfix setup --owner "$GITHUB_OWNER" --transcripts "$HOME/.claude/projects" --backend local
-```
-
-`--owner` defaults to the `gh` login, and `--transcripts` takes more than one folder.
-
-`setup` checks each prerequisite and names the missing one. It then collects failed `verify` workflow runs from
-the owner's private repositories, scans up to 100 new transcripts (`--limit`) for mistakes a person, test or
-reviewer caught, and prints JSON with the number of `candidates` and the `first_candidate`. Records go to
-`.coldfix/` in the current directory. Run the same command again, for example hourly from cron, to keep the loop
-going: transcripts already scanned are skipped.
-
-## Replayed and judged
-
-Every delivered lesson says which kind of evidence backs it:
-
-- **replayed**: Coldfix ran the lesson's check on the commit with the mistake, where it failed with the
-  expected failure, and on the commit with the fix, where it passed (incidents also fail again with the
-  fix reversed). Exported lesson files hold that replay record. Their `Verification: proven` line, which
-  Coldlocker's import reads, means replayed.
-- **judged**: nothing was executed. A model judge (Jev) scored the mistaken agent message, a rewrite of it
-  that follows the rule, the later corrected message and clean control messages. Transcript lessons in
-  the shared lessons folder say `verification: judged` and store the `judge_model`, `judge_threshold`,
-  `judge_prompt_sha256` (sha256 of `transcript_lessons.JUDGE_PROMPTS`), `judge_controls` and
-  `judge_control_failures`, so they can be judged again under the same judge. The weekly recheck re-judges
-  each one against its stored wrong and corrected messages and reports `passed` or `regression`.
-- **replay record**: a hand-written lesson states `evidence: replay OWNER/REPO@SHA:PATH`, its pinned
-  reproduction record. The weekly recheck checks that the record and every repository the lesson cites still
-  exist, flags any that are gone, and reports a `proposed` lesson as `regression` until it is re-proven or retired
-  (see `docs/operations/reports.md`).
-
 ## Replay sandbox
 
 Sandboxed replay runs each check under bubblewrap with no network, no host environment and only `/usr`,
@@ -320,6 +246,89 @@ Some tests are skipped when an optional tool, such as `shellcheck`, is missing.
   a local I/O failure. Invalid arguments print `coldfix: invalid arguments; see --help` without echoing them.
 - `check --json`, `doctor --json`, and `status --json` print one object with `schema_version: 1` and
   `exit_code`. Usage and runtime errors report the reason on stderr and set `exit_code` to `2`.
+
+## Run the automatic loop
+
+On a fresh Ubuntu machine, after [Install](#install):
+
+1. Install the GitHub CLI and bubblewrap: `sudo apt install gh bubblewrap`. Run `coldfix doctor` and apply
+   the fix it prints, if any (see [Replay sandbox](#replay-sandbox)). This is the `local` backend: replays run
+   in a bubblewrap sandbox on this machine. Inside a container, the container must also allow nested
+   namespaces (for Incus, `security.nesting=true`), or `doctor` reports `Can't mount proc`. To replay somewhere
+   else, such as a VM or any host over SSH, set `COLDFIX_REPLAY_RUNNER` instead
+   ([Configured runner](docs/replay-backends.md#configured-runner)).
+2. Give Coldfix read access to your repositories' Actions runs: `export GH_TOKEN=<token>` (or `gh auth login`),
+   and `export GITHUB_OWNER=<your GitHub user or organization>`.
+3. Set `COLDFIX_MODEL_CMD` to your model command (see [Advanced](#advanced)).
+4. Point the loop at your transcript folder (Claude Code keeps its transcripts in `~/.claude/projects`, Codex in
+   `~/.codex/sessions`) and run its first pass:
+
+```sh
+coldfix setup --owner "$GITHUB_OWNER" --transcripts "$HOME/.claude/projects" --backend local
+```
+
+`--owner` defaults to the `gh` login, and `--transcripts` takes more than one folder.
+
+`setup` checks each prerequisite and names the missing one. It then collects failed `verify` workflow runs from
+the owner's private repositories, scans up to 100 new transcripts (`--limit`) for mistakes a person, test or
+reviewer caught, and prints JSON with the number of `candidates` and the `first_candidate`. Records go to
+`.coldfix/` in the current directory. Run the same command again, for example hourly from cron, to keep the loop
+going: transcripts already scanned are skipped.
+
+## Advanced
+
+### Recurring learning (`init --yes`)
+
+To opt into recurring learning, run this in the repository you want Coldfix to learn from:
+
+```sh
+coldfix init --yes
+```
+
+`init` runs `doctor` (stopping with its fix if the sandbox cannot run) and saves `.coldfix/config.json` with
+this Git checkout as `repo`. With `--yes` it never prompts: it keeps an existing config and needs a Git checkout
+or `--repo`. Without `--yes`, it asks before replacing an existing config and asks for the repository when you
+run it outside one.
+
+`--yes` then starts the automatic loop. It needs `gh` signed in (`gh auth login`), the
+`claude` or `codex` CLI signed in and on `PATH`, and transcripts in `~/.claude/projects` or `~/.codex/sessions`.
+If one is missing, it names it and installs no wrapper or schedule. Otherwise it writes `.coldfix/model-cmd` (the
+`COLDFIX_MODEL_CMD` wrapper around that CLI), installs a `coldfix-loop` systemd user timer, or a cron entry when
+user systemd is unavailable, that runs `setup` hourly, and runs `setup` once now. Only the owning store can update that schedule. `coldfix status` shows the transcripts analyzed, the CI failures collected and
+the next scheduled run.
+
+To stop recurring learning, run `coldfix --store PATH uninstall` before removing the package.
+Run it in the repository where you ran `install`, or pass `--repo REPO` to remove its managed
+hook and workflows. Existing store evidence, edited hooks and files installed before Coldfix
+recorded hook ownership stay in place. After uninstall, another store can claim the schedule.
+
+Cron keeps up to 64 KiB each in `loop.log`, its rotated copy `loop.log.1`, and
+`loop.log.failure`, which holds the tail of the most recent failed invocation.
+
+### Optional model, Coldlocker, Coldbox, and Jev integrations
+
+- **Coldlocker delivery:** proven lessons can be exported as Markdown rule fragments and optionally delivered to a [Coldlocker](https://github.com/coldstack-dev/coldlocker) rules repository. Automatic delivery (`init` plus `learn`) uses a Coldlocker checkout and the installed `coldrelease` command.
+- **Coldbox composite action:** the repository's `action.yml` runs `coldfix check` specifically on self-hosted [Coldbox](https://github.com/coldstack-dev/coldbox) runners (`runs-on: [self-hosted, coldbox]`, `uses: coldstack-dev/coldfix@main`) and exits 2 on non-Coldbox runners. For standard GitHub-hosted runners, use the `ubuntu-latest` workflow in [Check your repository](#check-your-repository).
+- **Fleet CLI (`COLDFIX_FLEET_CLI`):** optional name of a fleet command (letters, digits, `-`, `_`) that resolves model roles and labels imported review and verify records. Unset, model-role resolution, review-receipt import and verify-pair import are off.
+- **Drafting & judging model (`COLDFIX_MODEL_CMD`):** optional, only for `draft`, `learn` and `learn_daily.py`. They send a group's stored failure evidence and a Git diff to that model. Set `COLDFIX_MODEL_CMD` to any command (split like a shell line) that takes a role (`drafter` or `reviewer`) and a JSON Schema as its two arguments, reads the prompt on stdin, and prints one JSON object matching the schema. Use a different model for `reviewer` than for `drafter`. Calls may run in a temporary working directory, so give the command absolute paths. `learn_daily.py` makes model calls through it in at most one run per UTC day. Without the setting, drafting uses the `claude` CLI on `PATH` with the model role resolved through `COLDFIX_FLEET_CLI`. The transcript pipeline uses the same command when it is set: `transcript_mistakes.py`, `transcript_lessons.py` and the judged-lesson recheck call it with role `judge` (schema `{"score": number from 0 to 1}`, the probability that the question asked is true) in place of Jev, and lesson extraction calls it with role `extractor` in place of the `bulk-codex` route. `JEV_API_KEY` and `COLDFIX_FLEET_CLI` are then not needed.
+
+### Replayed and judged lessons
+
+Every delivered lesson says which kind of evidence backs it:
+
+- **replayed**: Coldfix ran the lesson's check on the commit with the mistake, where it failed with the
+  expected failure, and on the commit with the fix, where it passed (incidents also fail again with the
+  fix reversed). Exported lesson files hold that replay record. Their `Verification: proven` line, which
+  Coldlocker's import reads, means replayed.
+- **judged**: nothing was executed. When opted in (`COLDFIX_JUDGE=jev` with `JEV_API_KEY`), a model judge (Jev) scores the mistaken agent message, a rewrite of it
+  that follows the rule, the later corrected message and clean control messages. Transcript lessons in
+  the shared lessons folder say `verification: judged` and store the `judge_model`, `judge_threshold`,
+  `judge_prompt_sha256` (sha256 of `transcript_lessons.JUDGE_PROMPTS`), `judge_controls` and
+  `judge_control_failures`, so they can be judged again under the same judge. The weekly recheck re-judges
+  each one against its stored wrong and corrected messages and reports `passed` or `regression`.
+- **replay record**: a hand-written lesson states `evidence: replay OWNER/REPO@SHA:PATH`, its pinned
+  reproduction record. The weekly recheck checks that the record and every repository the lesson cites still
+  exist, flags any that are gone, and reports a `proposed` lesson as `regression` until it is re-proven or retired.
 
 ## Limitations
 

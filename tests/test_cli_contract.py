@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -24,6 +25,15 @@ class CliContractTests(unittest.TestCase):
     def cli(self, *args):
         return subprocess.run([sys.executable, str(CLI), *args], cwd=self.cwd, text=True, capture_output=True,
                               timeout=120)
+
+    def test_version_flag_prints_package_version_and_exits_zero(self):
+        match = re.search(r'^version = "([^"]+)"$', (CLI.parent / "pyproject.toml").read_text(), re.M)
+        self.assertIsNotNone(match)
+        expected = f"coldfix {match.group(1)}\n"
+        for flag in ("--version", "-V"):
+            with self.subTest(flag=flag):
+                done = self.cli(flag)
+                self.assertEqual((done.returncode, done.stdout, done.stderr), (0, expected, ""))
 
     def test_help_states_the_exit_and_json_contract(self):
         for args in (("--help",), ("check", "--help"), ("status", "--help")):
